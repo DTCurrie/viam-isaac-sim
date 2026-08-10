@@ -28,13 +28,24 @@ LOGGER = getLogger("viam-isaac-sim")
 # short name in component config. Paths are relative to the assets root;
 # where isaac 5.0 moved an asset, the 5.0 path is listed first with the 4.x
 # path as a fallback - the first candidate that exists is used.
+_UR_KINEMATICS = "https://raw.githubusercontent.com/viam-modules/universal-robots/main/src/kinematics"
+
 KNOWN_ASSETS: Dict[str, Dict[str, Any]] = {
-    "ur3e": {"usd": ["/Isaac/Robots/UniversalRobots/ur3e/ur3e.usd"]},
-    "ur5e": {"usd": ["/Isaac/Robots/UniversalRobots/ur5e/ur5e.usd"]},
+    "ur3e": {
+        "usd": ["/Isaac/Robots/UniversalRobots/ur3e/ur3e.usd"],
+        "kinematics": f"{_UR_KINEMATICS}/ur3e.json",
+    },
+    "ur5e": {
+        "usd": ["/Isaac/Robots/UniversalRobots/ur5e/ur5e.usd"],
+        "kinematics": f"{_UR_KINEMATICS}/ur5e.json",
+    },
     "ur10": {"usd": ["/Isaac/Robots/UniversalRobots/ur10/ur10.usd"]},
     "ur10e": {"usd": ["/Isaac/Robots/UniversalRobots/ur10e/ur10e.usd"]},
     "ur16e": {"usd": ["/Isaac/Robots/UniversalRobots/ur16e/ur16e.usd"]},
-    "ur20": {"usd": ["/Isaac/Robots/UniversalRobots/ur20/ur20.usd"]},
+    "ur20": {
+        "usd": ["/Isaac/Robots/UniversalRobots/ur20/ur20.usd"],
+        "kinematics": f"{_UR_KINEMATICS}/ur20.json",
+    },
     "franka": {
         "usd": [
             "/Isaac/Robots/FrankaRobotics/FrankaPanda/franka.usd",

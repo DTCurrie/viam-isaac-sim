@@ -120,9 +120,14 @@ convention), and `move_timeout_sec`.
 
 `MoveToJointPositions` / `GetJointPositions` work today. IK and motion
 planning are deliberately left to Viam (the motion service), not Isaac - the
-module's job is just to expose the simulated arm. `GetKinematics` serving the
-arm's kinematics file (so the motion service can plan for it) is on the
-roadmap; until then `MoveToPosition` raises unimplemented.
+module's job is just to expose the simulated arm.
+
+`GetKinematics` works: for `ur3e`/`ur5e`/`ur20` the official viam SVA
+kinematics files are fetched automatically (and cached in the module data
+dir); for anything else set `kinematics_url` to an SVA `.json` or `.urdf`
+(http(s):// or file://). With kinematics served, the motion service can plan
+for the simulated arm. Module-level `MoveToPosition` still raises - use the
+motion service.
 
 ### camera attributes
 
@@ -224,7 +229,7 @@ python3 -m venv .venv
 - [x] RGB cameras
 - [x] differential-drive bases
 - [x] cloud builds / registry publishing (tag a release)
-- [ ] serve kinematics files (`GetKinematics`) so Viam's motion service can do
+- [x] serve kinematics files (`GetKinematics`) so Viam's motion service can do
       IK and planning for simulated arms (all motion stays in Viam, not Isaac)
 - [ ] depth / point clouds from cameras
 - [ ] gripper support

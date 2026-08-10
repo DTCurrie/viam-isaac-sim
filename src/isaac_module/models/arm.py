@@ -10,11 +10,20 @@ Attributes:
   end_effector_prim (string) - prim path whose world pose is reported by
                                GetEndPosition
   move_timeout_sec (float)   - max time to wait for a move (default 30)
+  kinematics_url (string)    - where to fetch the kinematics file served by
+                               GetKinematics (.json = SVA, .urdf = URDF;
+                               file:// URLs work). Known assets with official
+                               viam kinematics (ur3e/ur5e/ur20) fetch them
+                               automatically.
 """
 
 import asyncio
+import hashlib
 import math
+import os
+import tempfile
 import time
+import urllib.request
 from typing import Any, ClassVar, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from typing_extensions import Self
@@ -27,7 +36,7 @@ from viam.resource.types import Model, ModelFamily
 from viam.utils import ValueTypes
 
 from .. import FAMILY, NAMESPACE
-from ..sim_manager import ArmHandle, SimManager
+from ..sim_manager import KNOWN_ASSETS, ArmHandle, SimManager
 from ..spatial import quat_to_ov
 from .utils import apply_frame_to_attrs, get_attrs, validate_sim_component
 
@@ -42,6 +51,7 @@ class IsaacArm(Arm, EasyResource):
         self._handle: Optional[ArmHandle] = None
         self._attrs: Dict[str, Any] = {}
         self._move_timeout = 30.0
+        self._kinematics: Optional[Tuple[KinematicsFileFormat.ValueType, bytes]] = None
 
     @classmethod
     def new(
@@ -119,8 +129,55 @@ class IsaacArm(Arm, EasyResource):
     async def is_moving(self) -> bool:
         return await asyncio.to_thread(self._h().is_moving)
 
+    def _kinematics_url(self) -> Optional[str]:
+        url = self._attrs.get("kinematics_url")
+        if url:
+            return str(url)
+        asset = self._attrs.get("asset")
+        if asset and asset in KNOWN_ASSETS:
+            return KNOWN_ASSETS[asset].get("kinematics")
+        return None
+
+    def _load_kinematics(self) -> Tuple[KinematicsFileFormat.ValueType, bytes]:
+        url = self._kinematics_url()
+        if not url:
+            raise NotImplementedError(
+                f"no kinematics file known for arm {self.name}; set the "
+                '"kinematics_url" attribute (SVA .json or .urdf)'
+            )
+        ext = os.path.splitext(url)[1].lower()
+        fmt = (
+            KinematicsFileFormat.KINEMATICS_FILE_FORMAT_URDF
+            if ext in (".urdf", ".xml", ".xacro")
+            else KinematicsFileFormat.KINEMATICS_FILE_FORMAT_SVA
+        )
+
+        cache_dir = os.environ.get("VIAM_MODULE_DATA") or tempfile.gettempdir()
+        cache = os.path.join(
+            cache_dir,
+            f"kinematics-{hashlib.sha1(url.encode()).hexdigest()[:12]}{ext}",
+        )
+        if os.path.exists(cache):
+            with open(cache, "rb") as f:
+                return fmt, f.read()
+
+        self.logger.info("fetching kinematics for %s from %s", self.name, url)
+        with urllib.request.urlopen(url, timeout=30) as resp:
+            data = resp.read()
+        try:
+            os.makedirs(cache_dir, exist_ok=True)
+            tmp = cache + ".tmp"
+            with open(tmp, "wb") as f:
+                f.write(data)
+            os.replace(tmp, cache)
+        except OSError:
+            pass  # caching is best-effort
+        return fmt, data
+
     async def get_kinematics(self, **kwargs) -> Tuple[KinematicsFileFormat.ValueType, bytes]:
-        raise NotImplementedError("kinematics files are not provided yet")
+        if self._kinematics is None:
+            self._kinematics = await asyncio.to_thread(self._load_kinematics)
+        return self._kinematics
 
     async def get_geometries(self, **kwargs) -> List[Geometry]:
         return []
