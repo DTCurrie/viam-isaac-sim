@@ -29,7 +29,7 @@ from viam.resource.types import Model, ModelFamily
 
 from .. import FAMILY, NAMESPACE
 from ..sim_manager import BaseHandle, SimManager
-from .utils import get_attrs, validate_sim_component
+from .utils import apply_frame_to_attrs, get_attrs, validate_sim_component
 
 
 class IsaacBase(Base, EasyResource):
@@ -59,7 +59,7 @@ class IsaacBase(Base, EasyResource):
     def reconfigure(
         self, config: ComponentConfig, dependencies: Mapping[ResourceName, ResourceBase]
     ) -> None:
-        attrs = get_attrs(config)
+        attrs = apply_frame_to_attrs(config, get_attrs(config))
         self._max_linear = float(attrs.get("max_linear_mps", 0.5))
         self._max_angular = float(attrs.get("max_angular_rps", 2.0))
         self._attrs = attrs

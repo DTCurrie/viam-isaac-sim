@@ -29,7 +29,7 @@ from viam.utils import ValueTypes
 from .. import FAMILY, NAMESPACE
 from ..sim_manager import ArmHandle, SimManager
 from ..spatial import quat_to_ov
-from .utils import get_attrs, validate_sim_component
+from .utils import apply_frame_to_attrs, get_attrs, validate_sim_component
 
 _TOLERANCE_RAD = math.radians(0.5)
 
@@ -60,7 +60,7 @@ class IsaacArm(Arm, EasyResource):
     def reconfigure(
         self, config: ComponentConfig, dependencies: Mapping[ResourceName, ResourceBase]
     ) -> None:
-        attrs = get_attrs(config)
+        attrs = apply_frame_to_attrs(config, get_attrs(config))
         self._move_timeout = float(attrs.get("move_timeout_sec", 30.0))
         self._attrs = attrs
         self._handle = SimManager.get().create_arm(self.name, attrs)

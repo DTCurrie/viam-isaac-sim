@@ -47,19 +47,22 @@ Known assets (usable via the `asset` attribute): `ur3e`, `ur5e`, `ur10`,
       "name": "my-ur20",
       "model": "erh:isaac-sim:arm",
       "type": "arm",
+      "frame": { "parent": "world" },
       "attributes": {
         "world": "sim-world",
-        "asset": "ur20",
-        "position": [0, 0, 0]
+        "asset": "ur20"
       }
     },
     {
       "name": "overhead-cam",
       "model": "erh:isaac-sim:camera",
       "type": "camera",
+      "frame": {
+        "parent": "world",
+        "translation": { "x": 2000, "y": 2000, "z": 2000 }
+      },
       "attributes": {
         "world": "sim-world",
-        "position": [2, 2, 2],
         "target": [0, 0, 0.5],
         "width": 1280,
         "height": 720
@@ -69,10 +72,13 @@ Known assets (usable via the `asset` attribute): `ur3e`, `ur5e`, `ur10`,
       "name": "my-jetbot",
       "model": "erh:isaac-sim:base",
       "type": "base",
+      "frame": {
+        "parent": "world",
+        "translation": { "x": 1000, "y": 0, "z": 100 }
+      },
       "attributes": {
         "world": "sim-world",
-        "asset": "jetbot",
-        "position": [1, 0, 0.1]
+        "asset": "jetbot"
       }
     }
   ]
@@ -82,6 +88,13 @@ Known assets (usable via the `asset` attribute): `ur3e`, `ur5e`, `ur10`,
 Every non-world component must set `"world"` to the world component's name.
 That attribute is also returned as an implicit dependency from each model's
 validate, so viam-server starts the world first - no `depends_on` needed.
+
+Components are **placed with the standard frame config** (translations in mm,
+any orientation representation) - the spawn pose in Isaac and viam's frame
+system then agree, so things like the motion service see components where
+they actually are. The `position` (meters) / `orientation_rpy_deg` attributes
+still work as a fallback when no frame is set; a camera `target` attribute
+overrides orientation to aim at a point.
 
 ### world attributes
 

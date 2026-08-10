@@ -27,7 +27,7 @@ from viam.resource.types import Model, ModelFamily
 
 from .. import FAMILY, NAMESPACE
 from ..sim_manager import CameraHandle, SimManager
-from .utils import get_attrs, validate_sim_component
+from .utils import apply_frame_to_attrs, get_attrs, validate_sim_component
 
 
 class IsaacCamera(Camera, EasyResource):
@@ -56,7 +56,7 @@ class IsaacCamera(Camera, EasyResource):
     def reconfigure(
         self, config: ComponentConfig, dependencies: Mapping[ResourceName, ResourceBase]
     ) -> None:
-        attrs = get_attrs(config)
+        attrs = apply_frame_to_attrs(config, get_attrs(config))
         self._attrs = attrs
         self._handle = SimManager.get().create_camera(self.name, attrs)
 

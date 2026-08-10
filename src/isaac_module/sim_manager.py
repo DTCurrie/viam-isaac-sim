@@ -402,9 +402,12 @@ class SimManager:
             self._isaac.add_reference_to_stage(usd_path=usd, prim_path=prim_path)
 
         position = to_vec3(attrs.get("position"))
-        art = self._isaac.SingleArticulation(
+        kwargs: Dict[str, Any] = dict(
             prim_path=prim_path, name=name, position=list(position)
         )
+        if attrs.get("orientation_wxyz") is not None:
+            kwargs["orientation"] = [float(v) for v in attrs["orientation_wxyz"]]
+        art = self._isaac.SingleArticulation(**kwargs)
         self.world.scene.add(art)
         self.world.reset()
 
@@ -445,12 +448,17 @@ class SimManager:
         cam = self._isaac.Camera(**kwargs)
         cam.initialize()
 
-        # aim at a target point if requested (world axes: +X forward, +Z up)
+        # aim at a target point if requested (world axes: +X forward, +Z up),
+        # else apply a frame-system orientation if one was configured
         if attrs.get("target") is not None:
             from .spatial import look_at_quat
 
             position = to_vec3(attrs.get("position"), default=(3.0, 3.0, 2.5))
             quat = look_at_quat(position, to_vec3(attrs.get("target")))
+            cam.set_world_pose(list(position), list(quat), camera_axes="world")
+        elif attrs.get("orientation_wxyz") is not None:
+            position = to_vec3(attrs.get("position"))
+            quat = tuple(float(v) for v in attrs["orientation_wxyz"])
             cam.set_world_pose(list(position), list(quat), camera_axes="world")
         return IsaacCameraHandle(self, cam)
 
@@ -479,7 +487,7 @@ class SimManager:
         wheel_base = float(attrs.get("wheel_base", meta.get("wheel_base", 0.3)))
         position = to_vec3(attrs.get("position"))
 
-        robot = self._isaac.WheeledRobot(
+        base_kwargs: Dict[str, Any] = dict(
             prim_path=prim_path,
             name=name,
             wheel_dof_names=list(wheel_joints),
@@ -487,6 +495,9 @@ class SimManager:
             usd_path=usd,
             position=list(position),
         )
+        if attrs.get("orientation_wxyz") is not None:
+            base_kwargs["orientation"] = [float(v) for v in attrs["orientation_wxyz"]]
+        robot = self._isaac.WheeledRobot(**base_kwargs)
         self.world.scene.add(robot)
         self.world.reset()
 
