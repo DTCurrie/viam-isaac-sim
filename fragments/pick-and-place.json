@@ -1,0 +1,80 @@
+{
+  "modules": [
+    {
+      "type": "registry",
+      "name": "erh_isaac-sim",
+      "module_id": "erh:isaac-sim",
+      "version": "latest-with-prerelease"
+    }
+  ],
+  "components": [
+    {
+      "name": "sim-world",
+      "namespace": "rdk",
+      "type": "generic",
+      "model": "erh:isaac-sim:world",
+      "attributes": {
+        "headless": true,
+        "livestream": true,
+        "props": [
+          {
+            "name": "pick_cube",
+            "type": "cube",
+            "position": [0.7, 0.25, 0.03],
+            "size": 0.06,
+            "color": [0.9, 0.1, 0.1]
+          },
+          {
+            "name": "place_pad",
+            "type": "cube",
+            "fixed": true,
+            "position": [0.7, -0.35, 0.005],
+            "size": 0.2,
+            "scale": [1, 1, 0.05],
+            "color": [0.1, 0.3, 0.9]
+          }
+        ]
+      }
+    },
+    {
+      "name": "pick-arm",
+      "namespace": "rdk",
+      "type": "arm",
+      "model": "erh:isaac-sim:arm",
+      "frame": { "parent": "world" },
+      "attributes": {
+        "world": "sim-world",
+        "asset": "ur20"
+      }
+    },
+    {
+      "name": "scene-cam",
+      "namespace": "rdk",
+      "type": "camera",
+      "model": "erh:isaac-sim:camera",
+      "frame": {
+        "parent": "world",
+        "translation": { "x": 2200, "y": 2200, "z": 2000 }
+      },
+      "attributes": {
+        "world": "sim-world",
+        "target": [0.6, 0, 0.2],
+        "width": 1280,
+        "height": 720
+      }
+    },
+    {
+      "name": "wrist-cam",
+      "namespace": "rdk",
+      "type": "camera",
+      "model": "erh:isaac-sim:camera",
+      "attributes": {
+        "world": "sim-world",
+        "parent_prim": "/World/pick_arm/wrist_3_link",
+        "local_position": [0, 0, 0.06],
+        "width": 640,
+        "height": 480
+      }
+    }
+  ]
+}

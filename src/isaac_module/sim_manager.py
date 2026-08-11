@@ -75,6 +75,11 @@ class SimConfig:
     boot_timeout: float = 300.0
     # IP the livestream advertises to clients; auto-detected if empty
     livestream_public_ip: str = ""
+    # props to spawn into the scene at boot; each entry:
+    #   {"type": "cube"|"usd", "name": ..., "position": [x,y,z] (m),
+    #    "size": edge_m, "scale": [sx,sy,sz], "color": [r,g,b] 0-1,
+    #    "fixed": bool, "usd_path": ...}
+    props: List[Dict[str, Any]] = field(default_factory=list)
     # kit console verbosity (verbose/info/warning/error). Kit prints thousands
     # of lines at info, and viam-server records the module's stderr as
     # error-level logs, so default to warning.
@@ -264,8 +269,53 @@ class SimManager:
         )
         if not cfg.usd_stage:
             self.world.scene.add_default_ground_plane()
+        for prop in cfg.props:
+            try:
+                self._spawn_prop(prop)
+            except Exception:
+                LOGGER.exception("failed to spawn prop %s", prop.get("name"))
         self.world.reset()
         LOGGER.info("isaac sim world ready")
+
+    def _spawn_prop(self, prop: Dict[str, Any]) -> None:
+        """Add a configured prop to the scene (runs on the sim thread,
+        before the initial world.reset)."""
+        import numpy as np
+
+        from .spatial import to_vec3
+
+        if not prop.get("name"):
+            raise ValueError(f"every prop needs a name: {prop}")
+        name = _prim_name(str(prop["name"]))
+        prim_path = f"/World/{name}"
+        position = list(to_vec3(prop.get("position")))
+        kind = str(prop.get("type", "cube"))
+
+        if kind == "usd":
+            usd_path = prop.get("usd_path")
+            if not usd_path:
+                raise ValueError(f"prop {name}: type 'usd' needs usd_path")
+            if self._usd_exists(usd_path) is False:
+                raise ValueError(f"prop {name}: usd not found: {usd_path}")
+            self._isaac.add_reference_to_stage(usd_path=usd_path, prim_path=prim_path)
+            self._isaac.SingleXFormPrim(prim_path).set_world_pose(position=position)
+            return
+
+        if kind != "cube":
+            raise ValueError(f"prop {name}: unknown type {kind!r} (cube or usd)")
+
+        kwargs: Dict[str, Any] = dict(
+            prim_path=prim_path,
+            name=name,
+            position=np.array(position),
+            size=float(prop.get("size", 0.05)),
+        )
+        if prop.get("scale") is not None:
+            kwargs["scale"] = np.array([float(v) for v in prop["scale"]])
+        if prop.get("color") is not None:
+            kwargs["color"] = np.array([float(v) for v in prop["color"]])
+        cls = self._isaac.FixedCuboid if prop.get("fixed") else self._isaac.DynamicCuboid
+        self.world.scene.add(cls(**kwargs))
 
     def _require_booted(self) -> None:
         if not self._booted.is_set():
@@ -439,9 +489,16 @@ class SimManager:
         return self._cached_handle("camera", name, attrs, factory)
 
     def _create_camera_isaac(self, name: str, attrs: Dict[str, Any]) -> "IsaacCameraHandle":
+        import math
+
         from .spatial import quat_from_euler_deg, to_vec3
 
-        prim_path = attrs.get("prim_path") or f"/World/{_prim_name(name)}"
+        parent = attrs.get("parent_prim")
+        if parent:
+            self._require_prim(parent)
+            prim_path = f"{parent.rstrip('/')}/{_prim_name(name)}"
+        else:
+            prim_path = attrs.get("prim_path") or f"/World/{_prim_name(name)}"
         width = int(attrs.get("width", 640))
         height = int(attrs.get("height", 480))
 
@@ -459,9 +516,18 @@ class SimManager:
         cam = self._isaac.Camera(**kwargs)
         cam.initialize()
 
-        # aim at a target point if requested (world axes: +X forward, +Z up),
-        # else apply a frame-system orientation if one was configured
-        if attrs.get("target") is not None:
+        if parent:
+            # camera rides a (possibly moving) link; pose is local to it.
+            # default: small standoff along the link, looking out the +Z
+            # (tool) axis - 180deg about X flips the usd camera's -Z forward.
+            local_pos = to_vec3(attrs.get("local_position"), default=(0.0, 0.0, 0.05))
+            r, p, y = to_vec3(
+                attrs.get("local_orientation_rpy_deg"), default=(180.0, 0.0, 0.0)
+            )
+            quat = quat_from_euler_deg(r, p, y)
+            cam.set_local_pose(list(local_pos), list(quat), camera_axes="usd")
+        elif attrs.get("target") is not None:
+            # aim at a target point (world axes: +X forward, +Z up)
             from .spatial import look_at_quat
 
             position = to_vec3(attrs.get("position"), default=(3.0, 3.0, 2.5))
@@ -471,7 +537,34 @@ class SimManager:
             position = to_vec3(attrs.get("position"))
             quat = tuple(float(v) for v in attrs["orientation_wxyz"])
             cam.set_world_pose(list(position), list(quat), camera_axes="world")
+
+        # newly created cameras default to a 70 degree horizontal FOV - the
+        # usd default lens is ~24 degrees, which reads as "zoomed way in".
+        # computed via the aperture so usd unit conventions cancel out.
+        if not attrs.get("prim_path"):
+            fov = float(attrs.get("fov_deg", 70.0))
+            aperture = cam.get_horizontal_aperture()
+            cam.set_focal_length(aperture / (2.0 * math.tan(math.radians(fov) / 2.0)))
+        elif attrs.get("fov_deg"):
+            fov = float(attrs["fov_deg"])
+            aperture = cam.get_horizontal_aperture()
+            cam.set_focal_length(aperture / (2.0 * math.tan(math.radians(fov) / 2.0)))
         return IsaacCameraHandle(self, cam)
+
+    def _require_prim(self, prim_path: str) -> None:
+        """Raise a helpful error if prim_path doesn't exist in the stage."""
+        get_prim = getattr(self._isaac, "get_prim_at_path", None)
+        if get_prim is None:
+            return
+        prim = get_prim(prim_path)
+        if prim is None or not prim.IsValid():
+            parent_path = prim_path.rsplit("/", 1)[0] or "/"
+            hint = ""
+            parent = get_prim(parent_path)
+            if parent is not None and parent.IsValid():
+                children = [c.GetName() for c in parent.GetChildren()]
+                hint = f"; children of {parent_path}: {children}"
+            raise ValueError(f"prim not found: {prim_path}{hint}")
 
     def create_base(self, name: str, attrs: Dict[str, Any]) -> "BaseHandle":
         self._require_booted()
@@ -589,6 +682,22 @@ def _import_isaac():
         ns.client = omni.client
     except ImportError:
         ns.client = None
+
+    try:
+        from isaacsim.core.api.objects import DynamicCuboid, FixedCuboid
+    except ImportError:
+        from omni.isaac.core.objects import DynamicCuboid, FixedCuboid
+    ns.DynamicCuboid = DynamicCuboid
+    ns.FixedCuboid = FixedCuboid
+
+    try:
+        from isaacsim.core.utils.prims import get_prim_at_path
+    except ImportError:
+        try:
+            from omni.isaac.core.utils.prims import get_prim_at_path
+        except ImportError:
+            get_prim_at_path = None
+    ns.get_prim_at_path = get_prim_at_path
 
     try:
         from isaacsim.sensors.camera import Camera

@@ -9,6 +9,16 @@ Attributes:
   target ([x,y,z] meters)         - aim the camera at this point (easiest way
                                     to make a scene-monitor camera)
   orientation_rpy_deg ([r,p,y])   - explicit orientation instead of target
+  fov_deg (float)                 - horizontal field of view; newly created
+                                    cameras default to 70 (the usd default
+                                    lens is a ~24 degree telephoto)
+  parent_prim (string)            - create the camera as a child of this prim
+                                    so it moves with it, e.g. an arm's wrist
+                                    link for an end-effector camera
+  local_position ([x,y,z] m)      - offset from parent_prim, default [0,0,0.05]
+  local_orientation_rpy_deg       - orientation relative to parent_prim;
+                                    default [180,0,0] = look out the +Z
+                                    (tool) axis
 """
 
 import asyncio

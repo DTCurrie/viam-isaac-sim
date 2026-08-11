@@ -16,6 +16,12 @@ Attributes:
   physics_dt / rendering_dt (float) - sim step sizes, default 1/60
   boot_timeout_sec (float)          - how long to wait for kit to boot
   kit_log_level (string)            - kit console verbosity, default "warning"
+  props (list)                      - objects spawned into the scene at boot:
+                                      {"name", "type": "cube"|"usd",
+                                       "position": [x,y,z] meters,
+                                       "size" (m), "scale" [sx,sy,sz],
+                                       "color" [r,g,b] 0-1, "fixed" (bool),
+                                       "usd_path" (for type usd)}
 
 DoCommand:
   {"command": "status"} | {"command": "play"} | {"command": "pause"} |
@@ -74,6 +80,7 @@ class IsaacWorld(Generic, EasyResource):
             boot_timeout=float(attrs.get("boot_timeout_sec", 300.0)),
             kit_log_level=str(attrs.get("kit_log_level", "warning")),
             livestream_public_ip=str(attrs.get("livestream_public_ip", "")),
+            props=[dict(p) for p in attrs.get("props", [])],
         )
         SimManager.get().ensure_booted(cfg)
 

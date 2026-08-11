@@ -141,6 +141,17 @@ one. `width`/`height` default to 640x480.
 `usd_path`/`prim_path` plus `wheel_joints: [left, right]`, `wheel_radius`,
 `wheel_base`. `max_linear_mps` / `max_angular_rps` scale `SetPower`.
 
+## Pick-and-place fragment
+
+The `isaac-sim-pick-and-place` fragment (source in
+`fragments/pick-and-place.json`) is a ready-made scene: a UR20 (`pick-arm`)
+at the origin, a red 6cm cube to pick up, a flat blue pad to place it on, and
+a `scene-cam` watching the workspace. Add the fragment to any machine that
+meets the requirements above and the world spawns everything at boot.
+
+Props are configured on the world with the `props` attribute (cubes or USD
+references, fixed or dynamic) - see the fragment for the shape of it.
+
 ## Viewing the simulator
 
 * **Through Viam (recommended)**: add an `erh:isaac-sim:camera` component with
