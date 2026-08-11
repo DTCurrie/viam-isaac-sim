@@ -100,5 +100,10 @@ class IsaacCamera(Camera, EasyResource):
     async def get_point_cloud(self, **kwargs) -> Tuple[bytes, str]:
         raise NotImplementedError("point clouds are not supported yet")
 
+    async def get_geometries(self, **kwargs):
+        # cameras occupy no space; needed so the motion service can build a
+        # world state when this camera has a frame
+        return []
+
     async def get_properties(self, **kwargs) -> GetPropertiesResponse:
         return GetPropertiesResponse(supports_pcd=False)

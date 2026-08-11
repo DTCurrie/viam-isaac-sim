@@ -115,6 +115,11 @@ class IsaacBase(Base, EasyResource):
     async def is_moving(self) -> bool:
         return await asyncio.to_thread(self._h().is_moving)
 
+    async def get_geometries(self, **kwargs):
+        # needed so the motion service can build a world state when this
+        # base has a frame; not modeling the chassis yet
+        return []
+
     async def get_properties(self, **kwargs) -> Base.Properties:
         wheel_radius = getattr(self._h(), "wheel_radius", 0.05)
         wheel_base = getattr(self._h(), "wheel_base", 0.3)

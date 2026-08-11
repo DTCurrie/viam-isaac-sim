@@ -81,6 +81,15 @@ def test_arm_moves(world):
         assert pose.x == pytest.approx(300.0)
         assert pose.o_z == pytest.approx(1.0)
 
+        # trajectory execution (what the motion service calls)
+        waypoints = [
+            JointPositions(values=[5, -10, 15, 0, 2, -2]),
+            JointPositions(values=[0, 0, 0, 0, 0, 0]),
+        ]
+        await arm.move_through_joint_positions(waypoints)
+        end = await arm.get_joint_positions()
+        assert end.values == pytest.approx([0] * 6, abs=0.5)
+
     asyncio.run(scenario())
 
 

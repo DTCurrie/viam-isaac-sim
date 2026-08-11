@@ -119,6 +119,45 @@ class IsaacArm(Arm, EasyResource):
             f"arm {self.name} did not reach target within {self._move_timeout}s"
         )
 
+    async def move_through_joint_positions(
+        self, positions: Sequence[JointPositions], *args, **kwargs
+    ) -> None:
+        """Execute a trajectory - this is what the motion service calls to run
+        its planned paths. Intermediate waypoints use a loose tolerance so the
+        arm flows through them; the final waypoint settles tight."""
+        handle = self._h()
+        waypoints = list(positions)
+        loose = math.radians(2.0)
+        for i, wp in enumerate(waypoints):
+            targets = [math.radians(v) for v in wp.values]
+            await asyncio.to_thread(handle.set_joint_targets, targets)
+            last = i == len(waypoints) - 1
+            tolerance = _TOLERANCE_RAD if last else loose
+            deadline = time.monotonic() + (self._move_timeout if last else 10.0)
+            current: List[float] = []
+            while time.monotonic() < deadline:
+                current = await asyncio.to_thread(handle.get_joint_positions)
+                if len(current) >= len(targets) and all(
+                    abs(c - t) <= tolerance for c, t in zip(current, targets)
+                ):
+                    break
+                await asyncio.sleep(0.02)
+            else:
+                detail = ", ".join(
+                    f"j{j}: at {math.degrees(c):.1f} want {math.degrees(t):.1f}"
+                    for j, (c, t) in enumerate(zip(current, targets))
+                    if abs(c - t) > tolerance
+                )
+                if last:
+                    raise TimeoutError(
+                        f"arm {self.name} stalled at waypoint {i + 1}/{len(waypoints)} "
+                        f"(stuck joints: {detail})"
+                    )
+                self.logger.warning(
+                    "%s: waypoint %d/%d not reached, continuing (%s)",
+                    self.name, i + 1, len(waypoints), detail,
+                )
+
     async def get_joint_positions(self, **kwargs) -> JointPositions:
         radians = await asyncio.to_thread(self._h().get_joint_positions)
         return JointPositions(values=[math.degrees(r) for r in radians])

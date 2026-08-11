@@ -17,7 +17,10 @@ from viam.logging import getLogger
 from viam.module.module import Module
 
 import isaac_module.models  # noqa: F401 - registers all models
+from isaac_module import sdk_patches
 from isaac_module.sim_manager import SimManager
+
+sdk_patches.apply()
 
 LOGGER = getLogger("viam-isaac-sim.main")
 
