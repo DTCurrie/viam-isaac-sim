@@ -1,17 +1,19 @@
 import math
-from typing import Any, Dict, Optional, Sequence, Tuple
+from collections.abc import Sequence
+from typing import Any
 
 from viam.proto.app.robot import ComponentConfig
 from viam.utils import struct_to_dict
 
+from .. import FAMILY, NAMESPACE
 from ..spatial import Quat, Vec3, ov_to_quat, quat_from_axis_angle, quat_mul
 
 
-def get_attrs(config: ComponentConfig) -> Dict[str, Any]:
+def get_attrs(config: ComponentConfig) -> dict[str, Any]:
     return struct_to_dict(config.attributes)
 
 
-def frame_pose(config: ComponentConfig) -> Tuple[Optional[Vec3], Optional[Quat]]:
+def frame_pose(config: ComponentConfig) -> tuple[Vec3 | None, Quat | None]:
     """Spawn pose from the component's standard frame config: position in
     meters (frame translations are mm) and a (w,x,y,z) quaternion, or None
     for whatever isn't set. The frame system is the preferred way to place
@@ -23,7 +25,7 @@ def frame_pose(config: ComponentConfig) -> Tuple[Optional[Vec3], Optional[Quat]]
     t = frame.translation
     position = (t.x / 1000.0, t.y / 1000.0, t.z / 1000.0)
 
-    quat: Optional[Quat] = None
+    quat: Quat | None = None
     o = frame.orientation
     which = o.WhichOneof("type")
     if which == "quaternion":
@@ -47,7 +49,7 @@ def frame_pose(config: ComponentConfig) -> Tuple[Optional[Vec3], Optional[Quat]]
     return position, quat
 
 
-def apply_frame_to_attrs(config: ComponentConfig, attrs: Dict[str, Any]) -> Dict[str, Any]:
+def apply_frame_to_attrs(config: ComponentConfig, attrs: dict[str, Any]) -> dict[str, Any]:
     """Fold the frame config into the spawn attrs (frame wins over the
     legacy position/orientation attributes)."""
     position, quat = frame_pose(config)
@@ -60,7 +62,7 @@ def apply_frame_to_attrs(config: ComponentConfig, attrs: Dict[str, Any]) -> Dict
 
 def validate_sim_component(
     config: ComponentConfig, needs_source: bool = True
-) -> Tuple[Sequence[str], Sequence[str]]:
+) -> tuple[Sequence[str], Sequence[str]]:
     """Shared validation for arm/camera/base: they must name their world
     component (so viam-server starts it first) and, when they spawn a prim,
     say what to spawn."""
@@ -69,13 +71,19 @@ def validate_sim_component(
     if not world or not isinstance(world, str):
         raise ValueError(
             f'{config.name}: set the "world" attribute to the name of your '
-            "erh:isaac-sim:world component"
+            f"{NAMESPACE}:{FAMILY}:world component"
         )
-    if needs_source and not (
-        attrs.get("asset") or attrs.get("usd_path") or attrs.get("prim_path")
-    ):
+    if needs_source and not (attrs.get("asset") or attrs.get("usd_path") or attrs.get("prim_path")):
         raise ValueError(
             f'{config.name}: set "asset" (e.g. "ur20"), "usd_path", or '
             '"prim_path" (to attach to something already in the stage)'
         )
+    if config.HasField("frame"):
+        parent = config.frame.parent
+        if parent not in ("", "world") and not attrs.get("parent_prim"):
+            raise ValueError(
+                f'{config.name}: frame.parent must be "world" for spawned isaac-sim '
+                f"components in this release (got {parent!r}); to ride another prim "
+                'set "parent_prim"'
+            )
     return [world], []

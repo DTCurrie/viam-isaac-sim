@@ -44,5 +44,5 @@ def apply() -> None:
         if not qualname.startswith(("ArmServiceBase", "UnimplementedArmServiceBase")):
             LOGGER.info("sdk provides MoveThroughJointPositions; not patching")
             return
-    ArmRPCService.MoveThroughJointPositions = _move_through_joint_positions
+    ArmRPCService.MoveThroughJointPositions = _move_through_joint_positions  # type: ignore[method-assign]  # deliberate monkeypatch (see module docstring)
     LOGGER.info("patched ArmRPCService with MoveThroughJointPositions handler")

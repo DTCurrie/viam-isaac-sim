@@ -20,10 +20,10 @@ What it is/does
 
 | Model | Viam API | What it does |
 |---|---|---|
-| `erh:isaac-sim:world` | `generic` | Boots Isaac Sim, opens the USD stage, runs the sim loop. Configure exactly one. |
-| `erh:isaac-sim:arm` | `arm` | Spawns (or attaches to) an articulation - UR arms, Franka, or any USD - and exposes joint control. |
-| `erh:isaac-sim:camera` | `camera` | Creates (or attaches to) a camera prim and serves its RGB frames. |
-| `erh:isaac-sim:base` | `base` | Spawns a differential-drive robot (e.g. jetbot) and drives it. |
+| `dtcurrie:isaac-sim:world` | `generic` | Boots Isaac Sim, opens the USD stage, runs the sim loop. Configure exactly one. |
+| `dtcurrie:isaac-sim:arm` | `arm` | Spawns (or attaches to) an articulation - UR arms, Franka, or any USD - and exposes joint control. |
+| `dtcurrie:isaac-sim:camera` | `camera` | Creates (or attaches to) a camera prim and serves its RGB frames. |
+| `dtcurrie:isaac-sim:base` | `base` | Spawns a differential-drive robot (e.g. jetbot) and drives it. |
 
 Known assets (usable via the `asset` attribute): `ur3e`, `ur5e`, `ur10`,
 `ur10e`, `ur16e`, `ur20`, `franka`, `jetbot`. Anything else can be loaded with
@@ -36,7 +36,7 @@ Known assets (usable via the `asset` attribute): `ur3e`, `ur5e`, `ur10`,
   "components": [
     {
       "name": "sim-world",
-      "model": "erh:isaac-sim:world",
+      "model": "dtcurrie:isaac-sim:world",
       "type": "generic",
       "attributes": {
         "headless": true,
@@ -45,7 +45,7 @@ Known assets (usable via the `asset` attribute): `ur3e`, `ur5e`, `ur10`,
     },
     {
       "name": "my-ur20",
-      "model": "erh:isaac-sim:arm",
+      "model": "dtcurrie:isaac-sim:arm",
       "type": "arm",
       "frame": { "parent": "world" },
       "attributes": {
@@ -55,7 +55,7 @@ Known assets (usable via the `asset` attribute): `ur3e`, `ur5e`, `ur10`,
     },
     {
       "name": "overhead-cam",
-      "model": "erh:isaac-sim:camera",
+      "model": "dtcurrie:isaac-sim:camera",
       "type": "camera",
       "frame": {
         "parent": "world",
@@ -70,7 +70,7 @@ Known assets (usable via the `asset` attribute): `ur3e`, `ur5e`, `ur10`,
     },
     {
       "name": "my-jetbot",
-      "model": "erh:isaac-sim:base",
+      "model": "dtcurrie:isaac-sim:base",
       "type": "base",
       "frame": {
         "parent": "world",
@@ -96,6 +96,13 @@ they actually are. The `position` (meters) / `orientation_rpy_deg` attributes
 still work as a fallback when no frame is set; a camera `target` attribute
 overrides orientation to aim at a point.
 
+**Frames:** a spawned component's `frame.parent` must be `"world"` - the
+spawn path does not resolve an arbitrary frame chain, only the world's own
+origin. The one exception is a component that also sets `parent_prim` (e.g.
+a wrist camera riding an arm link): it may name that arm (or other)
+component as its frame parent instead, since it is attaching to a prim
+inside the sim rather than asking the spawn path to place it.
+
 ### world attributes
 
 | attribute | default | notes |
@@ -103,31 +110,99 @@ overrides orientation to aim at a point.
 | `mock` | `false` | run without Isaac Sim installed (development/testing) |
 | `headless` | `true` | no local GUI window |
 | `livestream` | `true` | WebRTC viewer at `http://<host>:8211/streaming/webrtc-client` |
+| `livestream_public_ip` | _unset_ | IP advertised to streaming clients when the sim machine has multiple interfaces |
 | `usd_stage` | _empty stage + ground plane_ | USD file or omniverse:// URL to open |
 | `physics_dt` / `rendering_dt` | `1/60` | step sizes in seconds |
 | `boot_timeout_sec` | `300` | Isaac Sim can take a while on first boot |
+| `kit_log_level` | `"warning"` | kit console verbosity |
+| `props` | `[]` | objects spawned into the scene at boot; see below |
+
+Each entry in `props` is an object: `name` (string, snake_cased for the prim
+path), `type` (`"cube"` or `"usd"`), `position` ([x,y,z] meters, the prop's
+**centre**), `size` (meters, the cube's base edge length, > 0), `scale`
+([sx,sy,sz], multiplies `size` per axis), `color` ([r,g,b] each in `[0, 1]`),
+`fixed` (bool - static vs. dynamic/physics-driven), and `usd_path` (required
+when `type` is `"usd"`).
+
+`props` validation rules (`ValueError` on config, surfaced as
+`INVALID_ARGUMENT`):
+* names must be unique once snake_cased (the same normalisation used for prim
+  paths)
+* `type` must be `"cube"` or `"usd"`
+* `usd_path` is required when `type` is `"usd"`
+* `position`, `scale`, and `color` must each be 3-number sequences
+* `color` values must be in `[0, 1]`
+* `size` must be a positive number
 
 The world also supports `DoCommand`: `{"command": "status" | "play" | "pause" |
 "reset"}` and `{"command": "add_usd", "usd_path": "...", "prim_path":
 "/World/thing", "position": [x, y, z]}` to drop extra props into the scene.
 
+### Units and conventions
+
+Viam's frame system (component `frame` config, `GetEndPosition`, camera
+`target`, etc.) uses **millimetres and degrees**, per the standard Viam
+convention. The world's `props` attribute, by contrast, is Isaac-native:
+**metres**, and `position` is always the prop's **centre**, not a corner.
+For a cube prop the rendered extent along each axis is `size × scale[axis]`
+(so `size` is a base edge length and `scale` stretches it per axis). Isaac
+Sim is Z-up, matching Viam's frame convention.
+
+Worked example - a table as a `fixed` cube prop:
+
+```json
+{"type": "cube", "fixed": true, "size": 1.0, "scale": [1.2, 0.8, 0.75],
+ "position": [0.60, 0.00, 0.375]}
+```
+
+The table top's height above the world origin is:
+
+```
+z_top = position.z + size * scale.z / 2
+      = 0.375 + 1.0 * 0.75 / 2
+      = 0.75 m
+```
+
+and its top face spans x ∈ [0.00, 1.20], y ∈ [-0.40, +0.40] (the cube is
+centred at `position`, so each face sits `size * scale[axis] / 2` from the
+centre along that axis). Anything you place *on* the table - a block, a
+mount frame - belongs at `z_top + <that thing's own half-height>`, e.g. a
+block of `size` 0.05 sits with its centre at `z_top + 0.025`.
+
 ### arm attributes
 
 `world` (required), one of `asset` / `usd_path` / `prim_path`, plus optional
-`position` ([x,y,z] meters), `end_effector_prim` (prim path whose world pose is
+`position` ([x,y,z] meters), `end_effector_prim` (prim path whose pose is
 reported by `GetEndPosition`, converted to Viam's orientation-vector
-convention), and `move_timeout_sec`.
+convention; defaults to `<arm prim>/wrist_3_link` for UR assets), and
+`move_timeout_sec`.
+
+**`GetEndPosition` reports the end effector's pose in the arm base frame**
+(a breaking change this release - it previously reported world frame). This
+matches how a real arm driver reports its end position, and lets Viam's
+frame system (via the component's `frame` config) compose it into world
+frame itself.
 
 `MoveToJointPositions` / `GetJointPositions` work today. IK and motion
 planning are deliberately left to Viam (the motion service), not Isaac - the
-module's job is just to expose the simulated arm.
+module's job is just to expose the simulated arm. `MoveToPosition` is
+**unimplemented by decision** and returns `UNIMPLEMENTED` - use the motion
+service instead.
+
+`GetGeometries` returns `[]` by decision: rdk derives arm link geometry from
+`GetKinematics` (the SVA already carries the link capsules) and never calls
+`Geometries` for an arm that serves kinematics.
 
 `GetKinematics` works: for `ur3e`/`ur5e`/`ur20` the official viam SVA
 kinematics files are fetched automatically (and cached in the module data
 dir); for anything else set `kinematics_url` to an SVA `.json` or `.urdf`
 (http(s):// or file://). With kinematics served, the motion service can plan
-for the simulated arm. Module-level `MoveToPosition` still raises - use the
-motion service.
+for the simulated arm.
+
+UR assets (`ur3e`/`ur5e`/`ur10`/`ur10e`/`ur16e`/`ur20`) get a built-in
+**base-frame correction** applied at spawn so the arm's frame in Isaac lines
+up with the kinematics Viam's motion service uses - without it the sim and
+Viam's idea of the arm's pose would silently disagree.
 
 ### camera attributes
 
@@ -152,9 +227,70 @@ meets the requirements above and the world spawns everything at boot.
 Props are configured on the world with the `props` attribute (cubes or USD
 references, fixed or dynamic) - see the fragment for the shape of it.
 
+The `isaac-sim-pick-and-place` fragment in the registry is the original
+upstream public one; this fork's fragment ships with P5 - until then use
+`viam module reload-local` (local module) with the JSON in
+`fragments/pick-and-place.json`.
+
+### Table recipe
+
+A table is just a `fixed` cube prop on the world (see "Units and
+conventions" above for how `size`/`scale`/`position` work):
+
+```json
+{
+  "props": [
+    {"name": "table", "type": "cube", "fixed": true, "size": 1.0,
+     "scale": [1.2, 0.8, 0.75], "position": [0.60, 0.00, 0.375]}
+  ]
+}
+```
+
+`props` are visual/physical geometry only - the motion service doesn't see
+them automatically. To make the table an obstacle the motion service plans
+around, also add its box as `frame.geometry` on the world component itself,
+in millimetres and centred on the frame origin (here 1200 × 800 × 740 mm at
+translation (600, 0, 370) - 10 mm below the real 750 mm surface so the arm
+isn't blocked from resting on it):
+
+```json
+{
+  "name": "sim-world",
+  "model": "dtcurrie:isaac-sim:world",
+  "type": "generic",
+  "frame": {
+    "parent": "world",
+    "translation": { "x": 600, "y": 0, "z": 370 },
+    "geometry": { "type": "box", "x": 1200, "y": 800, "z": 740 }
+  },
+  "attributes": { "props": [ /* ... */ ] }
+}
+```
+
+### Arm mount recipe
+
+Mount an arm on the table by frame-placing it at the table's top height,
+inset from the edge:
+
+```json
+{
+  "name": "pick-arm",
+  "model": "dtcurrie:isaac-sim:arm",
+  "type": "arm",
+  "frame": { "parent": "world", "translation": { "x": 150, "y": -250, "z": 750 } },
+  "attributes": { "world": "sim-world", "asset": "ur5e" }
+}
+```
+
+The Isaac articulation root is a fixed joint to the world - no mount joint
+needs authoring. Keep the base at least 70 mm inside the table's edge so its
+collider clears the table. UR assets carry a built-in base-frame correction
+so this frame placement and Viam's kinematics agree with the simulated pose
+(see "arm attributes" above).
+
 ## Viewing the simulator
 
-* **Through Viam (recommended)**: add an `erh:isaac-sim:camera` component with
+* **Through Viam (recommended)**: add an `dtcurrie:isaac-sim:camera` component with
   `position` + `target` (see the example config) and watch it in the Viam app
   like any other camera - control tab, data capture, SDKs, everything works.
 * **Full interactive viewport**: install NVIDIA's
@@ -225,13 +361,20 @@ development.
 
 Set `"mock": true` on the world component and the module runs anywhere python
 does - arms integrate joint targets over time, cameras produce synthetic
-frames, bases accept velocity commands. This is what the test suite uses:
+frames, bases accept velocity commands. This is what the test suite uses.
+
+Set up a dev venv and run the checks with `make`:
 
 ```sh
-python3 -m venv .venv
-.venv/bin/pip install -r requirements.txt pytest
-.venv/bin/python -m pytest tests/
+uv venv --python 3.11 .venv && uv pip install -r requirements-dev.txt
+# or: python3.11 -m venv .venv && .venv/bin/pip install -r requirements-dev.txt
+make fmt-check lint typecheck test
 ```
+
+Tests run under the `pyproject.toml` config (`pythonpath = ["src"]`); the
+`gpu` marker is skipped by default, so `make test` only runs mock-mode tests
+and needs no Isaac Sim install. CI runs the same suite on both Python 3.10
+and 3.11.
 
 ## Status / roadmap
 

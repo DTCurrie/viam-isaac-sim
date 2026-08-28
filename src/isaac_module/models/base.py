@@ -1,7 +1,7 @@
-"""erh:isaac-sim:base - a simulated differential-drive base.
+"""dtcurrie:isaac-sim:base - a simulated differential-drive base.
 
 Attributes:
-  world (string, required)     - name of the erh:isaac-sim:world component
+  world (string, required)     - name of the dtcurrie:isaac-sim:world component
   asset (string)               - known robot, e.g. "jetbot" (brings sensible
                                  wheel defaults)
   usd_path (string)            - explicit robot USD to spawn
@@ -17,7 +17,8 @@ Attributes:
 
 import asyncio
 import math
-from typing import Any, ClassVar, Dict, Mapping, Optional, Sequence, Tuple
+from collections.abc import Mapping, Sequence
+from typing import Any, ClassVar
 
 from typing_extensions import Self
 from viam.components.base import Base
@@ -32,13 +33,13 @@ from ..sim_manager import BaseHandle, SimManager
 from .utils import apply_frame_to_attrs, get_attrs, validate_sim_component
 
 
-class IsaacBase(Base, EasyResource):
+class IsaacBase(Base, EasyResource):  # type: ignore[misc]  # SDK: API is Final on the component, redeclared by EasyResource
     MODEL: ClassVar[Model] = Model(ModelFamily(NAMESPACE, FAMILY), "base")
 
     def __init__(self, name: str) -> None:
         super().__init__(name)
-        self._handle: Optional[BaseHandle] = None
-        self._attrs: Dict[str, Any] = {}
+        self._handle: BaseHandle | None = None
+        self._attrs: dict[str, Any] = {}
         self._max_linear = 0.5
         self._max_angular = 2.0
 
@@ -51,9 +52,7 @@ class IsaacBase(Base, EasyResource):
         return base
 
     @classmethod
-    def validate_config(
-        cls, config: ComponentConfig
-    ) -> Tuple[Sequence[str], Sequence[str]]:
+    def validate_config(cls, config: ComponentConfig) -> tuple[Sequence[str], Sequence[str]]:
         return validate_sim_component(config)
 
     def reconfigure(
@@ -105,9 +104,7 @@ class IsaacBase(Base, EasyResource):
 
     async def set_velocity(self, linear: Vector3, angular: Vector3, **kwargs) -> None:
         # viam: linear mm/s, angular deg/s -> isaac: m/s, rad/s
-        await asyncio.to_thread(
-            self._h().set_velocity, linear.y / 1000.0, math.radians(angular.z)
-        )
+        await asyncio.to_thread(self._h().set_velocity, linear.y / 1000.0, math.radians(angular.z))
 
     async def stop(self, **kwargs) -> None:
         await asyncio.to_thread(self._h().stop)

@@ -146,6 +146,7 @@ fi
 log "installing module python dependencies"
 "$VENV/bin/pip" install -q -r "$MODULE_DIR/requirements.txt" \
     || { log "ERROR: module dependency install failed"; exit 1; }
+"$VENV/bin/pip" check || log "warning: pip check reported conflicts (non-fatal)"
 
 echo "$VENV/bin/python" > "$MARKER"
 log "done - isaac python recorded at $MARKER"

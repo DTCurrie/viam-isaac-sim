@@ -4,7 +4,6 @@ the viam component models against it."""
 
 import asyncio
 import math
-import threading
 
 import pytest
 from viam.proto.app.robot import ComponentConfig
@@ -14,27 +13,13 @@ from viam.utils import dict_to_struct
 from isaac_module.models.arm import IsaacArm
 from isaac_module.models.base import IsaacBase
 from isaac_module.models.camera import IsaacCamera
-from isaac_module.models.world import IsaacWorld
-from isaac_module.sim_manager import SimManager
+
+SETTLE_POLLS = 50
+SETTLE_POLL_S = 0.01
 
 
 def _config(name: str, attrs: dict) -> ComponentConfig:
     return ComponentConfig(name=name, attributes=dict_to_struct(attrs))
-
-
-@pytest.fixture(scope="module")
-def sim():
-    manager = SimManager.get()
-    t = threading.Thread(target=manager.main_loop, daemon=True)
-    t.start()
-    yield manager
-    manager.request_stop()
-    t.join(timeout=5)
-
-
-@pytest.fixture(scope="module")
-def world(sim):
-    return IsaacWorld.new(_config("sim-world", {"mock": True}), {})
 
 
 def test_world_boots_and_status(world):
@@ -54,9 +39,7 @@ def test_validate_requires_source():
 
 
 def test_validate_ok_returns_dependency():
-    deps, _ = IsaacArm.validate_config(
-        _config("a", {"world": "sim-world", "asset": "ur20"})
-    )
+    deps, _ = IsaacArm.validate_config(_config("a", {"world": "sim-world", "asset": "ur20"}))
     assert list(deps) == ["sim-world"]
 
 
@@ -73,10 +56,20 @@ def test_arm_moves(world):
 
         target = JointPositions(values=[10, -20, 30, 0, 5, -5])
         await arm.move_to_joint_positions(target)
+        # move_to_joint_positions returns once within 0.5 deg of the target while the
+        # mock's is_moving() uses a 1e-9 tolerance, so the last few ms of travel can
+        # still read as "moving" (FINDINGS R-7; unified in ARM-12, phase 3). Assert
+        # that the arm settles, bounded, rather than that it is instantly still.
+        for _ in range(SETTLE_POLLS):
+            if not await arm.is_moving():
+                break
+            await asyncio.sleep(SETTLE_POLL_S)
         assert not await arm.is_moving()
         end = await arm.get_joint_positions()
         assert end.values == pytest.approx([10, -20, 30, 0, 5, -5], abs=0.5)
 
+        # the mock's fixed end pose is defined in the arm base frame
+        # (FINDINGS ARM-10), not world - see test_arm_frames.py
         pose = await arm.get_end_position()
         assert pose.x == pytest.approx(300.0)
         assert pose.o_z == pytest.approx(1.0)
@@ -103,8 +96,9 @@ def test_camera_returns_image(world):
         assert img.mime_type == "image/jpeg"
         assert len(img.data) > 100
 
-        from PIL import Image
         from io import BytesIO
+
+        from PIL import Image
 
         decoded = Image.open(BytesIO(img.data))
         assert decoded.size == (320, 240)
@@ -119,9 +113,7 @@ def test_camera_returns_image(world):
 
 
 def test_base_drives(world):
-    base = IsaacBase.new(
-        _config("my-base", {"world": "sim-world", "asset": "jetbot"}), {}
-    )
+    base = IsaacBase.new(_config("my-base", {"world": "sim-world", "asset": "jetbot"}), {})
 
     async def scenario():
         assert not await base.is_moving()

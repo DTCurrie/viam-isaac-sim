@@ -1,7 +1,7 @@
-"""erh:isaac-sim:camera - a simulated RGB camera.
+"""dtcurrie:isaac-sim:camera - a simulated RGB camera.
 
 Attributes:
-  world (string, required)        - name of the erh:isaac-sim:world component
+  world (string, required)        - name of the dtcurrie:isaac-sim:world component
   prim_path (string)              - existing camera prim to attach to, or
                                     where to create one (default /World/<name>)
   width / height (int)            - resolution, default 640x480
@@ -22,14 +22,15 @@ Attributes:
 """
 
 import asyncio
+from collections.abc import Mapping, Sequence
 from io import BytesIO
-from typing import Any, ClassVar, Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, ClassVar
 
 from typing_extensions import Self
 from viam.components.camera import Camera
 from viam.media.video import CameraMimeType, NamedImage, ViamImage
 from viam.proto.app.robot import ComponentConfig
-from viam.proto.common import ResponseMetadata, ResourceName
+from viam.proto.common import ResourceName, ResponseMetadata
 from viam.proto.component.camera import GetPropertiesResponse
 from viam.resource.base import ResourceBase
 from viam.resource.easy_resource import EasyResource
@@ -40,13 +41,13 @@ from ..sim_manager import CameraHandle, SimManager
 from .utils import apply_frame_to_attrs, get_attrs, validate_sim_component
 
 
-class IsaacCamera(Camera, EasyResource):
+class IsaacCamera(Camera, EasyResource):  # type: ignore[misc]  # SDK: API is Final on the component, redeclared by EasyResource
     MODEL: ClassVar[Model] = Model(ModelFamily(NAMESPACE, FAMILY), "camera")
 
     def __init__(self, name: str) -> None:
         super().__init__(name)
-        self._handle: Optional[CameraHandle] = None
-        self._attrs: Dict[str, Any] = {}
+        self._handle: CameraHandle | None = None
+        self._attrs: dict[str, Any] = {}
 
     @classmethod
     def new(
@@ -57,9 +58,7 @@ class IsaacCamera(Camera, EasyResource):
         return cam
 
     @classmethod
-    def validate_config(
-        cls, config: ComponentConfig
-    ) -> Tuple[Sequence[str], Sequence[str]]:
+    def validate_config(cls, config: ComponentConfig) -> tuple[Sequence[str], Sequence[str]]:
         # cameras can always be created fresh, no asset/usd required
         return validate_sim_component(config, needs_source=False)
 
@@ -90,14 +89,12 @@ class IsaacCamera(Camera, EasyResource):
     async def get_image(self, mime_type: str = "", **kwargs) -> ViamImage:
         return await asyncio.to_thread(self._encode, mime_type)
 
-    async def get_images(
-        self, **kwargs
-    ) -> Tuple[List[NamedImage], ResponseMetadata]:
+    async def get_images(self, **kwargs) -> tuple[list[NamedImage], ResponseMetadata]:
         image = await asyncio.to_thread(self._encode, CameraMimeType.JPEG)
         named = NamedImage(name=self.name, data=image.data, mime_type=image.mime_type)
         return [named], ResponseMetadata()
 
-    async def get_point_cloud(self, **kwargs) -> Tuple[bytes, str]:
+    async def get_point_cloud(self, **kwargs) -> tuple[bytes, str]:
         raise NotImplementedError("point clouds are not supported yet")
 
     async def get_geometries(self, **kwargs):

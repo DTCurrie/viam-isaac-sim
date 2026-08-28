@@ -34,10 +34,12 @@ export OMNI_KIT_ACCEPT_EULA=${OMNI_KIT_ACCEPT_EULA:-yes}
 export ACCEPT_EULA=${ACCEPT_EULA:-Y}
 export OMNI_KIT_ALLOW_ROOT=${OMNI_KIT_ALLOW_ROOT:-1}
 
-# One-time dependency install into whichever interpreter we're using.
-if ! "$PY" -c "import viam" >/dev/null 2>&1; then
-    echo "viam-isaac-sim: installing python dependencies..." >&2
-    "$PY" -m pip install -r requirements.txt >&2
-fi
+# Dependency install into whichever interpreter we're using. Idempotent:
+# pip is a no-op when the pins are already satisfied, so we run this on
+# every start rather than gating it behind an "import viam" check (that
+# check would never re-apply a bumped pin on an already-provisioned box).
+echo "viam-isaac-sim: installing python dependencies..." >&2
+"$PY" -m pip install -q -r requirements.txt >&2
+"$PY" -m pip check || echo "warning: pip check reported conflicts (non-fatal)" >&2
 
 exec "$PY" src/main.py "$@"

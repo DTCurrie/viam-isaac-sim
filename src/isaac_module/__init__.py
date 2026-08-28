@@ -1,2 +1,2 @@
-NAMESPACE = "erh"
+NAMESPACE = "dtcurrie"
 FAMILY = "isaac-sim"

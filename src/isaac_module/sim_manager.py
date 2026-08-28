@@ -11,16 +11,22 @@ handle interfaces with plain python so the module can run and be tested on
 machines without Isaac Sim installed.
 """
 
+import concurrent.futures
 import math
 import queue
 import sys
 import threading
 import time
+from collections.abc import Callable, Sequence
 from concurrent.futures import Future
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Optional
 
 from viam.logging import getLogger
+
+from . import FAMILY, NAMESPACE
+from .errors import PrimNotFoundError, SimNotBootedError, SimTimeoutError
+from .spatial import Quat, Vec3, quat_conj, quat_mul, quat_rotate
 
 LOGGER = getLogger("viam-isaac-sim")
 
@@ -28,23 +34,52 @@ LOGGER = getLogger("viam-isaac-sim")
 # short name in component config. Paths are relative to the assets root;
 # where isaac 5.0 moved an asset, the 5.0 path is listed first with the 4.x
 # path as a fallback - the first candidate that exists is used.
-_UR_KINEMATICS = "https://raw.githubusercontent.com/viam-modules/universal-robots/main/src/kinematics"
+_UR_KINEMATICS = (
+    "https://raw.githubusercontent.com/viam-modules/universal-robots/main/src/kinematics"
+)
 
-KNOWN_ASSETS: Dict[str, Dict[str, Any]] = {
+# the 6 UR joints in SVA (spatial vector algebra) order - the order the arm
+# component's kinematics/motion planning expects, which need not match the
+# articulation's PhysX dof order (FINDINGS ARM-1; R-3).
+UR_JOINT_NAMES = (
+    "shoulder_pan_joint",
+    "shoulder_lift_joint",
+    "elbow_joint",
+    "wrist_1_joint",
+    "wrist_2_joint",
+    "wrist_3_joint",
+)
+
+KNOWN_ASSETS: dict[str, dict[str, Any]] = {
     "ur3e": {
         "usd": ["/Isaac/Robots/UniversalRobots/ur3e/ur3e.usd"],
         "kinematics": f"{_UR_KINEMATICS}/ur3e.json",
+        "joint_names": UR_JOINT_NAMES,
     },
     "ur5e": {
         "usd": ["/Isaac/Robots/UniversalRobots/ur5e/ur5e.usd"],
         "kinematics": f"{_UR_KINEMATICS}/ur5e.json",
+        # verified (FINDINGS XC-1/ARM-10, W7/W9): the usd asset's own base
+        # link is rotated 180deg about Z relative to the kinematics frame.
+        "base_frame_correction": (0.0, 0.0, 0.0, 1.0),
+        "joint_names": UR_JOINT_NAMES,
     },
-    "ur10": {"usd": ["/Isaac/Robots/UniversalRobots/ur10/ur10.usd"]},
-    "ur10e": {"usd": ["/Isaac/Robots/UniversalRobots/ur10e/ur10e.usd"]},
-    "ur16e": {"usd": ["/Isaac/Robots/UniversalRobots/ur16e/ur16e.usd"]},
+    "ur10": {"usd": ["/Isaac/Robots/UniversalRobots/ur10/ur10.usd"], "joint_names": UR_JOINT_NAMES},
+    "ur10e": {
+        "usd": ["/Isaac/Robots/UniversalRobots/ur10e/ur10e.usd"],
+        "joint_names": UR_JOINT_NAMES,
+    },
+    "ur16e": {
+        "usd": ["/Isaac/Robots/UniversalRobots/ur16e/ur16e.usd"],
+        "joint_names": UR_JOINT_NAMES,
+    },
+    # ur3e/ur10*/ur16e correction is unchecked; deliberately no entry
+    # (identity) until verified.
     "ur20": {
         "usd": ["/Isaac/Robots/UniversalRobots/ur20/ur20.usd"],
         "kinematics": f"{_UR_KINEMATICS}/ur20.json",
+        "base_frame_correction": (0.0, 0.0, 0.0, 1.0),
+        "joint_names": UR_JOINT_NAMES,
     },
     "franka": {
         "usd": [
@@ -69,7 +104,7 @@ class SimConfig:
     mock: bool = False
     headless: bool = True
     livestream: bool = True
-    usd_stage: Optional[str] = None
+    usd_stage: str | None = None
     physics_dt: float = 1.0 / 60.0
     rendering_dt: float = 1.0 / 60.0
     boot_timeout: float = 300.0
@@ -79,11 +114,84 @@ class SimConfig:
     #   {"type": "cube"|"usd", "name": ..., "position": [x,y,z] (m),
     #    "size": edge_m, "scale": [sx,sy,sz], "color": [r,g,b] 0-1,
     #    "fixed": bool, "usd_path": ...}
-    props: List[Dict[str, Any]] = field(default_factory=list)
+    props: list[dict[str, Any]] = field(default_factory=list)
     # kit console verbosity (verbose/info/warning/error). Kit prints thousands
     # of lines at info, and viam-server records the module's stderr as
     # error-level logs, so default to warning.
     kit_log_level: str = "warning"
+
+
+def _as_quat(values: Sequence[float]) -> Quat:
+    """Four numbers -> a (w, x, y, z) quaternion tuple (validates arity)."""
+    w, x, y, z = (float(v) for v in values)
+    return (w, x, y, z)
+
+
+def spawn_orientation(attrs: dict[str, Any], meta: dict[str, Any]) -> Quat:
+    """The (w,x,y,z) quaternion to spawn an arm's articulation with: the
+    configured frame/orientation composed with the known asset's
+    base_frame_correction (frame first), if any (FINDINGS XC-1/ARM-10)."""
+    q_frame: Quat = (
+        _as_quat(attrs["orientation_wxyz"])
+        if attrs.get("orientation_wxyz") is not None
+        else (1.0, 0.0, 0.0, 0.0)
+    )
+    correction = meta.get("base_frame_correction")
+    if correction is not None:
+        return quat_mul(q_frame, _as_quat(correction))
+    return q_frame
+
+
+def pose_in_frame(base_pos: Vec3, base_quat: Quat, pos: Vec3, quat: Quat) -> tuple[Vec3, Quat]:
+    """Express a world pose (pos, quat) in the frame defined by
+    (base_pos, base_quat) - both (w,x,y,z)."""
+    base_quat_conj = quat_conj(base_quat)
+    relative_position = quat_rotate(
+        base_quat_conj,
+        (pos[0] - base_pos[0], pos[1] - base_pos[1], pos[2] - base_pos[2]),
+    )
+    relative_orientation = quat_mul(base_quat_conj, quat)
+    return relative_position, relative_orientation
+
+
+def compose_pose(
+    parent_pos: Vec3, parent_quat: Quat, local_pos: Vec3, local_quat: Quat
+) -> tuple[Vec3, Quat]:
+    """Inverse of pose_in_frame: express a pose (local_pos, local_quat) given
+    in the frame (parent_pos, parent_quat) back in the parent's frame."""
+    world_position = (
+        parent_pos[0] + quat_rotate(parent_quat, local_pos)[0],
+        parent_pos[1] + quat_rotate(parent_quat, local_pos)[1],
+        parent_pos[2] + quat_rotate(parent_quat, local_pos)[2],
+    )
+    world_orientation = quat_mul(parent_quat, local_quat)
+    return world_position, world_orientation
+
+
+def viam_base_frame(root_pos: Vec3, root_quat: Quat, correction: Quat) -> tuple[Vec3, Quat]:
+    """Recover Viam's arm frame from the Isaac articulation root's world
+    pose: spawn composed root = frame * correction (FINDINGS ARM-10/XC-1),
+    so frame = root * correction^-1."""
+    return root_pos, quat_mul(root_quat, quat_conj(correction))
+
+
+def anchor_fixed_joint_frame(
+    spawn_pos: Vec3, spawn_quat: Quat, authored_pos: Vec3, authored_quat: Quat
+) -> tuple[Vec3, Quat]:
+    """Re-express a world-anchored fixed-base joint frame (authored_pos,
+    authored_quat) so it matches an articulation spawned at (spawn_pos,
+    spawn_quat). The UR assets' base FixedJoint has an empty body0 (= world
+    frame) with localPos0/localRot0 authored in world coordinates, so PhysX
+    resyncs the root xform to that joint frame on world.reset() and undoes
+    any spawn pose passed to SingleArticulation (FINDINGS ARM-9/XC-1)."""
+    return (
+        (
+            spawn_pos[0] + quat_rotate(spawn_quat, authored_pos)[0],
+            spawn_pos[1] + quat_rotate(spawn_quat, authored_pos)[1],
+            spawn_pos[2] + quat_rotate(spawn_quat, authored_pos)[2],
+        ),
+        quat_mul(spawn_quat, authored_quat),
+    )
 
 
 class SimManager:
@@ -100,23 +208,25 @@ class SimManager:
             return cls._instance
 
     def __init__(self) -> None:
-        self._tasks: "queue.Queue[Tuple[Callable[[], Any], Future]]" = queue.Queue()
+        self._tasks: queue.Queue[tuple[Callable[[], Any], Future]] = queue.Queue()
         self._boot_requested = threading.Event()
         self._booted = threading.Event()
-        self._boot_error: Optional[BaseException] = None
+        self._boot_error: BaseException | None = None
         self._stop = threading.Event()
-        self._sim_thread_id: Optional[int] = None
+        self._sim_thread_id: int | None = None
 
-        self.cfg: Optional[SimConfig] = None
+        self.cfg: SimConfig | None = None
         self.mock = False
-        self._sim_app = None
-        self.world = None
-        self._isaac = None  # lazily-populated namespace of isaac imports
-        self._step_callbacks: Dict[str, Callable[[float], None]] = {}
+        # Isaac objects are created at boot; typed Any because the isaacsim
+        # modules are not importable (or type-checkable) outside Isaac Sim.
+        self._sim_app: Any = None
+        self.world: Any = None
+        self._isaac: Any = None  # lazily-populated namespace of isaac imports
+        self._step_callbacks: dict[str, Callable[[float], None]] = {}
         # component name -> (spawn attrs, handle). viam-server rebuilds
         # resources on config change, but prims can't be re-spawned without
         # restarting kit, so handles are cached per component name.
-        self._handles: Dict[str, Tuple[Dict[str, Any], Any]] = {}
+        self._handles: dict[str, tuple[dict[str, Any], Any]] = {}
 
     # ------------------------------------------------------------------
     # lifecycle
@@ -139,7 +249,7 @@ class SimManager:
         self.cfg = cfg
         self._boot_requested.set()
         if not self._booted.wait(timeout=cfg.boot_timeout):
-            raise TimeoutError(f"isaac sim did not boot within {cfg.boot_timeout}s")
+            raise SimTimeoutError(f"isaac sim did not boot within {cfg.boot_timeout}s")
         if self._boot_error is not None:
             raise RuntimeError(f"isaac sim failed to boot: {self._boot_error}")
 
@@ -203,7 +313,11 @@ class SimManager:
             return fn()
         fut: Future = Future()
         self._tasks.put((fn, fut))
-        return fut.result(timeout=timeout)
+        try:
+            return fut.result(timeout=timeout)
+        except concurrent.futures.TimeoutError as exc:
+            fut.cancel()
+            raise SimTimeoutError(f"sim-thread call timed out after {timeout}s") from exc
 
     # ------------------------------------------------------------------
     # boot
@@ -277,7 +391,7 @@ class SimManager:
         self.world.reset()
         LOGGER.info("isaac sim world ready")
 
-    def _spawn_prop(self, prop: Dict[str, Any]) -> None:
+    def _spawn_prop(self, prop: dict[str, Any]) -> None:
         """Add a configured prop to the scene (runs on the sim thread,
         before the initial world.reset)."""
         import numpy as np
@@ -304,7 +418,7 @@ class SimManager:
         if kind != "cube":
             raise ValueError(f"prop {name}: unknown type {kind!r} (cube or usd)")
 
-        kwargs: Dict[str, Any] = dict(
+        kwargs: dict[str, Any] = dict(
             prim_path=prim_path,
             name=name,
             position=np.array(position),
@@ -319,12 +433,12 @@ class SimManager:
 
     def _require_booted(self) -> None:
         if not self._booted.is_set():
-            raise RuntimeError(
+            raise SimNotBootedError(
                 "isaac sim world is not running - configure a "
-                "erh:isaac-sim:world component and depend on it"
+                f"{NAMESPACE}:{FAMILY}:world component and depend on it"
             )
         if self._boot_error is not None:
-            raise RuntimeError(f"isaac sim failed to boot: {self._boot_error}")
+            raise SimNotBootedError(f"isaac sim failed to boot: {self._boot_error}")
 
     # ------------------------------------------------------------------
     # world controls (used by the world component's DoCommand)
@@ -345,8 +459,8 @@ class SimManager:
         if not self.mock:
             self.run(lambda: self.world.reset())
 
-    def status(self) -> Dict[str, Any]:
-        out: Dict[str, Any] = {
+    def status(self) -> dict[str, Any]:
+        out: dict[str, Any] = {
             "booted": self._booted.is_set(),
             "mock": self.mock,
             "error": str(self._boot_error) if self._boot_error else "",
@@ -360,7 +474,7 @@ class SimManager:
         self,
         usd_path: str,
         prim_path: str,
-        position: Tuple[float, float, float] = (0.0, 0.0, 0.0),
+        position: tuple[float, float, float] = (0.0, 0.0, 0.0),
     ) -> None:
         self._require_booted()
         if self.mock:
@@ -378,16 +492,17 @@ class SimManager:
     # ------------------------------------------------------------------
 
     # attributes that only affect the viam-side model, not the spawned prim
-    _RUNTIME_KEYS = frozenset(
-        {"world", "move_timeout_sec", "max_linear_mps", "max_angular_rps"}
-    )
+    _RUNTIME_KEYS = frozenset({"world", "move_timeout_sec", "max_linear_mps", "max_angular_rps"})
 
     def _cached_handle(
-        self, kind: str, name: str, attrs: Dict[str, Any], factory: Callable[[], Any]
+        self, kind: str, name: str, attrs: dict[str, Any], factory: Callable[[], Any]
     ) -> Any:
         if name in self._handles:
             old_attrs, handle = self._handles[name]
-            strip = lambda a: {k: v for k, v in a.items() if k not in self._RUNTIME_KEYS}
+
+            def strip(attrs):
+                return {k: v for k, v in attrs.items() if k not in self._RUNTIME_KEYS}
+
             if strip(old_attrs) != strip(attrs):
                 LOGGER.warning(
                     "%s %r: spawn config changed but the prim is already in the "
@@ -400,7 +515,7 @@ class SimManager:
         self._handles[name] = (dict(attrs), handle)
         return handle
 
-    def _usd_exists(self, path: str) -> Optional[bool]:
+    def _usd_exists(self, path: str) -> bool | None:
         """True/False if we can check, None if omni.client is unavailable."""
         client = getattr(self._isaac, "client", None)
         if client is None:
@@ -411,9 +526,9 @@ class SimManager:
         except Exception:
             return None
 
-    def _resolve_usd(self, attrs: Dict[str, Any]) -> Tuple[Optional[str], Dict[str, Any]]:
+    def _resolve_usd(self, attrs: dict[str, Any]) -> tuple[str | None, dict[str, Any]]:
         """Return (absolute usd path or None, known-asset metadata)."""
-        meta: Dict[str, Any] = {}
+        meta: dict[str, Any] = {}
         usd = attrs.get("usd_path")
         asset = attrs.get("asset")
         if asset:
@@ -444,51 +559,204 @@ class SimManager:
             raise ValueError(f"usd not found: {usd}")
         return usd, meta
 
-    def create_arm(self, name: str, attrs: Dict[str, Any]) -> "ArmHandle":
+    def create_arm(self, name: str, attrs: dict[str, Any]) -> "ArmHandle":
         self._require_booted()
         if self.mock:
-            factory = lambda: MockArmHandle(name, attrs)
+
+            def factory():
+                return MockArmHandle(name, attrs)
         else:
-            factory = lambda: self.run(
-                lambda: self._create_arm_isaac(name, attrs), timeout=120.0
-            )
+
+            def factory():
+                return self.run(lambda: self._create_arm_isaac(name, attrs), timeout=120.0)
+
         return self._cached_handle("arm", name, attrs, factory)
 
-    def _create_arm_isaac(self, name: str, attrs: Dict[str, Any]) -> "IsaacArmHandle":
+    def _place_root_xform(self, prim_path: str, position: Vec3, orientation: Quat) -> bool:
+        """Author the spawn pose as plain USD xform ops on the referenced asset's
+        root prim, BEFORE any Isaac prim wrapper exists for it.
+
+        Passing position/orientation through SingleArticulation does not work
+        once a physics sim view exists (the world was reset at boot): the
+        wrapper routes the write to a physics handle that has not parsed the
+        new articulation yet, drops it, and captures identity as the default
+        state (Isaac 5.0 xform_prim.py:150-175). Writing the ops here makes the
+        USD pose the truth PhysX parses on the next world.reset(). Never raises."""
+        try:
+            from pxr import Gf, UsdGeom
+
+            stage = self._isaac.get_prim_at_path(prim_path).GetStage()
+            prim = stage.GetPrimAtPath(prim_path)
+            xformable = UsdGeom.Xformable(prim)
+            # ClearXformOpOrder drops the order, not the op attributes: a
+            # referenced asset may already carry xformOp:orient as quatd or
+            # quatf, and AddOrientOp raises if the requested precision differs.
+            # Match whatever precision is already authored (default double).
+            xformable.ClearXformOpOrder()
+            double = UsdGeom.XformOp.PrecisionDouble
+            single = UsdGeom.XformOp.PrecisionFloat
+            translate_attr = prim.GetAttribute("xformOp:translate")
+            translate_is_float = (
+                bool(translate_attr) and str(translate_attr.GetTypeName()) == "float3"
+            )
+            orient_attr = prim.GetAttribute("xformOp:orient")
+            orient_is_float = bool(orient_attr) and str(orient_attr.GetTypeName()) == "quatf"
+            scale_attr = prim.GetAttribute("xformOp:scale")
+            scale_is_double = bool(scale_attr) and str(scale_attr.GetTypeName()) == "double3"
+
+            px, py, pz = (float(v) for v in position)
+            translate_op = xformable.AddTranslateOp(single if translate_is_float else double)
+            translate_op.Set(Gf.Vec3f(px, py, pz) if translate_is_float else Gf.Vec3d(px, py, pz))
+
+            w, x, y, z = (float(v) for v in orientation)
+            orient_op = xformable.AddOrientOp(single if orient_is_float else double)
+            orient_op.Set(
+                Gf.Quatf(w, Gf.Vec3f(x, y, z))
+                if orient_is_float
+                else Gf.Quatd(w, Gf.Vec3d(x, y, z))
+            )
+
+            scale_op = xformable.AddScaleOp(double if scale_is_double else single)
+            scale_op.Set(Gf.Vec3d(1.0, 1.0, 1.0) if scale_is_double else Gf.Vec3f(1.0, 1.0, 1.0))
+            LOGGER.info(
+                "placed %s via usd xform ops: position=%s orientation=%s",
+                prim_path,
+                position,
+                orientation,
+            )
+            return True
+        except Exception:
+            LOGGER.exception("failed to author spawn pose on %s", prim_path)
+            return False
+
+    def _anchor_fixed_base(self, prim_path: str, position: Vec3, orientation: Quat) -> bool:
+        """Re-anchor a world-anchored fixed-base joint under prim_path to the
+        spawn pose (position, orientation). The UR assets fix their base to
+        the world frame with a FixedJoint whose localPos0/localRot0 are
+        authored in world coordinates; PhysX re-syncs the root xform to that
+        joint frame on world.reset(), silently undoing the spawn pose passed
+        to SingleArticulation (FINDINGS ARM-9/XC-1). Never raises: a failure
+        here should not fail the spawn, only leave the pose un-anchored."""
+        try:
+            from pxr import Gf, Sdf, Usd, UsdPhysics
+
+            stage = self._isaac.get_prim_at_path(prim_path).GetStage()
+            root_prim = stage.GetPrimAtPath(prim_path)
+            for prim in Usd.PrimRange(root_prim):
+                if not prim.IsA(UsdPhysics.FixedJoint):
+                    continue
+                joint = UsdPhysics.Joint(prim)
+                if joint.GetBody0Rel().GetTargets():
+                    continue
+
+                pos_attr = prim.GetAttribute("physics:localPos0")
+                rot_attr = prim.GetAttribute("physics:localRot0")
+                authored_pos_gf = pos_attr.Get() if pos_attr else None
+                authored_rot_gf = rot_attr.Get() if rot_attr else None
+                authored_pos: Vec3 = (
+                    (authored_pos_gf[0], authored_pos_gf[1], authored_pos_gf[2])
+                    if authored_pos_gf is not None
+                    else (0.0, 0.0, 0.0)
+                )
+                authored_quat: Quat = (
+                    (
+                        authored_rot_gf.GetReal(),
+                        authored_rot_gf.GetImaginary()[0],
+                        authored_rot_gf.GetImaginary()[1],
+                        authored_rot_gf.GetImaginary()[2],
+                    )
+                    if authored_rot_gf is not None
+                    else (1.0, 0.0, 0.0, 0.0)
+                )
+
+                new_pos, new_quat = anchor_fixed_joint_frame(
+                    position, orientation, authored_pos, authored_quat
+                )
+                if pos_attr is None:
+                    pos_attr = prim.CreateAttribute("physics:localPos0", Sdf.ValueTypeNames.Point3f)
+                if rot_attr is None:
+                    rot_attr = prim.CreateAttribute("physics:localRot0", Sdf.ValueTypeNames.Quatf)
+                pos_attr.Set(Gf.Vec3f(*new_pos))
+                rot_attr.Set(Gf.Quatf(new_quat[0], Gf.Vec3f(*new_quat[1:])))
+                LOGGER.info(
+                    "re-anchored fixed base joint %s to position=%s orientation=%s",
+                    prim.GetPath(),
+                    new_pos,
+                    new_quat,
+                )
+                return True
+            LOGGER.warning(
+                "no world-anchored fixed joint found under %s; spawn pose relies on the prim xform",
+                prim_path,
+            )
+            return False
+        except Exception:
+            LOGGER.exception("failed to re-anchor fixed base joint under %s", prim_path)
+            return False
+
+    def _create_arm_isaac(self, name: str, attrs: dict[str, Any]) -> "IsaacArmHandle":
         from .spatial import to_vec3
 
-        usd, _ = self._resolve_usd(attrs)
+        usd, meta = self._resolve_usd(attrs)
         prim_path = attrs.get("prim_path") or f"/World/{_prim_name(name)}"
+        position = to_vec3(attrs.get("position"))
+        orientation = spawn_orientation(attrs, meta)
         if usd:
             self._isaac.add_reference_to_stage(usd_path=usd, prim_path=prim_path)
+            # Spawn pose goes into USD first (see _place_root_xform) and the
+            # world-anchored base joint is moved with it; the wrapper below is
+            # constructed WITHOUT a pose on purpose.
+            self._place_root_xform(prim_path, position, orientation)
+            self._anchor_fixed_base(prim_path, position, orientation)
 
-        position = to_vec3(attrs.get("position"))
-        kwargs: Dict[str, Any] = dict(
-            prim_path=prim_path, name=name, position=list(position)
-        )
-        if attrs.get("orientation_wxyz") is not None:
-            kwargs["orientation"] = [float(v) for v in attrs["orientation_wxyz"]]
-        art = self._isaac.SingleArticulation(**kwargs)
+        art = self._isaac.SingleArticulation(prim_path=prim_path, name=name)
         self.world.scene.add(art)
         self.world.reset()
+        try:
+            root_pos, root_quat = art.get_world_pose()
+            LOGGER.info(
+                "arm %r root pose after reset: position=%s orientation_wxyz=%s (requested %s / %s)",
+                name,
+                [round(float(v), 4) for v in root_pos],
+                [round(float(v), 4) for v in root_quat],
+                position,
+                orientation,
+            )
+        except Exception:
+            LOGGER.exception("could not read root pose for arm %r after reset", name)
 
         ee = None
-        ee_path = attrs.get("end_effector_prim")
+        asset = attrs.get("asset")
+        ee_path = attrs.get("end_effector_prim") or (
+            f"{prim_path}/wrist_3_link"
+            if isinstance(asset, str) and asset.startswith("ur")
+            else None
+        )
         if ee_path:
             ee = self._isaac.SingleXFormPrim(ee_path)
-        return IsaacArmHandle(self, art, ee)
+        correction = (
+            _as_quat(meta["base_frame_correction"])
+            if meta.get("base_frame_correction") is not None
+            else (1.0, 0.0, 0.0, 0.0)
+        )
+        return IsaacArmHandle(
+            self, art, ee, meta.get("joint_names"), base_correction=correction, prim_path=prim_path
+        )
 
-    def create_camera(self, name: str, attrs: Dict[str, Any]) -> "CameraHandle":
+    def create_camera(self, name: str, attrs: dict[str, Any]) -> "CameraHandle":
         self._require_booted()
         if self.mock:
-            factory = lambda: MockCameraHandle(name, attrs)
+
+            def factory():
+                return MockCameraHandle(name, attrs)
         else:
-            factory = lambda: self.run(
-                lambda: self._create_camera_isaac(name, attrs), timeout=120.0
-            )
+
+            def factory():
+                return self.run(lambda: self._create_camera_isaac(name, attrs), timeout=120.0)
+
         return self._cached_handle("camera", name, attrs, factory)
 
-    def _create_camera_isaac(self, name: str, attrs: Dict[str, Any]) -> "IsaacCameraHandle":
+    def _create_camera_isaac(self, name: str, attrs: dict[str, Any]) -> "IsaacCameraHandle":
         import math
 
         from .spatial import quat_from_euler_deg, to_vec3
@@ -502,7 +770,7 @@ class SimManager:
         width = int(attrs.get("width", 640))
         height = int(attrs.get("height", 480))
 
-        kwargs: Dict[str, Any] = dict(
+        kwargs: dict[str, Any] = dict(
             prim_path=prim_path,
             name=name,
             resolution=(width, height),
@@ -521,9 +789,7 @@ class SimManager:
             # default: small standoff along the link, looking out the +Z
             # (tool) axis - 180deg about X flips the usd camera's -Z forward.
             local_pos = to_vec3(attrs.get("local_position"), default=(0.0, 0.0, 0.05))
-            r, p, y = to_vec3(
-                attrs.get("local_orientation_rpy_deg"), default=(180.0, 0.0, 0.0)
-            )
+            r, p, y = to_vec3(attrs.get("local_orientation_rpy_deg"), default=(180.0, 0.0, 0.0))
             quat = quat_from_euler_deg(r, p, y)
             cam.set_local_pose(list(local_pos), list(quat), camera_axes="usd")
         elif attrs.get("target") is not None:
@@ -535,7 +801,7 @@ class SimManager:
             cam.set_world_pose(list(position), list(quat), camera_axes="world")
         elif attrs.get("orientation_wxyz") is not None:
             position = to_vec3(attrs.get("position"))
-            quat = tuple(float(v) for v in attrs["orientation_wxyz"])
+            quat = _as_quat(attrs["orientation_wxyz"])
             cam.set_world_pose(list(position), list(quat), camera_axes="world")
 
         # newly created cameras default to a 70 degree horizontal FOV - the
@@ -564,19 +830,22 @@ class SimManager:
             if parent is not None and parent.IsValid():
                 children = [c.GetName() for c in parent.GetChildren()]
                 hint = f"; children of {parent_path}: {children}"
-            raise ValueError(f"prim not found: {prim_path}{hint}")
+            raise PrimNotFoundError(f"prim not found: {prim_path}{hint}")
 
-    def create_base(self, name: str, attrs: Dict[str, Any]) -> "BaseHandle":
+    def create_base(self, name: str, attrs: dict[str, Any]) -> "BaseHandle":
         self._require_booted()
         if self.mock:
-            factory = lambda: MockBaseHandle(name, attrs)
+
+            def factory():
+                return MockBaseHandle(name, attrs)
         else:
-            factory = lambda: self.run(
-                lambda: self._create_base_isaac(name, attrs), timeout=120.0
-            )
+
+            def factory():
+                return self.run(lambda: self._create_base_isaac(name, attrs), timeout=120.0)
+
         return self._cached_handle("base", name, attrs, factory)
 
-    def _create_base_isaac(self, name: str, attrs: Dict[str, Any]) -> "IsaacBaseHandle":
+    def _create_base_isaac(self, name: str, attrs: dict[str, Any]) -> "IsaacBaseHandle":
         from .spatial import to_vec3
 
         usd, meta = self._resolve_usd(attrs)
@@ -591,7 +860,7 @@ class SimManager:
         wheel_base = float(attrs.get("wheel_base", meta.get("wheel_base", 0.3)))
         position = to_vec3(attrs.get("position"))
 
-        base_kwargs: Dict[str, Any] = dict(
+        base_kwargs: dict[str, Any] = dict(
             prim_path=prim_path,
             name=name,
             wheel_dof_names=list(wheel_joints),
@@ -679,6 +948,7 @@ def _import_isaac():
 
     try:
         import omni.client
+
         ns.client = omni.client
     except ImportError:
         ns.client = None
@@ -706,15 +976,15 @@ def _import_isaac():
     ns.Camera = Camera
 
     try:
-        from isaacsim.robot.wheeled_robots.robots import WheeledRobot
         from isaacsim.robot.wheeled_robots.controllers.differential_controller import (
             DifferentialController,
         )
+        from isaacsim.robot.wheeled_robots.robots import WheeledRobot
     except ImportError:
-        from omni.isaac.wheeled_robots.robots import WheeledRobot
         from omni.isaac.wheeled_robots.controllers.differential_controller import (
             DifferentialController,
         )
+        from omni.isaac.wheeled_robots.robots import WheeledRobot
     ns.WheeledRobot = WheeledRobot
     ns.DifferentialController = DifferentialController
 
@@ -727,11 +997,44 @@ def _import_isaac():
 # ======================================================================
 
 
+def resolve_joint_indices(
+    dof_names: Sequence[str], joint_names: Sequence[str] | None
+) -> list[int] | None:
+    """Map an asset's declared arm joint names onto the articulation's PhysX
+    dof order, by name rather than position (FINDINGS ARM-1; R-3: attaching a
+    gripper later can add/reorder dofs, so a positional slice would silently
+    pick up the wrong joints). Returns None when the asset declares no joint
+    names, meaning "all dofs, in PhysX order"."""
+    if joint_names is None:
+        return None
+    indices = []
+    missing = []
+    for name in joint_names:
+        try:
+            indices.append(dof_names.index(name))
+        except ValueError:
+            missing.append(name)
+    if missing:
+        raise ValueError(
+            f"joint(s) not found in articulation: {missing}; actual dof_names: {list(dof_names)}"
+        )
+    return indices
+
+
 class ArmHandle:
-    def get_joint_positions(self) -> List[float]:  # radians
+    def dof_names(self) -> list[str]:
+        """Names of the arm's named joints, in the asset's declared order
+        (all DOFs, in PhysX order, when the asset declares none)."""
         raise NotImplementedError
 
-    def set_joint_targets(self, positions: List[float]) -> None:
+    def get_joint_positions(self) -> list[float]:  # radians
+        """Positions of the arm's named joints, in the asset's declared
+        order (all DOFs when the asset declares none)."""
+        raise NotImplementedError
+
+    def set_joint_targets(self, positions: list[float]) -> None:
+        """Targets for the arm's named joints, in the asset's declared
+        order (all DOFs when the asset declares none)."""
         raise NotImplementedError
 
     def is_moving(self) -> bool:
@@ -740,26 +1043,61 @@ class ArmHandle:
     def stop(self) -> None:
         raise NotImplementedError
 
-    def get_end_pose(self) -> Tuple[Tuple[float, float, float], Tuple[float, float, float, float]]:
-        """((x,y,z) meters, (w,x,y,z) quaternion) of the end effector."""
+    def get_end_pose(self) -> tuple[tuple[float, float, float], tuple[float, float, float, float]]:
+        """((x,y,z) meters, (w,x,y,z) quaternion) of the end effector, in
+        Viam's arm frame - the Isaac root un-rotated by the asset's
+        base_frame_correction, if any (FINDINGS ARM-10)."""
+        raise NotImplementedError
+
+    def get_prim_world_pose(self, prim_path: str) -> tuple[Vec3, Quat]:
+        """((x,y,z) meters, (w,x,y,z) quaternion) world pose of an arbitrary
+        prim on the stage (FINDINGS XC-1 GPU acceptance)."""
         raise NotImplementedError
 
 
 class IsaacArmHandle(ArmHandle):
-    def __init__(self, sim: SimManager, articulation, ee_prim) -> None:
+    def __init__(
+        self,
+        sim: SimManager,
+        articulation,
+        ee_prim,
+        joint_names: Sequence[str] | None = None,
+        base_correction: Quat = (1.0, 0.0, 0.0, 0.0),
+        prim_path: str = "",
+    ) -> None:
         self._sim = sim
         self._art = articulation
         self._ee = ee_prim
+        self._joint_names = joint_names
+        self._base_correction: Quat = base_correction
+        self._prim_path = prim_path
+        self._dof_names: list[str] = list(articulation.dof_names)
+        LOGGER.info(
+            "arm %r articulation dof_names: %s",
+            getattr(articulation, "name", ""),
+            self._dof_names,
+        )
+        self._joint_indices: list[int] | None = resolve_joint_indices(self._dof_names, joint_names)
 
-    def get_joint_positions(self) -> List[float]:
-        return self._sim.run(lambda: [float(v) for v in self._art.get_joint_positions()])
+    def dof_names(self) -> list[str]:
+        if self._joint_indices is None:
+            return list(self._dof_names)
+        return [self._dof_names[i] for i in self._joint_indices]
 
-    def set_joint_targets(self, positions: List[float]) -> None:
+    def get_joint_positions(self) -> list[float]:
+        def _get():
+            positions = self._art.get_joint_positions(joint_indices=self._joint_indices)
+            return [float(v) for v in positions]
+
+        return self._sim.run(_get)
+
+    def set_joint_targets(self, positions: list[float]) -> None:
         import numpy as np
 
         def _apply():
             action = self._sim._isaac.ArticulationAction(
-                joint_positions=np.array(positions, dtype=float)
+                joint_positions=np.array(positions, dtype=float),
+                joint_indices=self._joint_indices,
             )
             self._art.apply_action(action)
 
@@ -767,7 +1105,7 @@ class IsaacArmHandle(ArmHandle):
 
     def is_moving(self) -> bool:
         def _check():
-            vels = self._art.get_joint_velocities()
+            vels = self._art.get_joint_velocities(joint_indices=self._joint_indices)
             if vels is None:
                 return False
             return bool(max(abs(float(v)) for v in vels) > 1e-3)
@@ -786,32 +1124,92 @@ class IsaacArmHandle(ArmHandle):
             )
 
         def _pose():
+            root_pos, root_quat = self._art.get_world_pose()
             pos, quat = self._ee.get_world_pose()
-            return (
-                (float(pos[0]), float(pos[1]), float(pos[2])),
-                (float(quat[0]), float(quat[1]), float(quat[2]), float(quat[3])),
+            root_pos_t = (float(root_pos[0]), float(root_pos[1]), float(root_pos[2]))
+            root_quat_t = (
+                float(root_quat[0]),
+                float(root_quat[1]),
+                float(root_quat[2]),
+                float(root_quat[3]),
             )
+            pos_t = (float(pos[0]), float(pos[1]), float(pos[2]))
+            quat_t = (float(quat[0]), float(quat[1]), float(quat[2]), float(quat[3]))
+            base_pos, base_quat = viam_base_frame(root_pos_t, root_quat_t, self._base_correction)
+            return pose_in_frame(base_pos, base_quat, pos_t, quat_t)
+
+        return self._sim.run(_pose)
+
+    def get_prim_world_pose(self, prim_path: str) -> tuple[Vec3, Quat]:
+        def _pose() -> tuple[Vec3, Quat]:
+            self._sim._require_prim(prim_path)
+            pos, quat = self._sim._isaac.SingleXFormPrim(prim_path).get_world_pose()
+            pos_t = (float(pos[0]), float(pos[1]), float(pos[2]))
+            quat_t = (float(quat[0]), float(quat[1]), float(quat[2]), float(quat[3]))
+            return pos_t, quat_t
 
         return self._sim.run(_pose)
 
 
 class MockArmHandle(ArmHandle):
-    """Joints move linearly toward their targets at a fixed speed."""
+    """Joints move linearly toward their targets at a fixed speed. Total dof
+    count is mock_dof (default: the number of declared joint names, else 6);
+    the arm's named joints are selected by index the same way the Isaac
+    handle does (FINDINGS ARM-1; R-3), and any remaining dofs are padding
+    that never moves."""
 
     SPEED = 1.0  # rad/s per joint
 
-    def __init__(self, name: str, attrs: Dict[str, Any]) -> None:
+    # the mock's end effector, fixed in Viam's arm frame (public,
+    # deterministic value; unchanged by spawn pose or base_frame_correction).
+    FIXED_LOCAL_EE: tuple[Vec3, Quat] = ((0.3, 0.0, 0.3), (1.0, 0.0, 0.0, 0.0))
+
+    def __init__(self, name: str, attrs: dict[str, Any]) -> None:
+        from .spatial import to_vec3
+
         self.name = name
-        dof = int(attrs.get("mock_dof", 6))
+        meta = KNOWN_ASSETS.get(str(attrs.get("asset", "")), {})
+        joint_names: Sequence[str] | None = meta.get("joint_names")
+        default_dof = len(joint_names) if joint_names else 6
+        dof = int(attrs.get("mock_dof", default_dof))
+        if joint_names:
+            names = list(joint_names) + [f"mock_extra_{i}" for i in range(dof - len(joint_names))]
+            self._joint_indices: list[int] | None = list(range(len(joint_names)))
+        else:
+            names = [f"mock_joint_{i}" for i in range(dof)]
+            self._joint_indices = None
+        self._dof_names = names
         self._lock = threading.Lock()
         self._start = [0.0] * dof
         self._target = [0.0] * dof
         self._t0 = time.monotonic()
+        self.spawn_position = to_vec3(attrs.get("position"))
+        self.spawn_orientation = spawn_orientation(attrs, meta)
+        correction = meta.get("base_frame_correction")
+        self._base_correction: Quat = (
+            _as_quat(correction)
+            if correction is not None
+            else (
+                1.0,
+                0.0,
+                0.0,
+                0.0,
+            )
+        )
+        self._prim_path = attrs.get("prim_path") or f"/World/{_prim_name(name)}"
 
-    def _positions_at(self, now: float) -> List[float]:
+    def dof_names(self) -> list[str]:
+        return list(self._dof_names)
+
+    def _selected(self) -> list[int]:
+        if self._joint_indices is None:
+            return list(range(len(self._dof_names)))
+        return self._joint_indices
+
+    def _positions_at(self, now: float) -> list[float]:
         out = []
         dt = max(0.0, now - self._t0)
-        for s, t in zip(self._start, self._target):
+        for s, t in zip(self._start, self._target, strict=True):
             delta = t - s
             travel = self.SPEED * dt
             if abs(delta) <= travel:
@@ -820,25 +1218,34 @@ class MockArmHandle(ArmHandle):
                 out.append(s + math.copysign(travel, delta))
         return out
 
-    def get_joint_positions(self) -> List[float]:
+    def get_all_joint_positions(self) -> list[float]:
+        """Test-only accessor for the full (unselected) dof array."""
         with self._lock:
             return self._positions_at(time.monotonic())
 
-    def set_joint_targets(self, positions: List[float]) -> None:
+    def get_joint_positions(self) -> list[float]:
+        with self._lock:
+            all_pos = self._positions_at(time.monotonic())
+        return [all_pos[i] for i in self._selected()]
+
+    def set_joint_targets(self, positions: list[float]) -> None:
         with self._lock:
             now = time.monotonic()
-            self._start = self._positions_at(now)
-            if len(positions) != len(self._start):
-                raise ValueError(
-                    f"expected {len(self._start)} joint positions, got {len(positions)}"
-                )
-            self._target = list(positions)
+            all_pos = self._positions_at(now)
+            selected = self._selected()
+            if len(positions) != len(selected):
+                raise ValueError(f"expected {len(selected)} joint positions, got {len(positions)}")
+            self._start = all_pos
+            self._target = list(all_pos)
+            for i, p in zip(selected, positions, strict=True):
+                self._target[i] = p
             self._t0 = now
 
     def is_moving(self) -> bool:
         with self._lock:
             pos = self._positions_at(time.monotonic())
-            return any(abs(p - t) > 1e-9 for p, t in zip(pos, self._target))
+        selected = self._selected()
+        return any(abs(pos[i] - self._target[i]) > 1e-9 for i in selected)
 
     def stop(self) -> None:
         with self._lock:
@@ -847,9 +1254,32 @@ class MockArmHandle(ArmHandle):
             self._target = list(self._start)
             self._t0 = now
 
+    def _ee_world_pose(self) -> tuple[Vec3, Quat]:
+        """The mock's simulated Isaac root is (spawn_position,
+        spawn_orientation) - already composed with base_frame_correction -
+        so its end effector's world pose is FIXED_LOCAL_EE expressed in
+        Viam's arm frame, then re-composed onto that rotated root."""
+        base_pos, base_quat = viam_base_frame(
+            self.spawn_position, self.spawn_orientation, self._base_correction
+        )
+        local_pos, local_quat = self.FIXED_LOCAL_EE
+        return compose_pose(base_pos, base_quat, local_pos, local_quat)
+
     def get_end_pose(self):
-        # a fixed, deterministic pose for testing
-        return ((0.3, 0.0, 0.3), (1.0, 0.0, 0.0, 0.0))
+        # a fixed, deterministic pose for testing, defined in Viam's arm
+        # frame (FINDINGS ARM-10) - it must not change with spawn_position/
+        # spawn_orientation/base_frame_correction.
+        base_pos, base_quat = viam_base_frame(
+            self.spawn_position, self.spawn_orientation, self._base_correction
+        )
+        ee_pos, ee_quat = self._ee_world_pose()
+        return pose_in_frame(base_pos, base_quat, ee_pos, ee_quat)
+
+    def get_prim_world_pose(self, prim_path: str) -> tuple[Vec3, Quat]:
+        ee_prim_path = f"{self._prim_path}/wrist_3_link"
+        if prim_path != ee_prim_path:
+            raise PrimNotFoundError(f"prim not found: {prim_path}")
+        return self._ee_world_pose()
 
 
 class CameraHandle:
@@ -867,16 +1297,14 @@ class IsaacCameraHandle(CameraHandle):
         def _grab():
             frame = self._cam.get_rgba()
             if frame is None or frame.size == 0:
-                raise RuntimeError(
-                    "no frame available yet - is the simulation playing?"
-                )
+                raise RuntimeError("no frame available yet - is the simulation playing?")
             return frame[:, :, :3].copy()
 
         return self._sim.run(_grab)
 
 
 class MockCameraHandle(CameraHandle):
-    def __init__(self, name: str, attrs: Dict[str, Any]) -> None:
+    def __init__(self, name: str, attrs: dict[str, Any]) -> None:
         self.name = name
         self._w = int(attrs.get("width", 640))
         self._h = int(attrs.get("height", 480))
@@ -905,7 +1333,9 @@ class BaseHandle:
 
 
 class IsaacBaseHandle(BaseHandle):
-    def __init__(self, sim: SimManager, robot, controller, wheel_radius: float, wheel_base: float) -> None:
+    def __init__(
+        self, sim: SimManager, robot, controller, wheel_radius: float, wheel_base: float
+    ) -> None:
         self._sim = sim
         self._robot = robot
         self._controller = controller
@@ -936,7 +1366,7 @@ class IsaacBaseHandle(BaseHandle):
 
 
 class MockBaseHandle(BaseHandle):
-    def __init__(self, name: str, attrs: Dict[str, Any]) -> None:
+    def __init__(self, name: str, attrs: dict[str, Any]) -> None:
         self.name = name
         self.wheel_radius = float(attrs.get("wheel_radius", 0.05))
         self.wheel_base = float(attrs.get("wheel_base", 0.3))

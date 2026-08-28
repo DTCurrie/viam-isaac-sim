@@ -1,20 +1,24 @@
-"""erh:isaac-sim:arm - a simulated arm.
+"""dtcurrie:isaac-sim:arm - a simulated arm.
 
 Attributes:
-  world (string, required)   - name of the erh:isaac-sim:world component
+  world (string, required)   - name of the dtcurrie:isaac-sim:world component
   asset (string)             - known robot, e.g. "ur20", "ur10", "franka"
   usd_path (string)          - explicit USD to spawn instead of a known asset
   prim_path (string)         - where to place it (default /World/<name>), or
                                an existing articulation in the stage
   position ([x,y,z] meters)  - spawn position
-  end_effector_prim (string) - prim path whose world pose is reported by
-                               GetEndPosition
+  end_effector_prim (string) - prim whose pose, in the arm base frame, is
+                               reported by GetEndPosition (default
+                               <arm prim>/wrist_3_link for UR assets)
   move_timeout_sec (float)   - max time to wait for a move (default 30)
   kinematics_url (string)    - where to fetch the kinematics file served by
                                GetKinematics (.json = SVA, .urdf = URDF;
                                file:// URLs work). Known assets with official
                                viam kinematics (ur3e/ur5e/ur20) fetch them
                                automatically.
+
+Note: GetEndPosition reports the end effector pose in the arm base frame
+(not world frame) as of this release.
 """
 
 import asyncio
@@ -24,10 +28,12 @@ import os
 import tempfile
 import time
 import urllib.request
-from typing import Any, ClassVar, Dict, List, Mapping, Optional, Sequence, Tuple
+from collections.abc import Mapping, Sequence
+from typing import Any, ClassVar
 
 from typing_extensions import Self
 from viam.components.arm import Arm, JointPositions, KinematicsFileFormat, Pose
+from viam.errors import MethodNotImplementedError
 from viam.proto.app.robot import ComponentConfig
 from viam.proto.common import Geometry, ResourceName
 from viam.resource.base import ResourceBase
@@ -36,22 +42,22 @@ from viam.resource.types import Model, ModelFamily
 from viam.utils import ValueTypes
 
 from .. import FAMILY, NAMESPACE
-from ..sim_manager import KNOWN_ASSETS, ArmHandle, SimManager
+from ..sim_manager import KNOWN_ASSETS, ArmHandle, SimManager, _prim_name
 from ..spatial import quat_to_ov
 from .utils import apply_frame_to_attrs, get_attrs, validate_sim_component
 
 _TOLERANCE_RAD = math.radians(0.5)
 
 
-class IsaacArm(Arm, EasyResource):
+class IsaacArm(Arm, EasyResource):  # type: ignore[misc]  # SDK: API is Final on the component, redeclared by EasyResource
     MODEL: ClassVar[Model] = Model(ModelFamily(NAMESPACE, FAMILY), "arm")
 
     def __init__(self, name: str) -> None:
         super().__init__(name)
-        self._handle: Optional[ArmHandle] = None
-        self._attrs: Dict[str, Any] = {}
+        self._handle: ArmHandle | None = None
+        self._attrs: dict[str, Any] = {}
         self._move_timeout = 30.0
-        self._kinematics: Optional[Tuple[KinematicsFileFormat.ValueType, bytes]] = None
+        self._kinematics: tuple[KinematicsFileFormat.ValueType, bytes] | None = None
 
     @classmethod
     def new(
@@ -62,9 +68,7 @@ class IsaacArm(Arm, EasyResource):
         return arm
 
     @classmethod
-    def validate_config(
-        cls, config: ComponentConfig
-    ) -> Tuple[Sequence[str], Sequence[str]]:
+    def validate_config(cls, config: ComponentConfig) -> tuple[Sequence[str], Sequence[str]]:
         return validate_sim_component(config)
 
     def reconfigure(
@@ -94,30 +98,27 @@ class IsaacArm(Arm, EasyResource):
         )
 
     async def move_to_position(self, pose: Pose, **kwargs) -> None:
-        raise NotImplementedError(
-            "IK and motion planning are Viam's job, not the module's: use the "
-            "motion service (needs GetKinematics, on the roadmap) or "
-            "move_to_joint_positions"
-        )
+        # IK and motion planning are Viam's job, not the module's: the motion
+        # service does this via GetKinematics + move_to_joint_positions.
+        raise MethodNotImplementedError("move_to_position")
 
-    async def move_to_joint_positions(
-        self, positions: JointPositions, **kwargs
-    ) -> None:
+    async def move_to_joint_positions(self, positions: JointPositions, **kwargs) -> None:
         targets = [math.radians(v) for v in positions.values]
         handle = self._h()
+        current = await asyncio.to_thread(handle.get_joint_positions)
+        if len(current) != len(targets):
+            raise ValueError(
+                f"arm {self.name}: expected {len(current)} joint values, got {len(targets)}"
+            )
         await asyncio.to_thread(handle.set_joint_targets, targets)
 
         deadline = time.monotonic() + self._move_timeout
         while time.monotonic() < deadline:
             current = await asyncio.to_thread(handle.get_joint_positions)
-            if len(current) >= len(targets) and all(
-                abs(c - t) <= _TOLERANCE_RAD for c, t in zip(current, targets)
-            ):
+            if all(abs(c - t) <= _TOLERANCE_RAD for c, t in zip(current, targets, strict=True)):
                 return
             await asyncio.sleep(0.05)
-        raise TimeoutError(
-            f"arm {self.name} did not reach target within {self._move_timeout}s"
-        )
+        raise TimeoutError(f"arm {self.name} did not reach target within {self._move_timeout}s")
 
     async def move_through_joint_positions(
         self, positions: Sequence[JointPositions], *args, **kwargs
@@ -130,22 +131,25 @@ class IsaacArm(Arm, EasyResource):
         loose = math.radians(2.0)
         for i, wp in enumerate(waypoints):
             targets = [math.radians(v) for v in wp.values]
+            current = await asyncio.to_thread(handle.get_joint_positions)
+            if len(current) != len(targets):
+                raise ValueError(
+                    f"arm {self.name}: expected {len(current)} joint values, got {len(targets)}"
+                )
             await asyncio.to_thread(handle.set_joint_targets, targets)
             last = i == len(waypoints) - 1
             tolerance = _TOLERANCE_RAD if last else loose
             deadline = time.monotonic() + (self._move_timeout if last else 10.0)
-            current: List[float] = []
+            current = []
             while time.monotonic() < deadline:
                 current = await asyncio.to_thread(handle.get_joint_positions)
-                if len(current) >= len(targets) and all(
-                    abs(c - t) <= tolerance for c, t in zip(current, targets)
-                ):
+                if all(abs(c - t) <= tolerance for c, t in zip(current, targets, strict=True)):
                     break
                 await asyncio.sleep(0.02)
             else:
                 detail = ", ".join(
                     f"j{j}: at {math.degrees(c):.1f} want {math.degrees(t):.1f}"
-                    for j, (c, t) in enumerate(zip(current, targets))
+                    for j, (c, t) in enumerate(zip(current, targets, strict=True))
                     if abs(c - t) > tolerance
                 )
                 if last:
@@ -155,7 +159,10 @@ class IsaacArm(Arm, EasyResource):
                     )
                 self.logger.warning(
                     "%s: waypoint %d/%d not reached, continuing (%s)",
-                    self.name, i + 1, len(waypoints), detail,
+                    self.name,
+                    i + 1,
+                    len(waypoints),
+                    detail,
                 )
 
     async def get_joint_positions(self, **kwargs) -> JointPositions:
@@ -168,7 +175,7 @@ class IsaacArm(Arm, EasyResource):
     async def is_moving(self) -> bool:
         return await asyncio.to_thread(self._h().is_moving)
 
-    def _kinematics_url(self) -> Optional[str]:
+    def _kinematics_url(self) -> str | None:
         url = self._attrs.get("kinematics_url")
         if url:
             return str(url)
@@ -177,7 +184,7 @@ class IsaacArm(Arm, EasyResource):
             return KNOWN_ASSETS[asset].get("kinematics")
         return None
 
-    def _load_kinematics(self) -> Tuple[KinematicsFileFormat.ValueType, bytes]:
+    def _load_kinematics(self) -> tuple[KinematicsFileFormat.ValueType, bytes]:
         url = self._kinematics_url()
         if not url:
             raise NotImplementedError(
@@ -213,21 +220,58 @@ class IsaacArm(Arm, EasyResource):
             pass  # caching is best-effort
         return fmt, data
 
-    async def get_kinematics(self, **kwargs) -> Tuple[KinematicsFileFormat.ValueType, bytes]:
+    async def get_kinematics(self, **kwargs) -> tuple[KinematicsFileFormat.ValueType, bytes]:
         if self._kinematics is None:
             self._kinematics = await asyncio.to_thread(self._load_kinematics)
         return self._kinematics
 
-    async def get_geometries(self, **kwargs) -> List[Geometry]:
+    async def get_geometries(self, **kwargs) -> list[Geometry]:
+        # Deliberately empty: rdk builds arm geometry from GetKinematics (the
+        # SVA already carries the link capsules) and never calls Geometries
+        # for arms.
         return []
+
+    # Abstract on viam-sdk "main" but absent at the 0.80.0 floor pinned in
+    # requirements.txt; implementing it keeps IsaacArm instantiable across
+    # that bound.
+    async def get_3d_models(self, **kwargs) -> Mapping[str, Any]:
+        return {}
+
+    def _default_ee_prim_path(self) -> str:
+        """The EE prim GetEndPosition/prim_world_pose fall back to when no
+        explicit prim_path is given, matching the normalisation SimManager
+        uses to spawn/mock the arm's prim."""
+        prim_path = self._attrs.get("prim_path") or f"/World/{_prim_name(self.name)}"
+        return f"{prim_path}/wrist_3_link"
 
     async def do_command(
         self,
         command: Mapping[str, ValueTypes],
         *,
-        timeout: Optional[float] = None,
+        timeout: float | None = None,
         **kwargs,
     ) -> Mapping[str, ValueTypes]:
-        if command.get("command") == "get_joint_positions_radians":
-            return {"values": await asyncio.to_thread(self._h().get_joint_positions)}
+        cmd = command.get("command")
+        if cmd == "get_joint_positions_radians":
+            return {"values": list(await asyncio.to_thread(self._h().get_joint_positions))}
+        if cmd == "dof_names":
+            names: list[ValueTypes] = list(await asyncio.to_thread(self._h().dof_names))
+            return {"dof_names": names}
+        if cmd == "prim_world_pose":
+            prim_path = command.get("prim_path") or self._default_ee_prim_path()
+            if not isinstance(prim_path, str):
+                raise ValueError(f"prim_path must be a string, got {prim_path!r}")
+            (x, y, z), quat = await asyncio.to_thread(self._h().get_prim_world_pose, prim_path)
+            ox, oy, oz, theta = quat_to_ov(quat)
+            return {
+                "prim_path": prim_path,
+                "position_mm": [x * 1000.0, y * 1000.0, z * 1000.0],
+                "quaternion_wxyz": list(quat),
+                "orientation_vector": {
+                    "o_x": ox,
+                    "o_y": oy,
+                    "o_z": oz,
+                    "theta_deg": math.degrees(theta),
+                },
+            }
         raise ValueError(f"unknown command: {command}")

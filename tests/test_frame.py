@@ -2,9 +2,19 @@ import math
 
 import pytest
 from viam.proto.app.robot import ComponentConfig
+from viam.utils import dict_to_struct
 
+from isaac_module.models.arm import IsaacArm
+from isaac_module.models.camera import IsaacCamera
 from isaac_module.models.utils import apply_frame_to_attrs, frame_pose
 from isaac_module.spatial import quat_rotate
+
+
+def _config(name: str, attrs: dict, parent: str | None = None) -> ComponentConfig:
+    cfg = ComponentConfig(name=name, attributes=dict_to_struct(attrs))
+    if parent is not None:
+        cfg.frame.parent = parent
+    return cfg
 
 
 def test_no_frame():
@@ -55,3 +65,31 @@ def test_frame_wins_over_position_attr():
     cfg.frame.translation.x = 3000
     attrs = apply_frame_to_attrs(cfg, {"position": [9, 9, 9]})
     assert attrs["position"] == [3.0, 0.0, 0.0]
+
+
+def test_validate_frame_parent_world_ok():
+    cfg = _config("a", {"world": "sim-world", "asset": "ur20"}, parent="world")
+    deps, _ = IsaacArm.validate_config(cfg)
+    assert list(deps) == ["sim-world"]
+
+
+def test_validate_frame_parent_unset_ok():
+    cfg = _config("a", {"world": "sim-world", "asset": "ur20"})
+    deps, _ = IsaacArm.validate_config(cfg)
+    assert list(deps) == ["sim-world"]
+
+
+def test_validate_frame_parent_other_rejected():
+    cfg = _config("a", {"world": "sim-world", "asset": "ur20"}, parent="table")
+    with pytest.raises(ValueError, match="frame.parent"):
+        IsaacArm.validate_config(cfg)
+
+
+def test_validate_frame_parent_other_with_parent_prim_ok():
+    cfg = _config(
+        "a",
+        {"world": "sim-world", "parent_prim": "/World/pick_arm"},
+        parent="pick-arm",
+    )
+    deps, _ = IsaacCamera.validate_config(cfg)
+    assert list(deps) == ["sim-world"]

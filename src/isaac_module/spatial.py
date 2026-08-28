@@ -9,13 +9,13 @@ w-first quaternions, so no reordering is needed at the call sites.
 """
 
 import math
-from typing import Sequence, Tuple
+from collections.abc import Sequence
 
 _ANGLE_EPSILON = 1e-4
 _POLE_RADIUS = 1e-4
 
-Quat = Tuple[float, float, float, float]
-Vec3 = Tuple[float, float, float]
+Quat = tuple[float, float, float, float]
+Vec3 = tuple[float, float, float]
 
 
 def quat_mul(a: Quat, b: Quat) -> Quat:
@@ -64,7 +64,7 @@ def _norm(a: Vec3) -> float:
     return math.sqrt(_dot(a, a))
 
 
-def quat_to_ov(q: Quat) -> Tuple[float, float, float, float]:
+def quat_to_ov(q: Quat) -> tuple[float, float, float, float]:
     """Convert a (w,x,y,z) quaternion to a Viam orientation vector
     (ox, oy, oz, theta) with theta in radians. Mirrors rdk's QuatToOV."""
     # rdk uses the -X axis here, not +X.
@@ -154,7 +154,7 @@ def look_at_quat(position: Vec3, target: Vec3) -> Quat:
     return quat_mul(qz, qy)
 
 
-def to_vec3(value: Sequence[float], default: Vec3 = (0.0, 0.0, 0.0)) -> Vec3:
+def to_vec3(value: Sequence[float] | None, default: Vec3 = (0.0, 0.0, 0.0)) -> Vec3:
     if value is None:
         return default
     vals = [float(v) for v in value]

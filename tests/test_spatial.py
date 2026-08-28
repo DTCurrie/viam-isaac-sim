@@ -74,7 +74,7 @@ def test_round_trip_quat(q):
     ox, oy, oz, theta = quat_to_ov(q)
     q2 = ov_to_quat(ox, oy, oz, theta)
     # same rotation iff |dot| == 1
-    dot = sum(a * b for a, b in zip(q, q2))
+    dot = sum(a * b for a, b in zip(q, q2, strict=True))
     assert abs(dot) == pytest.approx(1.0, abs=1e-6)
 
 

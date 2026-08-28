@@ -9,25 +9,9 @@ from viam.utils import dict_to_struct
 
 from isaac_module.models.arm import IsaacArm
 
-# reuse the booted mock sim from test_mock_sim's fixtures via our own tiny setup
-from isaac_module.sim_manager import SimConfig, SimManager
-import threading
-
-
-@pytest.fixture(scope="module")
-def sim():
-    manager = SimManager.get()
-    if not manager._booted.is_set():
-        t = threading.Thread(target=manager.main_loop, daemon=True)
-        t.start()
-        manager.ensure_booted(SimConfig(mock=True))
-    return manager
-
 
 def _arm(name, attrs):
-    return IsaacArm.new(
-        ComponentConfig(name=name, attributes=dict_to_struct(attrs)), {}
-    )
+    return IsaacArm.new(ComponentConfig(name=name, attributes=dict_to_struct(attrs)), {})
 
 
 def test_kinematics_from_file_url(sim, tmp_path):

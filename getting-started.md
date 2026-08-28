@@ -20,10 +20,10 @@ These instructions were tested with:
 
 ## Start Isaac in Viam
 
-In the 'configure' tab of the web UI, hit the '+' button or tap 'A', then tap 'B' for blocks, then find the `isaac-sim-pick-and-place` fragment from `erh` and install it. Click 'Save' in the top right.
+In the 'configure' tab of the web UI, hit the '+' button or tap 'A', then tap 'B' for blocks, then find the `isaac-sim-pick-and-place` fragment from `erh` (the upstream public fragment; this fork is run as a local module via `viam module reload-local` for now) and install it. Click 'Save' in the top right.
 
 Switch to the 'logs' tab to watch the installed components start up. On the test machine this takes around 15 seconds. You'll see an 'event=complete' event from the rdk.activity logger when this is done.
 
 Now switch to the 'control' tab to interact with the cameras and arm.
 
-If something goes wrong, the place to debug is the logs tab; to cut down on noise, find the components list on the left-side menu bar and click the `erh_isaac-sim` module to filter down the output.
+If something goes wrong, the place to debug is the logs tab; to cut down on noise, find the components list on the left-side menu bar and click the `dtcurrie_isaac-sim` module (or whatever you named the local module) to filter down the output.

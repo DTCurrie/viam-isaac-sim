@@ -30,7 +30,7 @@ def _run_module(sim: SimManager) -> None:
     # grpclib wants to install signal handlers, which is only possible on the
     # main thread - and the main thread belongs to isaac sim. Shutdown is
     # handled by the signal handlers installed in main() instead.
-    loop.add_signal_handler = lambda *args, **kwargs: None
+    loop.add_signal_handler = lambda *args, **kwargs: None  # type: ignore[method-assign]  # deliberate: signals are handled on the main thread
     asyncio.set_event_loop(loop)
     try:
         loop.run_until_complete(Module.run_from_registry())

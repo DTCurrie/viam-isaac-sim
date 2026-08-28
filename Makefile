@@ -9,13 +9,27 @@ dist/run.sh: run.sh
 	printf '#!/usr/bin/env bash\nexec "$$(dirname "$$0")/../run.sh" "$$@"\n' > dist/run.sh
 	chmod +x dist/run.sh
 
+PY ?= .venv/bin/python
+
 setup:
 	@echo "nothing to set up - the module is packaged as source"
 
+fmt:
+	$(PY) -m ruff format src tests
+
+fmt-check:
+	$(PY) -m ruff format --check src tests
+
+lint:
+	$(PY) -m ruff check src tests
+
+typecheck:
+	$(PY) -m mypy
+
 test:
-	python3 -m pytest tests/
+	$(PY) -m pytest tests/
 
 clean:
 	rm -rf module.tar.gz dist
 
-.PHONY: setup test clean
+.PHONY: setup fmt fmt-check lint typecheck test clean
