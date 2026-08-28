@@ -6,6 +6,7 @@ from viam.proto.app.robot import ComponentConfig
 from viam.utils import struct_to_dict
 
 from .. import FAMILY, NAMESPACE
+from ..sim_manager import _prim_name
 from ..spatial import Quat, Vec3, ov_to_quat, quat_from_axis_angle, quat_mul
 
 
@@ -51,13 +52,57 @@ def frame_pose(config: ComponentConfig) -> tuple[Vec3 | None, Quat | None]:
 
 def apply_frame_to_attrs(config: ComponentConfig, attrs: dict[str, Any]) -> dict[str, Any]:
     """Fold the frame config into the spawn attrs (frame wins over the
-    legacy position/orientation attributes)."""
+    legacy position/orientation attributes).
+
+    When "parent_prim" is set the component rides another prim, so the frame
+    describes a LOCAL pose relative to that prim, not a world pose: it is
+    written to local_position/local_orientation_wxyz instead of
+    position/orientation_wxyz (CAM-10 - mixing the two meant a world pose
+    landed on a mounted camera)."""
     position, quat = frame_pose(config)
+    if attrs.get("parent_prim"):
+        if position is not None:
+            attrs["local_position"] = list(position)
+        if quat is not None or config.HasField("frame"):
+            attrs["local_orientation_wxyz"] = list(quat or (1.0, 0.0, 0.0, 0.0))
+        return attrs
     if position is not None:
         attrs["position"] = list(position)
     if quat is not None:
         attrs["orientation_wxyz"] = list(quat)
     return attrs
+
+
+def _prim_root(parent_prim: str) -> str:
+    """The prim segment that owns parent_prim: the segment right after a
+    leading /World/, or the first segment when the path doesn't start with
+    /World/."""
+    parts = [p for p in parent_prim.split("/") if p]
+    if parent_prim.startswith("/World/") and len(parts) >= 2:
+        return parts[1]
+    return parts[0]
+
+
+def _validate_parent_prim_frame(config: ComponentConfig, attrs: dict[str, Any]) -> None:
+    """A component riding another prim (parent_prim set) must agree with
+    Viam about who owns that prim: frame.parent names the component whose
+    prim it is, so viam's view (e.g. the motion service) matches the sim."""
+    parent_prim = attrs["parent_prim"]
+    if not config.HasField("frame") or config.frame.parent in ("", "world"):
+        raise ValueError(
+            f'{config.name}: "parent_prim" is set, so set frame.parent to the '
+            f"{NAMESPACE}:{FAMILY} component that owns that prim (frame.parent "
+            'cannot be "world" for a mounted component)'
+        )
+    parent = config.frame.parent
+    owner = parent.split(":")[0]
+    root = _prim_root(parent_prim)
+    if _prim_name(owner) != root:
+        raise ValueError(
+            f"{config.name}: frame.parent {parent!r} does not own parent_prim "
+            f"{parent_prim!r} (root prim {root!r}); set frame.parent to the "
+            "component whose prim that is"
+        )
 
 
 def validate_sim_component(
@@ -78,9 +123,12 @@ def validate_sim_component(
             f'{config.name}: set "asset" (e.g. "ur20"), "usd_path", or '
             '"prim_path" (to attach to something already in the stage)'
         )
-    if config.HasField("frame"):
+    parent_prim = attrs.get("parent_prim")
+    if parent_prim:
+        _validate_parent_prim_frame(config, attrs)
+    elif config.HasField("frame"):
         parent = config.frame.parent
-        if parent not in ("", "world") and not attrs.get("parent_prim"):
+        if parent not in ("", "world"):
             raise ValueError(
                 f'{config.name}: frame.parent must be "world" for spawned isaac-sim '
                 f"components in this release (got {parent!r}); to ride another prim "

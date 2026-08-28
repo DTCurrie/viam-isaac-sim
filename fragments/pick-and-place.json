@@ -33,7 +33,14 @@
             "scale": [1, 1, 0.05],
             "color": [0.1, 0.3, 0.9]
           }
-        ]
+        ],
+        "lighting": {
+          "dome": {
+            "intensity": 1000,
+            "color": [1, 1, 1]
+          },
+          "sphere_intensity": 30000
+        }
       }
     },
     {
@@ -41,10 +48,12 @@
       "namespace": "rdk",
       "type": "arm",
       "model": "dtcurrie:isaac-sim:arm",
-      "frame": { "parent": "world" },
+      "frame": {
+        "parent": "world"
+      },
       "attributes": {
         "world": "sim-world",
-        "asset": "ur20"
+        "asset": "ur5e"
       }
     },
     {
@@ -68,12 +77,54 @@
       "namespace": "rdk",
       "type": "camera",
       "model": "dtcurrie:isaac-sim:camera",
+      "frame": {
+        "parent": "pick-arm",
+        "translation": { "x": 0, "y": 0, "z": 60 },
+        "orientation": {
+          "type": "ov_degrees",
+          "value": { "x": 0, "y": 0, "z": 1, "th": 180 }
+        }
+      },
       "attributes": {
         "world": "sim-world",
         "parent_prim": "/World/pick_arm/wrist_3_link",
-        "local_position": [0, 0, 0.06],
-        "width": 640,
-        "height": 480
+        "depth": true,
+        "width": 848,
+        "height": 480,
+        "fov_deg": 90.5
+      }
+    }
+  ],
+  "services": [
+    {
+      "name": "builtin",
+      "api": "rdk:service:motion",
+      "model": "rdk:builtin:builtin",
+      "attributes": {}
+    },
+    {
+      "name": "red-detector",
+      "api": "rdk:service:vision",
+      "model": "color_detector",
+      "attributes": {
+        "detect_color": "#EA8D8D",
+        "hue_tolerance_pct": 0.1,
+        "segment_size_px": 100,
+        "value_cutoff_pct": 0.15,
+        "camera_name": "wrist-cam"
+      }
+    },
+    {
+      "name": "block-segmenter",
+      "api": "rdk:service:vision",
+      "model": "viam:vision:detections-to-segments",
+      "attributes": {
+        "detector_name": "red-detector",
+        "camera_name": "wrist-cam",
+        "mean_k": 5,
+        "sigma": 1.25,
+        "confidence_threshold_pct": 0.5,
+        "infer_minimum_depth": true
       }
     }
   ]

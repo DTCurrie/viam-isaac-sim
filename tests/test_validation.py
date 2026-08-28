@@ -68,3 +68,40 @@ def test_entry_without_name_rejected():
     cfg = _config({"props": [{"type": "cube"}]})
     with pytest.raises(ValueError, match="props\\[0\\]"):
         IsaacWorld.validate_config(cfg)
+
+
+def test_valid_lighting_passes():
+    cfg = _config(
+        {"lighting": {"dome": {"intensity": 1000, "color": [1, 1, 1]}, "sphere_intensity": 30000}}
+    )
+    IsaacWorld.validate_config(cfg)
+
+
+def test_lighting_dome_color_out_of_range_rejected():
+    cfg = _config({"lighting": {"dome": {"color": [1.5, 0, 0]}}})
+    with pytest.raises(ValueError, match="color"):
+        IsaacWorld.validate_config(cfg)
+
+
+def test_lighting_negative_sphere_intensity_rejected():
+    cfg = _config({"lighting": {"sphere_intensity": -1}})
+    with pytest.raises(ValueError, match="sphere_intensity"):
+        IsaacWorld.validate_config(cfg)
+
+
+def test_lighting_unknown_key_rejected():
+    cfg = _config({"lighting": {"sun": 1}})
+    with pytest.raises(ValueError, match="sun"):
+        IsaacWorld.validate_config(cfg)
+
+
+def test_lighting_not_an_object_rejected():
+    cfg = _config({"lighting": "bright"})
+    with pytest.raises(ValueError, match="lighting"):
+        IsaacWorld.validate_config(cfg)
+
+
+def test_lighting_dome_zero_intensity_rejected():
+    cfg = _config({"lighting": {"dome": {"intensity": 0}}})
+    with pytest.raises(ValueError, match="intensity"):
+        IsaacWorld.validate_config(cfg)

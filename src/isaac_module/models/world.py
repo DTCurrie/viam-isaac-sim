@@ -27,6 +27,12 @@ Attributes:
                                        "fixed" (bool),
                                        "usd_path" (non-empty str, required
                                         when type is "usd")}
+  lighting (object)                 - scene lights to configure at boot:
+                                      {"dome": {"intensity": 1000,
+                                                 "color": [1, 1, 1]},
+                                       "sphere_intensity": 30000}. Both keys
+                                      optional; unset means leave the stage's
+                                      lights alone.
 
 DoCommand:
   {"command": "status"} | {"command": "play"} | {"command": "pause"} |
@@ -111,6 +117,41 @@ def _validate_props(props: object) -> None:
             raise ValueError(f"prop {label}: 'fixed' must be a bool")
 
 
+_LIGHTING_KEYS = {"dome", "sphere_intensity"}
+
+
+def _validate_lighting(value: object) -> None:
+    if not isinstance(value, Mapping):
+        raise ValueError("lighting must be an object")
+    for key in value:
+        if key not in _LIGHTING_KEYS:
+            raise ValueError(f"lighting: unknown key {key!r}")
+
+    dome = value.get("dome")
+    if dome is not None:
+        if not isinstance(dome, Mapping):
+            raise ValueError("lighting.dome must be an object")
+        if "intensity" in dome:
+            intensity = dome["intensity"]
+            is_number = isinstance(intensity, (int, float)) and not isinstance(intensity, bool)
+            if not is_number or intensity <= 0:
+                raise ValueError("lighting.dome.intensity must be a positive number")
+        if "color" in dome:
+            _validate_number_triple("lighting.dome", "color", dome["color"])
+            for v in dome["color"]:
+                is_number = isinstance(v, (int, float)) and not isinstance(v, bool)
+                if is_number and not (0 <= v <= 1):
+                    raise ValueError("lighting.dome.color values must be in [0, 1]")
+
+    sphere_intensity = value.get("sphere_intensity")
+    if sphere_intensity is not None:
+        is_number = isinstance(sphere_intensity, (int, float)) and not isinstance(
+            sphere_intensity, bool
+        )
+        if not is_number or sphere_intensity < 0:
+            raise ValueError("lighting.sphere_intensity must be a non-negative number")
+
+
 class IsaacWorld(Generic, EasyResource):  # type: ignore[misc]  # SDK: API is Final on the component, redeclared by EasyResource
     MODEL: ClassVar[Model] = Model(ModelFamily(NAMESPACE, FAMILY), "world")
 
@@ -130,6 +171,8 @@ class IsaacWorld(Generic, EasyResource):  # type: ignore[misc]  # SDK: API is Fi
                 raise ValueError(f"{key} must be positive")
         if "props" in attrs:
             _validate_props(attrs["props"])
+        if "lighting" in attrs:
+            _validate_lighting(attrs["lighting"])
         return [], []
 
     def reconfigure(
@@ -147,6 +190,7 @@ class IsaacWorld(Generic, EasyResource):  # type: ignore[misc]  # SDK: API is Fi
             kit_log_level=str(attrs.get("kit_log_level", "warning")),
             livestream_public_ip=str(attrs.get("livestream_public_ip", "")),
             props=[dict(p) for p in attrs.get("props", [])],
+            lighting=dict(attrs["lighting"]) if attrs.get("lighting") is not None else None,
         )
         SimManager.get().ensure_booted(cfg)
 

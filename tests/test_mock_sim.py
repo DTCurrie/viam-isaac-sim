@@ -26,6 +26,7 @@ def test_world_boots_and_status(world):
     status = asyncio.run(world.do_command({"command": "status"}))
     assert status["booted"] is True
     assert status["mock"] is True
+    assert status["isaac_version"] is None  # no Isaac here; a string like "5.0.0" on the VM
 
 
 def test_validate_requires_world():
@@ -92,19 +93,17 @@ def test_camera_returns_image(world):
     )
 
     async def scenario():
-        img = await cam.get_image()
-        assert img.mime_type == "image/jpeg"
-        assert len(img.data) > 100
+        images, _meta = await cam.get_images()
+        assert len(images) == 1
+        assert images[0].name == "color"
+        assert images[0].mime_type == "image/png"
 
         from io import BytesIO
 
         from PIL import Image
 
-        decoded = Image.open(BytesIO(img.data))
+        decoded = Image.open(BytesIO(images[0].data))
         assert decoded.size == (320, 240)
-
-        images, _meta = await cam.get_images()
-        assert len(images) == 1
 
         props = await cam.get_properties()
         assert props.supports_pcd is False

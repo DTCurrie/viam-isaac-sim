@@ -22,7 +22,7 @@ What it is/does
 |---|---|---|
 | `dtcurrie:isaac-sim:world` | `generic` | Boots Isaac Sim, opens the USD stage, runs the sim loop. Configure exactly one. |
 | `dtcurrie:isaac-sim:arm` | `arm` | Spawns (or attaches to) an articulation - UR arms, Franka, or any USD - and exposes joint control. |
-| `dtcurrie:isaac-sim:camera` | `camera` | Creates (or attaches to) a camera prim and serves its RGB frames. |
+| `dtcurrie:isaac-sim:camera` | `camera` | Creates (or attaches to) a camera prim and serves RGB, depth (`image/vnd.viam.dep`) and point clouds (`pointcloud/pcd`). |
 | `dtcurrie:isaac-sim:base` | `base` | Spawns a differential-drive robot (e.g. jetbot) and drives it. |
 
 Known assets (usable via the `asset` attribute): `ur3e`, `ur5e`, `ur10`,
@@ -99,9 +99,13 @@ overrides orientation to aim at a point.
 **Frames:** a spawned component's `frame.parent` must be `"world"` - the
 spawn path does not resolve an arbitrary frame chain, only the world's own
 origin. The one exception is a component that also sets `parent_prim` (e.g.
-a wrist camera riding an arm link): it may name that arm (or other)
-component as its frame parent instead, since it is attaching to a prim
-inside the sim rather than asking the spawn path to place it.
+a wrist camera riding an arm link): it must instead name, as its
+`frame.parent`, the component that owns that prim (e.g. `parent_prim
+"/World/pick_arm/wrist_3_link"` requires `frame.parent` to be `"pick-arm"`
+or a sub-frame like `"pick-arm:ee_link"`). `frame.parent "world"`, or no
+`frame` at all, is rejected with a validation error - for a mounted
+component the frame is the single source of truth for the mount, and its
+translation/orientation become the camera's local pose on the link.
 
 ### world attributes
 
@@ -116,6 +120,7 @@ inside the sim rather than asking the spawn path to place it.
 | `boot_timeout_sec` | `300` | Isaac Sim can take a while on first boot |
 | `kit_log_level` | `"warning"` | kit console verbosity |
 | `props` | `[]` | objects spawned into the scene at boot; see below |
+| `lighting` | _unset_ | `{"dome": {"intensity": 1000, "color": [1, 1, 1]}, "sphere_intensity": 30000}` - both keys optional, unset leaves the stage's lights alone; the default stage has a single 100 000-intensity sphere light, so a dome light is useful to even out colour for detection |
 
 Each entry in `props` is an object: `name` (string, snake_cased for the prim
 path), `type` (`"cube"` or `"usd"`), `position` ([x,y,z] meters, the prop's
@@ -208,7 +213,58 @@ Viam's idea of the arm's pose would silently disagree.
 
 `world` (required), and either `prim_path` of an existing camera in your stage
 or `position` plus `target` (aim-at point) or `orientation_rpy_deg` to create
-one. `width`/`height` default to 640x480.
+one.
+
+| attribute | default | notes |
+|---|---|---|
+| `world` | _required_ | name of the world component |
+| `prim_path` | _unset_ | attach to an existing camera prim instead of spawning one |
+| `position` | _unset_ | `[x,y,z]` meters, fallback when no `frame` is set |
+| `target` | _unset_ | aim-at point; overrides orientation to point at it |
+| `orientation_rpy_deg` | _unset_ | fallback orientation when no `frame` is set |
+| `width` | `848` | image width in pixels |
+| `height` | `480` | image height in pixels |
+| `fov_deg` | `90.5` | horizontal field of view |
+| `depth` | `false` | attach the depth annotator (wrist cam: `true`) |
+| `clip_near` | `0.05` | metres, near clip plane |
+| `clip_far` | `10.0` | metres, far clip plane |
+| `image_format` | `"png"` | colour encoding for `GetImages` (`"png"` or `"jpeg"`) |
+| `frequency` | _unset_ | capture rate; unset = every rendered frame |
+| `parent_prim` | _unset_ | ride a link (e.g. a wrist camera) instead of spawning free-standing; requires a `frame` whose `parent` is the component that owns that prim (see "Frames" above) - its translation/orientation become the camera's local pose, applied in ROS-optical axes (camera +Z = frame +Z); the legacy `local_position`/`local_orientation_rpy_deg` attributes only apply when no `frame` is set |
+
+**What the camera serves:** `GetImages` returns `[NamedImage("color", png|jpeg),
+NamedImage("depth", image/vnd.viam.dep)]`, colour first, honouring
+`filter_source_names` (unknown names are dropped, so fewer images come back).
+`GetPointCloud` (depth cameras only) returns binary `pointcloud/pcd`, in
+metres, in the camera-optical frame (+X right, +Y down, +Z forward); invalid
+points are dropped. `GetProperties` reports `supports_pcd` (true iff `depth`
+is set), real pinhole intrinsics (`fx = fy = W/(2·tan(hfov/2))`, e.g. 420.3 px
+at 848x480 @ 90.5°), `mime_types`, and `frame_rate`. `DoCommand
+{"command": "sample_color", "region": [x0, y0, x1, y1]}` returns
+`{"srgb_hex": "#RRGGBB", "mean_rgb": [r, g, b]}`, useful for picking
+`detect_color` for Viam's `color_detector`. While the renderer has not
+produced a frame yet (just after create/reset), calls fail with gRPC
+`FAILED_PRECONDITION` - retry.
+
+A wrist camera riding an arm link:
+
+```json
+{
+  "name": "wrist-cam",
+  "model": "dtcurrie:isaac-sim:camera",
+  "type": "camera",
+  "frame": {
+    "parent": "pick-arm",
+    "translation": { "x": 0, "y": 0, "z": 60 },
+    "orientation": { "type": "ov_degrees", "value": { "x": 0, "y": 0, "z": 1, "th": 0 } }
+  },
+  "attributes": {
+    "world": "sim-world",
+    "parent_prim": "/World/pick_arm/wrist_3_link",
+    "depth": true
+  }
+}
+```
 
 ### base attributes
 
@@ -385,5 +441,5 @@ and 3.11.
 - [x] cloud builds / registry publishing (tag a release)
 - [x] serve kinematics files (`GetKinematics`) so Viam's motion service can do
       IK and planning for simulated arms (all motion stays in Viam, not Isaac)
-- [ ] depth / point clouds from cameras
+- [x] depth / point clouds from cameras
 - [ ] gripper support

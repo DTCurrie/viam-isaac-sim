@@ -22,11 +22,25 @@ from concurrent.futures import Future
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
+import numpy as np
 from viam.logging import getLogger
 
 from . import FAMILY, NAMESPACE
+from .camera_base import CameraHandle, Frame, NoFrameYetError
+from .compat import import_isaac, isaac_version
+from .encoding import Intrinsics
 from .errors import PrimNotFoundError, SimNotBootedError, SimTimeoutError
-from .spatial import Quat, Vec3, quat_conj, quat_mul, quat_rotate
+from .mock_camera import MockCameraHandle
+from .spatial import (
+    Quat,
+    Vec3,
+    look_at_quat,
+    quat_conj,
+    quat_from_euler_deg,
+    quat_mul,
+    quat_rotate,
+    to_vec3,
+)
 
 LOGGER = getLogger("viam-isaac-sim")
 
@@ -119,12 +133,123 @@ class SimConfig:
     # of lines at info, and viam-server records the module's stderr as
     # error-level logs, so default to warning.
     kit_log_level: str = "warning"
+    # scene lighting (FINDINGS SCN-9 / W30). None = leave the stage's lights
+    # alone. Shape: {"dome": {"intensity": 1000, "color": [1, 1, 1]},
+    # "sphere_intensity": 30000}; Isaac creates a DomeLight prim and rescales
+    # /World/SphereLight, the mock records the config for tests.
+    lighting: dict[str, Any] | None = None
+
+
+# FINDINGS W30 lighting defaults: the DomeLight the module adds, and the prim
+# paths in default_environment.usd it adjusts.
+# a camera frequency must divide the render rate (IS-3); slack for float error
+FREQUENCY_DIVISOR_TOLERANCE = 1e-6
+DEFAULT_DOME_INTENSITY = 1000.0
+DEFAULT_DOME_COLOR = (1.0, 1.0, 1.0)
+DOME_LIGHT_PRIM_PATH = "/World/DomeLight"
+SPHERE_LIGHT_PRIM_PATH = "/World/SphereLight"
 
 
 def _as_quat(values: Sequence[float]) -> Quat:
     """Four numbers -> a (w, x, y, z) quaternion tuple (validates arity)."""
     w, x, y, z = (float(v) for v in values)
     return (w, x, y, z)
+
+
+# create_camera attrs contract defaults (camera_base.py module docstring,
+# FINDINGS W18/W19).
+DEFAULT_CAMERA_WIDTH = 848
+DEFAULT_CAMERA_HEIGHT = 480
+DEFAULT_CAMERA_FOV_DEG = 90.5
+DEFAULT_CLIP_NEAR_M = 0.05
+DEFAULT_CLIP_FAR_M = 10.0
+
+
+def _camera_prim_path(name: str, attrs: dict[str, Any]) -> str:
+    """Prim path for a to-be-created camera: parented under ``parent_prim``,
+    else an explicit ``prim_path``, else ``/World/<name>``."""
+    parent = attrs.get("parent_prim")
+    if parent:
+        return f"{parent.rstrip('/')}/{_prim_name(name)}"
+    return attrs.get("prim_path") or f"/World/{_prim_name(name)}"
+
+
+def _place_camera(cam: Any, attrs: dict[str, Any]) -> None:
+    """Pose a just-initialized camera per the create_camera attrs contract
+    (camera_base.py module docstring). ``parent_prim`` rides a (possibly
+    moving) link; ``local_orientation_wxyz`` - derived from the Viam frame -
+    is the source of truth (CAM-10) and is applied in ROS-optical axes so the
+    camera's +Z is the frame's forward axis. Absent that, the legacy
+    ``local_orientation_rpy_deg`` pose (usd axes, 180 deg about X to flip the
+    usd camera's -Z forward) still applies. Free-standing ``target``/
+    ``orientation_wxyz`` cameras are unchanged."""
+    parent = attrs.get("parent_prim")
+    if parent:
+        local_position = list(to_vec3(attrs.get("local_position"), default=(0.0, 0.0, 0.05)))
+        if attrs.get("local_orientation_wxyz") is not None:
+            quat = list(_as_quat(attrs["local_orientation_wxyz"]))
+            cam.set_local_pose(local_position, quat, camera_axes="ros")
+        else:
+            r, p, y = to_vec3(attrs.get("local_orientation_rpy_deg"), default=(180.0, 0.0, 0.0))
+            quat = list(quat_from_euler_deg(r, p, y))
+            cam.set_local_pose(local_position, quat, camera_axes="usd")
+    elif attrs.get("target") is not None:
+        # aim at a target point (world axes: +X forward, +Z up)
+        position = to_vec3(attrs.get("position"), default=(3.0, 3.0, 2.5))
+        world_quat = look_at_quat(position, to_vec3(attrs.get("target")))
+        cam.set_world_pose(list(position), list(world_quat), camera_axes="world")
+    elif attrs.get("orientation_wxyz") is not None:
+        position = to_vec3(attrs.get("position"))
+        world_quat = _as_quat(attrs["orientation_wxyz"])
+        cam.set_world_pose(list(position), list(world_quat), camera_axes="world")
+
+
+def _configure_camera_optics(
+    cam: Any, attrs: dict[str, Any], rendering_dt: float = 1.0 / 60.0
+) -> None:
+    """Focal length from ``fov_deg`` (CAM-4's aperture cancels usd's unit
+    convention so this is unit-safe on both Isaac versions), a matching
+    vertical aperture so pixels stay square (CAM-4), the clipping range
+    (CAM-3 - OpenUSD's unauthored default is a 1 m near clip), the depth
+    annotator (CAM-1) and an optional capture rate."""
+    width, height = cam.get_resolution()
+
+    # newly created cameras default to a 90.5 degree horizontal FOV; a
+    # camera bound to an existing prim (explicit prim_path) keeps that
+    # prim's authored FOV unless fov_deg overrides it.
+    if not attrs.get("prim_path") or attrs.get("fov_deg"):
+        fov = float(attrs.get("fov_deg", DEFAULT_CAMERA_FOV_DEG))
+        horizontal_aperture = cam.get_horizontal_aperture()
+        cam.set_focal_length(horizontal_aperture / (2.0 * math.tan(math.radians(fov) / 2.0)))
+
+    horizontal_aperture = cam.get_horizontal_aperture()
+    cam.set_vertical_aperture(horizontal_aperture * height / width)
+
+    clip_near = float(attrs.get("clip_near", DEFAULT_CLIP_NEAR_M))
+    clip_far = float(attrs.get("clip_far", DEFAULT_CLIP_FAR_M))
+    cam.set_clipping_range(clip_near, clip_far)
+    LOGGER.info(
+        "camera %s clipping range %s",
+        getattr(cam, "name", "<camera>"),
+        cam.get_clipping_range(),
+    )
+
+    if attrs.get("depth"):
+        cam.add_distance_to_image_plane_to_frame()
+
+    frequency = attrs.get("frequency")
+    if frequency:
+        frequency = float(frequency)
+        ticks_per_capture = (1.0 / rendering_dt) / frequency
+        if abs(ticks_per_capture - round(ticks_per_capture)) > FREQUENCY_DIVISOR_TOLERANCE:
+            LOGGER.warning(
+                "camera %s frequency %s Hz is not an integer divisor of the "
+                "render rate (%.4f Hz); the effective capture rate will differ",
+                getattr(cam, "name", "<camera>"),
+                frequency,
+                1.0 / rendering_dt,
+            )
+        cam.set_frequency(frequency)
 
 
 def spawn_orientation(attrs: dict[str, Any], meta: dict[str, Any]) -> Quat:
@@ -223,6 +348,13 @@ class SimManager:
         self.world: Any = None
         self._isaac: Any = None  # lazily-populated namespace of isaac imports
         self._step_callbacks: dict[str, Callable[[float], None]] = {}
+        # scene lighting config from the world component (FINDINGS SCN-9/W30);
+        # stored so status() and tests can read it even in mock mode.
+        self.lighting: dict[str, Any] | None = None
+        # hooks fired (in registration order) after every world reset -
+        # XC-5, so component handles can re-anchor state that resets undo.
+        self._post_reset_hooks: list[Callable[[], None]] = []
+        self._post_reset_lock = threading.Lock()
         # component name -> (spawn attrs, handle). viam-server rebuilds
         # resources on config change, but prims can't be re-spawned without
         # restarting kit, so handles are cached per component name.
@@ -255,6 +387,27 @@ class SimManager:
 
     def request_stop(self) -> None:
         self._stop.set()
+
+    def register_post_reset(self, fn: Callable[[], None]) -> None:
+        """Register a hook that fires (in registration order) after every
+        world reset - boot, a component spawn, or an explicit reset command -
+        on whichever thread performs the reset (the sim thread in practice)."""
+        with self._post_reset_lock:
+            self._post_reset_hooks.append(fn)
+
+    def _reset_world(self) -> None:
+        """The single chokepoint for resetting the isaac world: resets it
+        (skipped in mock mode) then runs every registered post-reset hook,
+        isolating each hook's failures so one can't block the rest."""
+        if not self.mock:
+            self.world.reset()
+        with self._post_reset_lock:
+            hooks = list(self._post_reset_hooks)
+        for hook in hooks:
+            try:
+                hook()
+            except Exception:
+                LOGGER.exception("post-reset hook failed")
 
     def main_loop(self) -> None:
         """Run forever on the owning (main) thread: wait for a boot request,
@@ -326,9 +479,11 @@ class SimManager:
     def _boot(self) -> None:
         cfg = self.cfg
         assert cfg is not None
+        self.lighting = cfg.lighting
         if cfg.mock:
             LOGGER.info("booting in MOCK mode - no isaac sim")
             self.mock = True
+            self._reset_world()
             return
 
         LOGGER.info("booting isaac sim (headless=%s)...", cfg.headless)
@@ -370,7 +525,7 @@ class SimManager:
             except Exception:
                 LOGGER.exception("could not enable livestream; continuing without it")
 
-        self._isaac = _import_isaac()
+        self._isaac = import_isaac()
 
         if cfg.usd_stage:
             LOGGER.info("opening stage %s", cfg.usd_stage)
@@ -388,8 +543,34 @@ class SimManager:
                 self._spawn_prop(prop)
             except Exception:
                 LOGGER.exception("failed to spawn prop %s", prop.get("name"))
-        self.world.reset()
+        if cfg.lighting is not None:
+            self._apply_lighting(cfg.lighting)
+        self._reset_world()
         LOGGER.info("isaac sim world ready")
+
+    def _apply_lighting(self, lighting: dict[str, Any]) -> None:
+        """Configure scene lights per FINDINGS SCN-9/W30. Best-effort: never
+        raises, so bad/unavailable lighting config can't block boot."""
+        try:
+            import omni.usd
+            from pxr import Gf, UsdLux
+
+            stage = omni.usd.get_context().get_stage()
+
+            dome = lighting.get("dome")
+            if dome is not None:
+                dome_light = UsdLux.DomeLight.Define(stage, DOME_LIGHT_PRIM_PATH)
+                dome_light.CreateIntensityAttr(float(dome.get("intensity", DEFAULT_DOME_INTENSITY)))
+                color = dome.get("color", DEFAULT_DOME_COLOR)
+                dome_light.CreateColorAttr(Gf.Vec3f(*[float(v) for v in color]))
+
+            sphere_intensity = lighting.get("sphere_intensity")
+            if sphere_intensity is not None:
+                sphere_prim = stage.GetPrimAtPath(SPHERE_LIGHT_PRIM_PATH)
+                if sphere_prim.IsValid():
+                    UsdLux.SphereLight(sphere_prim).GetIntensityAttr().Set(float(sphere_intensity))
+        except Exception:
+            LOGGER.exception("failed to apply scene lighting")
 
     def _spawn_prop(self, prop: dict[str, Any]) -> None:
         """Add a configured prop to the scene (runs on the sim thread,
@@ -456,14 +637,16 @@ class SimManager:
 
     def reset(self) -> None:
         self._require_booted()
-        if not self.mock:
-            self.run(lambda: self.world.reset())
+        self.run(lambda: self._reset_world())
 
     def status(self) -> dict[str, Any]:
         out: dict[str, Any] = {
             "booted": self._booted.is_set(),
             "mock": self.mock,
             "error": str(self._boot_error) if self._boot_error else "",
+            "lighting": self.lighting,
+            # OQ-14 / GPU checklist item 6: None in mock or when no probe answers
+            "isaac_version": _version_string(isaac_version()),
         }
         if self._booted.is_set() and not self.mock:
             out["playing"] = self.run(lambda: bool(self.world.is_playing()))
@@ -711,7 +894,7 @@ class SimManager:
 
         art = self._isaac.SingleArticulation(prim_path=prim_path, name=name)
         self.world.scene.add(art)
-        self.world.reset()
+        self._reset_world()
         try:
             root_pos, root_quat = art.get_world_pose()
             LOGGER.info(
@@ -745,30 +928,37 @@ class SimManager:
 
     def create_camera(self, name: str, attrs: dict[str, Any]) -> "CameraHandle":
         self._require_booted()
+        # CAM-17: wired once per handle (not in the model) so both backends
+        # drop their cache / re-arm acquisition after every world.reset().
+        # Registered inside factory() - which _cached_handle only calls on
+        # first construction - because viam-server re-runs reconfigure ->
+        # create_camera on every config change and _cached_handle returns the
+        # same handle each time; registering outside factory() would append
+        # a duplicate hook per reconfigure. Dispatched dynamically (not a
+        # bound-method reference captured now) so tests can monkeypatch
+        # handle.post_reset after creation.
         if self.mock:
 
             def factory():
-                return MockCameraHandle(name, attrs)
+                handle = MockCameraHandle(name, attrs)
+                self.register_post_reset(lambda: handle.post_reset())
+                return handle
         else:
 
             def factory():
-                return self.run(lambda: self._create_camera_isaac(name, attrs), timeout=120.0)
+                handle = self.run(lambda: self._create_camera_isaac(name, attrs), timeout=120.0)
+                self.register_post_reset(lambda: handle.post_reset())
+                return handle
 
         return self._cached_handle("camera", name, attrs, factory)
 
     def _create_camera_isaac(self, name: str, attrs: dict[str, Any]) -> "IsaacCameraHandle":
-        import math
-
-        from .spatial import quat_from_euler_deg, to_vec3
-
         parent = attrs.get("parent_prim")
         if parent:
             self._require_prim(parent)
-            prim_path = f"{parent.rstrip('/')}/{_prim_name(name)}"
-        else:
-            prim_path = attrs.get("prim_path") or f"/World/{_prim_name(name)}"
-        width = int(attrs.get("width", 640))
-        height = int(attrs.get("height", 480))
+        prim_path = _camera_prim_path(name, attrs)
+        width = int(attrs.get("width", DEFAULT_CAMERA_WIDTH))
+        height = int(attrs.get("height", DEFAULT_CAMERA_HEIGHT))
 
         kwargs: dict[str, Any] = dict(
             prim_path=prim_path,
@@ -782,40 +972,21 @@ class SimManager:
             kwargs["orientation"] = list(quat_from_euler_deg(r, p, y))
 
         cam = self._isaac.Camera(**kwargs)
+        # 4.5: get_resolution()/apertures only read back correctly once the
+        # render product exists (IS-1), so initialize() must come first.
         cam.initialize()
 
-        if parent:
-            # camera rides a (possibly moving) link; pose is local to it.
-            # default: small standoff along the link, looking out the +Z
-            # (tool) axis - 180deg about X flips the usd camera's -Z forward.
-            local_pos = to_vec3(attrs.get("local_position"), default=(0.0, 0.0, 0.05))
-            r, p, y = to_vec3(attrs.get("local_orientation_rpy_deg"), default=(180.0, 0.0, 0.0))
-            quat = quat_from_euler_deg(r, p, y)
-            cam.set_local_pose(list(local_pos), list(quat), camera_axes="usd")
-        elif attrs.get("target") is not None:
-            # aim at a target point (world axes: +X forward, +Z up)
-            from .spatial import look_at_quat
+        _place_camera(cam, attrs)
+        rendering_dt = self.cfg.rendering_dt if self.cfg is not None else 1.0 / 60.0
+        _configure_camera_optics(cam, attrs, rendering_dt)
 
-            position = to_vec3(attrs.get("position"), default=(3.0, 3.0, 2.5))
-            quat = look_at_quat(position, to_vec3(attrs.get("target")))
-            cam.set_world_pose(list(position), list(quat), camera_axes="world")
-        elif attrs.get("orientation_wxyz") is not None:
-            position = to_vec3(attrs.get("position"))
-            quat = _as_quat(attrs["orientation_wxyz"])
-            cam.set_world_pose(list(position), list(quat), camera_axes="world")
-
-        # newly created cameras default to a 70 degree horizontal FOV - the
-        # usd default lens is ~24 degrees, which reads as "zoomed way in".
-        # computed via the aperture so usd unit conventions cancel out.
-        if not attrs.get("prim_path"):
-            fov = float(attrs.get("fov_deg", 70.0))
-            aperture = cam.get_horizontal_aperture()
-            cam.set_focal_length(aperture / (2.0 * math.tan(math.radians(fov) / 2.0)))
-        elif attrs.get("fov_deg"):
-            fov = float(attrs["fov_deg"])
-            aperture = cam.get_horizontal_aperture()
-            cam.set_focal_length(aperture / (2.0 * math.tan(math.radians(fov) / 2.0)))
-        return IsaacCameraHandle(self, cam)
+        return IsaacCameraHandle(
+            self,
+            cam,
+            depth_enabled=bool(attrs.get("depth")),
+            image_format=attrs.get("image_format", "png"),
+            frequency=attrs.get("frequency"),
+        )
 
     def _require_prim(self, prim_path: str) -> None:
         """Raise a helpful error if prim_path doesn't exist in the stage."""
@@ -872,7 +1043,7 @@ class SimManager:
             base_kwargs["orientation"] = [float(v) for v in attrs["orientation_wxyz"]]
         robot = self._isaac.WheeledRobot(**base_kwargs)
         self.world.scene.add(robot)
-        self.world.reset()
+        self._reset_world()
 
         controller = self._isaac.DifferentialController(
             name=f"{name}_controller",
@@ -882,6 +1053,10 @@ class SimManager:
         handle = IsaacBaseHandle(self, robot, controller, wheel_radius, wheel_base)
         self.world.add_physics_callback(f"{name}_drive", handle._on_physics_step)
         return handle
+
+
+def _version_string(version: tuple[int, int, int] | None) -> str | None:
+    return None if version is None else ".".join(str(part) for part in version)
 
 
 def _local_ip() -> str:
@@ -902,93 +1077,6 @@ def _local_ip() -> str:
 def _prim_name(name: str) -> str:
     """Component names may contain characters USD prim names can't."""
     return "".join(c if c.isalnum() or c == "_" else "_" for c in name)
-
-
-def _import_isaac():
-    """Import everything we need from isaac sim, tolerating the module
-    renames across releases (isaacsim.* in >=4.5, omni.isaac.* before)."""
-
-    class NS:
-        pass
-
-    ns = NS()
-
-    try:
-        from isaacsim.core.api import World
-    except ImportError:
-        from omni.isaac.core import World
-    ns.World = World
-
-    try:
-        from isaacsim.core.utils.stage import add_reference_to_stage, open_stage
-    except ImportError:
-        from omni.isaac.core.utils.stage import add_reference_to_stage, open_stage
-    ns.add_reference_to_stage = add_reference_to_stage
-    ns.open_stage = open_stage
-
-    try:
-        from isaacsim.storage.native import get_assets_root_path
-    except ImportError:
-        from omni.isaac.core.utils.nucleus import get_assets_root_path
-    ns.get_assets_root_path = get_assets_root_path
-
-    try:
-        from isaacsim.core.prims import SingleArticulation, SingleXFormPrim
-    except ImportError:
-        from omni.isaac.core.articulations import Articulation as SingleArticulation
-        from omni.isaac.core.prims import XFormPrim as SingleXFormPrim
-    ns.SingleArticulation = SingleArticulation
-    ns.SingleXFormPrim = SingleXFormPrim
-
-    try:
-        from isaacsim.core.utils.types import ArticulationAction
-    except ImportError:
-        from omni.isaac.core.utils.types import ArticulationAction
-    ns.ArticulationAction = ArticulationAction
-
-    try:
-        import omni.client
-
-        ns.client = omni.client
-    except ImportError:
-        ns.client = None
-
-    try:
-        from isaacsim.core.api.objects import DynamicCuboid, FixedCuboid
-    except ImportError:
-        from omni.isaac.core.objects import DynamicCuboid, FixedCuboid
-    ns.DynamicCuboid = DynamicCuboid
-    ns.FixedCuboid = FixedCuboid
-
-    try:
-        from isaacsim.core.utils.prims import get_prim_at_path
-    except ImportError:
-        try:
-            from omni.isaac.core.utils.prims import get_prim_at_path
-        except ImportError:
-            get_prim_at_path = None
-    ns.get_prim_at_path = get_prim_at_path
-
-    try:
-        from isaacsim.sensors.camera import Camera
-    except ImportError:
-        from omni.isaac.sensor import Camera
-    ns.Camera = Camera
-
-    try:
-        from isaacsim.robot.wheeled_robots.controllers.differential_controller import (
-            DifferentialController,
-        )
-        from isaacsim.robot.wheeled_robots.robots import WheeledRobot
-    except ImportError:
-        from omni.isaac.wheeled_robots.controllers.differential_controller import (
-            DifferentialController,
-        )
-        from omni.isaac.wheeled_robots.robots import WheeledRobot
-    ns.WheeledRobot = WheeledRobot
-    ns.DifferentialController = DifferentialController
-
-    return ns
 
 
 # ======================================================================
@@ -1282,43 +1370,107 @@ class MockArmHandle(ArmHandle):
         return self._ee_world_pose()
 
 
-class CameraHandle:
-    def get_rgb(self):
-        """Return an (H, W, 3) uint8 numpy array."""
-        raise NotImplementedError
+# CAM-2: bounded retry on the caller's thread while the renderer warms up
+# after create/reset, sleeping between attempts so the sim thread gets to run.
+WARMUP_RETRIES = 30
+WARMUP_SLEEP_S = 1.0 / 60.0
+WARMUP_MESSAGE = "no frame available yet - is the simulation playing?"
 
 
 class IsaacCameraHandle(CameraHandle):
-    def __init__(self, sim: SimManager, camera) -> None:
+    def __init__(
+        self,
+        sim: SimManager,
+        cam: Any,
+        *,
+        depth_enabled: bool,
+        image_format: str,
+        frequency: float | None,
+        now: Callable[[], float] | None = None,
+        sleep: Callable[[float], None] = time.sleep,
+    ) -> None:
         self._sim = sim
-        self._cam = camera
+        self._cam = cam
+        self.depth_enabled = depth_enabled
+        self.image_format = image_format
+        self.frequency = frequency
+        self._now = now or (lambda: float(sim.world.current_time))
+        self._sleep = sleep
+        self._cached_frame: Frame | None = None
 
-    def get_rgb(self):
-        def _grab():
-            frame = self._cam.get_rgba()
-            if frame is None or frame.size == 0:
-                raise RuntimeError("no frame available yet - is the simulation playing?")
-            return frame[:, :, :3].copy()
+    def _grab(self) -> Frame:
+        # runs on the sim thread (via sim.run): one rgb(+depth) read per sim
+        # step, cached by sim_time so GetImages + GetPointCloud in the same
+        # tick share one grab (CAM-9).
+        sim_time = self._now()
+        cached = self._cached_frame
+        if cached is not None and cached.sim_time == sim_time:
+            return cached
 
-        return self._sim.run(_grab)
+        rgba = self._cam.get_rgba()
+        if rgba is None or rgba.size == 0:
+            raise NoFrameYetError(WARMUP_MESSAGE)
+        rgb = rgba[:, :, :3].copy()
 
+        depth = None
+        if self.depth_enabled:
+            raw_depth = self._cam.get_depth()
+            if raw_depth is None:
+                raise NoFrameYetError(WARMUP_MESSAGE)
+            depth = np.asarray(raw_depth)
+            if depth.ndim == 3 and depth.shape[-1] == 1:
+                depth = depth[..., 0]
+            depth = depth.astype(np.float32)
 
-class MockCameraHandle(CameraHandle):
-    def __init__(self, name: str, attrs: dict[str, Any]) -> None:
-        self.name = name
-        self._w = int(attrs.get("width", 640))
-        self._h = int(attrs.get("height", 480))
+        frame = Frame(rgb=rgb, depth=depth, sim_time=sim_time)
+        self._cached_frame = frame
+        return frame
 
-    def get_rgb(self):
-        import numpy as np
+    def get_frame(self) -> Frame:
+        last_error: NoFrameYetError | None = None
+        for _ in range(WARMUP_RETRIES):
+            try:
+                return self._sim.run(self._grab)
+            except NoFrameYetError as exc:
+                last_error = exc
+                self._sleep(WARMUP_SLEEP_S)
+        raise NoFrameYetError(WARMUP_MESSAGE) from last_error
 
-        # gradient background with a time-based moving bar so images change
-        img = np.zeros((self._h, self._w, 3), dtype=np.uint8)
-        img[:, :, 0] = np.linspace(0, 255, self._w, dtype=np.uint8)[None, :]
-        img[:, :, 1] = np.linspace(0, 255, self._h, dtype=np.uint8)[:, None]
-        x = int((time.monotonic() * 60) % self._w)
-        img[:, max(0, x - 5) : x + 5, :] = 255
-        return img
+    def get_intrinsics(self) -> Intrinsics:
+        def _read() -> Intrinsics:
+            focal_length = self._cam.get_focal_length()
+            horizontal_aperture = self._cam.get_horizontal_aperture()
+            vertical_aperture = self._cam.get_vertical_aperture()
+            width, height = self._cam.get_resolution()
+            if not focal_length or not horizontal_aperture or not vertical_aperture:
+                raise RuntimeError(
+                    "camera intrinsics unavailable: focal length or aperture is 0 "
+                    "(has the camera been initialized?)"
+                )
+            return Intrinsics(
+                fx=width * focal_length / horizontal_aperture,
+                fy=height * focal_length / vertical_aperture,
+                cx=width / 2,
+                cy=height / 2,
+                width=width,
+                height=height,
+            )
+
+        return self._sim.run(_read)
+
+    def post_reset(self) -> None:
+        def _reset() -> None:
+            self._cached_frame = None
+            try:
+                post_reset = getattr(self._cam, "post_reset", None)
+                if post_reset is not None:
+                    post_reset()
+                else:
+                    self._cam.initialize()
+            except Exception:
+                LOGGER.exception("camera post-reset failed")
+
+        self._sim.run(_reset)
 
 
 class BaseHandle:
