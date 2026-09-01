@@ -109,6 +109,29 @@ def import_isaac() -> Any:
     ns.WheeledRobot = WheeledRobot
     ns.DifferentialController = DifferentialController
 
+    # phase 3 (SCN-6 / ARM-2): physics materials and the USD physics schemas.
+    # Exposed on the namespace (None when absent) so physics.py can be driven
+    # with fakes on a machine without Kit.
+    try:
+        from isaacsim.core.api.materials import PhysicsMaterial
+
+        ns.PhysicsMaterial = PhysicsMaterial
+    except ImportError:
+        try:
+            from omni.isaac.core.materials import PhysicsMaterial as _PhysicsMaterial
+
+            ns.PhysicsMaterial = _PhysicsMaterial
+        except ImportError:
+            ns.PhysicsMaterial = None
+    try:
+        from pxr import PhysxSchema, UsdPhysics
+
+        ns.PhysxSchema = PhysxSchema
+        ns.UsdPhysics = UsdPhysics
+    except ImportError:
+        ns.PhysxSchema = None
+        ns.UsdPhysics = None
+
     return ns
 
 
@@ -199,6 +222,18 @@ class Caps(NamedTuple):
     has_depth_sensor: bool  # SingleViewDepthSensor exists (5.0+)
     pointcloud_is_world_frame: bool  # Camera.get_pointcloud() returns world-frame points
     camera_reads_cached_frame: bool  # get_depth() reads _current_frame (4.5), not the annotator
+    # Robotiq 2F-85 asset differences per release (FINDINGS R-9, W13, OQ-18;
+    # phase 3). Kept here so models/gripper.py never branches on the version.
+    gripper_closed_deg: float  # finger_joint angle at full closure (open is 0)
+    gripper_max_force: float  # authored finger drive maxForce - a tuning knob, not applied yet
+    gripper_dof_count: int  # DOFs the gripper adds to the arm articulation (OQ-5: 4.5 unverified)
+    # finger_joint angle at the OPEN limit: 0 on both releases (a 7.76 deg rest
+    # seen on the GPU before the articulation fixes was an artifact; run 19
+    # reaches 0.4 deg at an open target of 0)
+    gripper_open_deg: float
+    # CAM-12: Camera(annotator_device=...)/get_*(device=...) GPU-resident data
+    # path exists only on 5.0 (CHANGELOG 0.4.0); 4.5 always lands in host numpy
+    camera_supports_annotator_device: bool
 
 
 CAPS_BY_RELEASE: dict[tuple[int, int], Caps] = {
@@ -206,11 +241,21 @@ CAPS_BY_RELEASE: dict[tuple[int, int], Caps] = {
         has_depth_sensor=False,
         pointcloud_is_world_frame=True,
         camera_reads_cached_frame=True,
+        gripper_closed_deg=45.0,
+        gripper_max_force=16.5,
+        gripper_dof_count=10,
+        gripper_open_deg=0.0,
+        camera_supports_annotator_device=False,
     ),
     (5, 0): Caps(
         has_depth_sensor=True,
         pointcloud_is_world_frame=False,
         camera_reads_cached_frame=False,
+        gripper_closed_deg=47.0,
+        gripper_max_force=26.0,
+        gripper_dof_count=6,
+        gripper_open_deg=0.0,
+        camera_supports_annotator_device=True,
     ),
 }
 

@@ -26,36 +26,99 @@ Attributes:
                                        "color" [r,g,b] each in [0, 1],
                                        "fixed" (bool),
                                        "usd_path" (non-empty str, required
-                                        when type is "usd")}
+                                        when type is "usd"),
+                                       "orientation_rpy_deg" [r,p,y] degrees,
+                                       "orientation_wxyz" [w,x,y,z] (not all
+                                        zero); at most one of the two,
+                                       "box_dims" [x,y,z] meters, each > 0
+                                        (used by "usd" props whose geometry
+                                        this module can't infer),
+                                       "mass" (kg, > 0), "friction" (unitless,
+                                        static = dynamic, >= 0), "restitution"
+                                        (unitless, in [0, 1]), "contact_offset"
+                                        (m, >= 0), "rest_offset" (m, >= 0,
+                                        <= contact_offset when both are set)}
   lighting (object)                 - scene lights to configure at boot:
                                       {"dome": {"intensity": 1000,
                                                  "color": [1, 1, 1]},
                                        "sphere_intensity": 30000}. Both keys
                                       optional; unset means leave the stage's
                                       lights alone.
+  render (object)                   - render-cost levers applied at boot,
+                                      best-effort (CAM-12): {"motion_bvh":
+                                      bool, "disable_viewport_updates": bool}.
+                                      Both keys optional; unset means leave
+                                      the renderer's defaults alone.
+                                      disable_viewport_updates: true requires
+                                      livestream: false (the livestream needs
+                                      viewport updates).
 
 DoCommand:
   {"command": "status"} | {"command": "play"} | {"command": "pause"} |
-  {"command": "reset"} |
+  {"command": "reset", "soft"?: bool (default false)} |
   {"command": "add_usd", "usd_path": "...", "prim_path": "/World/thing",
-   "position": [x, y, z]}
+   "position": [x, y, z] meters, "orientation_rpy_deg"?: [r, p, y] degrees} |
+  {"command": "prop_geometries"} ->
+    {"geometries": [{"name", "box_dims_mm": [x,y,z],
+                      "pose_in_world_mm": {"x","y","z","o_x","o_y","o_z",
+                                            "theta"} (theta in degrees),
+                      "color": [r,g,b] or None, "fixed": bool}]} |
+  {"command": "spawn_prop", "prop": {...same schema as the props config
+   attr...}} |
+  {"command": "set_prop_pose", "name": "...", "position": [x,y,z] mm,
+   "orientation_rpy_deg"?: [r,p,y] degrees} |
+  {"command": "randomize_props", "names": [...],
+   "region": [[x0,y0,z],[x1,y1,z]] mm, "seed": int,
+   "min_separation"?: mm (default 150)} ->
+    {"positions": {name: [x,y,z] mm}} |
+  {"command": "ignore_props", "names": [...]} -> {"ignored": [...]}
+    (empty list clears; excludes named props from get_geometries - DEC-21:
+     excludes the pick target while grasping)
 """
 
+import math
 from collections.abc import Mapping, Sequence
 from typing import Any, ClassVar, cast
 
 from typing_extensions import Self
 from viam.components.generic import Generic
+from viam.logging import getLogger
 from viam.proto.app.robot import ComponentConfig
-from viam.proto.common import ResourceName
+from viam.proto.common import Geometry, Pose, RectangularPrism, ResourceName, Vector3
 from viam.resource.base import ResourceBase
 from viam.resource.easy_resource import EasyResource
 from viam.resource.types import Model, ModelFamily
 from viam.utils import ValueTypes, struct_to_dict
 
 from .. import FAMILY, NAMESPACE
-from ..sim_manager import SimConfig, SimManager, _prim_name
-from ..spatial import to_vec3
+from ..physics import PROP_PHYSICS_KEYS
+from ..sim_manager import SimConfig, SimManager, WorldHandle, _prim_name
+from ..spatial import Quat, quat_from_euler_deg, quat_to_ov, to_vec3
+
+LOGGER = getLogger(__name__)
+
+MM_PER_M = 1000.0
+DEFAULT_MIN_SEPARATION_MM = 150.0
+
+# the ground plane the module adds when no usd_stage is configured, served by
+# get_geometries so motion plans keep the arm out of the floor (GPU run 7);
+# thick, so discrete collision checks cannot step through it
+FLOOR_LABEL = "floor"
+FLOOR_SIDE_MM = 10000.0
+FLOOR_THICKNESS_MM = 200.0
+
+_SUPPORTED_COMMANDS = (
+    "status",
+    "play",
+    "pause",
+    "reset",
+    "add_usd",
+    "prop_geometries",
+    "spawn_prop",
+    "set_prop_pose",
+    "randomize_props",
+    "ignore_props",
+)
 
 
 def _prop_label(prop: object, index: int) -> str:
@@ -70,6 +133,37 @@ def _validate_number_triple(prop_label: str, key: str, value: object) -> None:
     for v in value:
         if not isinstance(v, (int, float)) or isinstance(v, bool):
             raise ValueError(f"prop {prop_label}: {key!r} must be a list of 3 numbers")
+
+
+def _validate_orientation(label: str, prop: Mapping[str, object]) -> None:
+    has_rpy = "orientation_rpy_deg" in prop
+    has_wxyz = "orientation_wxyz" in prop
+    if has_rpy and has_wxyz:
+        raise ValueError(
+            f"prop {label}: only one of 'orientation_rpy_deg' or 'orientation_wxyz' may be set"
+        )
+    if has_rpy:
+        _validate_number_triple(label, "orientation_rpy_deg", prop["orientation_rpy_deg"])
+    if has_wxyz:
+        value = prop["orientation_wxyz"]
+        if not isinstance(value, Sequence) or isinstance(value, str) or len(value) != 4:
+            raise ValueError(f"prop {label}: 'orientation_wxyz' must be a list of 4 numbers")
+        for v in value:
+            if not isinstance(v, (int, float)) or isinstance(v, bool):
+                raise ValueError(f"prop {label}: 'orientation_wxyz' must be a list of 4 numbers")
+        if all(float(v) == 0.0 for v in value):
+            raise ValueError(f"prop {label}: 'orientation_wxyz' must not be all zero")
+
+
+def _validate_box_dims(label: str, prop: Mapping[str, object]) -> None:
+    if "box_dims" not in prop:
+        return
+    dims = cast("Sequence[float]", prop["box_dims"])
+    _validate_number_triple(label, "box_dims", dims)
+    for v in dims:
+        is_number = isinstance(v, (int, float)) and not isinstance(v, bool)
+        if is_number and v <= 0:
+            raise ValueError(f"prop {label}: 'box_dims' values must be positive")
 
 
 def _validate_props(props: object) -> None:
@@ -116,6 +210,39 @@ def _validate_props(props: object) -> None:
         if "fixed" in prop and not isinstance(prop["fixed"], bool):
             raise ValueError(f"prop {label}: 'fixed' must be a bool")
 
+        _validate_orientation(label, prop)
+        _validate_box_dims(label, prop)
+        _validate_prop_physics(label, prop)
+
+
+def _validate_number(label: str, key: str, value: object) -> float:
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        raise ValueError(f"prop {label}: {key!r} must be a number")
+    return float(value)
+
+
+def _validate_prop_physics(label: str, prop: Mapping[str, object]) -> None:
+    values: dict[str, float] = {}
+    for key in PROP_PHYSICS_KEYS:
+        if key in prop:
+            values[key] = _validate_number(label, key, prop[key])
+
+    if "mass" in values and values["mass"] <= 0:
+        raise ValueError(f"prop {label}: 'mass' must be positive")
+    if "friction" in values and values["friction"] < 0:
+        raise ValueError(f"prop {label}: 'friction' must be >= 0")
+    if "restitution" in values and not (0 <= values["restitution"] <= 1):
+        raise ValueError(f"prop {label}: 'restitution' must be in [0, 1]")
+    if "contact_offset" in values and values["contact_offset"] < 0:
+        raise ValueError(f"prop {label}: 'contact_offset' must be >= 0")
+    if "rest_offset" in values and values["rest_offset"] < 0:
+        raise ValueError(f"prop {label}: 'rest_offset' must be >= 0")
+    if "rest_offset" in values and "contact_offset" in values:
+        if values["rest_offset"] > values["contact_offset"]:
+            raise ValueError(
+                f"prop {label}: 'rest_offset' must not be greater than 'contact_offset'"
+            )
+
 
 _LIGHTING_KEYS = {"dome", "sphere_intensity"}
 
@@ -152,6 +279,46 @@ def _validate_lighting(value: object) -> None:
             raise ValueError("lighting.sphere_intensity must be a non-negative number")
 
 
+_RENDER_KEYS = {"motion_bvh", "disable_viewport_updates"}
+
+
+def _validate_render(value: object, livestream: bool) -> None:
+    if not isinstance(value, Mapping):
+        raise ValueError("render must be an object")
+    for key in value:
+        if key not in _RENDER_KEYS:
+            raise ValueError(f"render: unknown key {key!r}")
+        if not isinstance(value[key], bool):
+            raise ValueError(f"render.{key} must be a bool")
+
+    if value.get("disable_viewport_updates") and livestream:
+        raise ValueError(
+            "render.disable_viewport_updates cannot be true while livestream is true "
+            "(the livestream needs viewport updates)"
+        )
+
+
+def _orientation_wxyz_from_rpy_deg(rpy: Sequence[float] | None) -> Quat | None:
+    if rpy is None:
+        return None
+    roll, pitch, yaw = (float(v) for v in rpy)
+    return quat_from_euler_deg(roll, pitch, yaw)
+
+
+def _pose_mm_from_m(position_m: Sequence[float], orientation_wxyz: Quat) -> dict[str, float]:
+    x, y, z = position_m
+    ox, oy, oz, theta = quat_to_ov(orientation_wxyz)
+    return {
+        "x": x * MM_PER_M,
+        "y": y * MM_PER_M,
+        "z": z * MM_PER_M,
+        "o_x": ox,
+        "o_y": oy,
+        "o_z": oz,
+        "theta": math.degrees(theta),
+    }
+
+
 class IsaacWorld(Generic, EasyResource):  # type: ignore[misc]  # SDK: API is Final on the component, redeclared by EasyResource
     MODEL: ClassVar[Model] = Model(ModelFamily(NAMESPACE, FAMILY), "world")
 
@@ -173,12 +340,16 @@ class IsaacWorld(Generic, EasyResource):  # type: ignore[misc]  # SDK: API is Fi
             _validate_props(attrs["props"])
         if "lighting" in attrs:
             _validate_lighting(attrs["lighting"])
+        if "render" in attrs:
+            _validate_render(attrs["render"], bool(attrs.get("livestream", True)))
         return [], []
 
     def reconfigure(
         self, config: ComponentConfig, dependencies: Mapping[ResourceName, ResourceBase]
     ) -> None:
         attrs: dict[str, Any] = dict(struct_to_dict(config.attributes))
+        if attrs.get("usd_stage") and "lighting" not in attrs:
+            LOGGER.warning("usd_stage is set without lighting: stage must provide floor and lights")
         cfg = SimConfig(
             mock=bool(attrs.get("mock", False)),
             headless=bool(attrs.get("headless", True)),
@@ -191,8 +362,53 @@ class IsaacWorld(Generic, EasyResource):  # type: ignore[misc]  # SDK: API is Fi
             livestream_public_ip=str(attrs.get("livestream_public_ip", "")),
             props=[dict(p) for p in attrs.get("props", [])],
             lighting=dict(attrs["lighting"]) if attrs.get("lighting") is not None else None,
+            render=dict(attrs["render"]) if attrs.get("render") is not None else None,
         )
         SimManager.get().ensure_booted(cfg)
+        # the module adds a ground plane only when it owns the stage
+        self._serves_floor = not attrs.get("usd_stage")
+        if not hasattr(self, "_ignored_props"):
+            self._ignored_props: set[str] = set()
+
+    def _handle(self) -> WorldHandle:
+        return SimManager.get().world_handle()
+
+    async def get_geometries(self, **kwargs: Any) -> list[Geometry]:
+        ignored: set[str] = getattr(self, "_ignored_props", set())
+        geometries: list[Geometry] = []
+        if getattr(self, "_serves_floor", False) and FLOOR_LABEL not in ignored:
+            geometries.append(
+                Geometry(
+                    center=Pose(
+                        x=0.0,
+                        y=0.0,
+                        z=-FLOOR_THICKNESS_MM / 2.0,
+                        o_x=0.0,
+                        o_y=0.0,
+                        o_z=1.0,
+                        theta=0.0,
+                    ),
+                    box=RectangularPrism(
+                        dims_mm=Vector3(x=FLOOR_SIDE_MM, y=FLOOR_SIDE_MM, z=FLOOR_THICKNESS_MM)
+                    ),
+                    label=FLOOR_LABEL,
+                )
+            )
+        for prop in self._handle().prop_geometries():
+            if prop.name in ignored:
+                continue
+            if prop.box_dims_m == (0.0, 0.0, 0.0):
+                continue
+            dims_mm = tuple(d * MM_PER_M for d in prop.box_dims_m)
+            pose_mm = _pose_mm_from_m(prop.position_m, prop.orientation_wxyz)
+            geometries.append(
+                Geometry(
+                    center=Pose(**pose_mm),
+                    box=RectangularPrism(dims_mm=Vector3(x=dims_mm[0], y=dims_mm[1], z=dims_mm[2])),
+                    label=prop.name,
+                )
+            )
+        return geometries
 
     async def do_command(
         self,
@@ -201,18 +417,18 @@ class IsaacWorld(Generic, EasyResource):  # type: ignore[misc]  # SDK: API is Fi
         timeout: float | None = None,
         **kwargs,
     ) -> Mapping[str, ValueTypes]:
-        sim = SimManager.get()
+        handle = self._handle()
         cmd = str(command.get("command", ""))
         if cmd == "status":
-            return sim.status()
+            return handle.status()
         if cmd == "play":
-            sim.play()
+            handle.play()
             return {"ok": True}
         if cmd == "pause":
-            sim.pause()
+            handle.pause()
             return {"ok": True}
         if cmd == "reset":
-            sim.reset()
+            handle.reset(soft=bool(command.get("soft", False)))
             return {"ok": True}
         if cmd == "add_usd":
             usd_path = str(command.get("usd_path", ""))
@@ -220,6 +436,72 @@ class IsaacWorld(Generic, EasyResource):  # type: ignore[misc]  # SDK: API is Fi
             if not usd_path or not prim_path:
                 raise ValueError("add_usd requires usd_path and prim_path")
             position = cast("Sequence[float]", command.get("position") or [0.0, 0.0, 0.0])
-            sim.add_usd_reference(usd_path, prim_path, to_vec3(position))
+            orientation_wxyz = _orientation_wxyz_from_rpy_deg(
+                cast("Sequence[float] | None", command.get("orientation_rpy_deg"))
+            )
+            handle.add_usd(
+                usd_path, prim_path, to_vec3(position), orientation_wxyz=orientation_wxyz
+            )
             return {"ok": True}
-        raise ValueError(f"unknown command {cmd!r}; supported: status, play, pause, reset, add_usd")
+        if cmd == "prop_geometries":
+            geometries: list[ValueTypes] = []
+            for prop in handle.prop_geometries():
+                pose_mm = _pose_mm_from_m(prop.position_m, prop.orientation_wxyz)
+                geometries.append(
+                    {
+                        "name": prop.name,
+                        "box_dims_mm": [d * MM_PER_M for d in prop.box_dims_m],
+                        "pose_in_world_mm": pose_mm,
+                        "color": list(prop.color) if prop.color is not None else None,
+                        "fixed": prop.fixed,
+                    }
+                )
+            return {"geometries": geometries}
+        if cmd == "spawn_prop":
+            prop_config = command.get("prop")
+            if not isinstance(prop_config, Mapping):
+                raise ValueError("spawn_prop requires a 'prop' object")
+            prop_attrs = dict(prop_config)
+            _validate_props([prop_attrs])
+            handle.spawn_prop(prop_attrs)
+            return {"ok": True}
+        if cmd == "set_prop_pose":
+            name = str(command.get("name", ""))
+            if not name:
+                raise ValueError("set_prop_pose requires 'name'")
+            position_mm = cast("Sequence[float]", command.get("position"))
+            if position_mm is None:
+                raise ValueError("set_prop_pose requires 'position'")
+            position_m = tuple(float(v) / MM_PER_M for v in position_mm)
+            orientation_wxyz = _orientation_wxyz_from_rpy_deg(
+                cast("Sequence[float] | None", command.get("orientation_rpy_deg"))
+            )
+            handle.set_prop_pose(name, cast("Any", position_m), orientation_wxyz=orientation_wxyz)
+            return {"ok": True}
+        if cmd == "randomize_props":
+            names = [str(n) for n in cast("Sequence[str]", command.get("names") or [])]
+            region_mm = cast("Sequence[Sequence[float]]", command.get("region"))
+            if not names or region_mm is None:
+                raise ValueError("randomize_props requires 'names' and 'region'")
+            (x0, y0, z0), (x1, y1, z1) = region_mm
+            region_m = (
+                (x0 / MM_PER_M, y0 / MM_PER_M, z0 / MM_PER_M),
+                (x1 / MM_PER_M, y1 / MM_PER_M, z1 / MM_PER_M),
+            )
+            seed = int(cast("Any", command.get("seed", 0)))
+            min_separation_mm = float(
+                cast("Any", command.get("min_separation", DEFAULT_MIN_SEPARATION_MM))
+            )
+            positions_m = handle.randomize_props(
+                names, cast("Any", region_m), seed, min_separation_m=min_separation_mm / MM_PER_M
+            )
+            positions_mm: dict[str, ValueTypes] = {
+                name: [v * MM_PER_M for v in position] for name, position in positions_m.items()
+            }
+            return {"positions": positions_mm}
+        if cmd == "ignore_props":
+            names = [str(n) for n in cast("Sequence[str]", command.get("names") or [])]
+            self._ignored_props = set(names)
+            ignored_names = cast("list[ValueTypes]", sorted(self._ignored_props))
+            return {"ignored": ignored_names}
+        raise ValueError(f"unknown command {cmd!r}; supported: {', '.join(_SUPPORTED_COMMANDS)}")

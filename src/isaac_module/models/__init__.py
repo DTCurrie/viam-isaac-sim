@@ -1,1 +1,1 @@
-from . import arm, base, camera, world  # noqa: F401 - importing registers the models
+from . import arm, base, camera, gripper, world  # noqa: F401 - importing registers the models

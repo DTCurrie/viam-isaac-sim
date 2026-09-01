@@ -24,6 +24,7 @@ What it is/does
 | `dtcurrie:isaac-sim:arm` | `arm` | Spawns (or attaches to) an articulation - UR arms, Franka, or any USD - and exposes joint control. |
 | `dtcurrie:isaac-sim:camera` | `camera` | Creates (or attaches to) a camera prim and serves RGB, depth (`image/vnd.viam.dep`) and point clouds (`pointcloud/pcd`). |
 | `dtcurrie:isaac-sim:base` | `base` | Spawns a differential-drive robot (e.g. jetbot) and drives it. |
+| `dtcurrie:isaac-sim:gripper` | `gripper` | Bolts a parallel-jaw gripper (e.g. Robotiq 2F-85) onto an arm's link and drives it open/closed. |
 
 Known assets (usable via the `asset` attribute): `ur3e`, `ur5e`, `ur10`,
 `ur10e`, `ur16e`, `ur20`, `franka`, `jetbot`. Anything else can be loaded with
@@ -93,7 +94,7 @@ Components are **placed with the standard frame config** (translations in mm,
 any orientation representation) - the spawn pose in Isaac and viam's frame
 system then agree, so things like the motion service see components where
 they actually are. The `position` (meters) / `orientation_rpy_deg` attributes
-still work as a fallback when no frame is set; a camera `target` attribute
+still work as a fallback when no frame is set. A camera `target` attribute
 overrides orientation to aim at a point.
 
 **Frames:** a spawned component's `frame.parent` must be `"world"` - the
@@ -115,19 +116,32 @@ translation/orientation become the camera's local pose on the link.
 | `headless` | `true` | no local GUI window |
 | `livestream` | `true` | WebRTC viewer at `http://<host>:8211/streaming/webrtc-client` |
 | `livestream_public_ip` | _unset_ | IP advertised to streaming clients when the sim machine has multiple interfaces |
-| `usd_stage` | _empty stage + ground plane_ | USD file or omniverse:// URL to open |
-| `physics_dt` / `rendering_dt` | `1/60` | step sizes in seconds |
+| `usd_stage` | _empty stage + ground plane_ | USD file or omniverse:// URL to open. When set without `lighting`, the module logs a warning that the stage must provide its own floor and lights (it adds neither to a user stage) |
+| `physics_dt` / `rendering_dt` | `1/60` | step sizes in seconds. The pick cell uses `1/120` for `physics_dt` (>= 80 steps/s is the floor for a 2F-85 grasp), rendering stays `1/60` |
 | `boot_timeout_sec` | `300` | Isaac Sim can take a while on first boot |
 | `kit_log_level` | `"warning"` | kit console verbosity |
-| `props` | `[]` | objects spawned into the scene at boot; see below |
-| `lighting` | _unset_ | `{"dome": {"intensity": 1000, "color": [1, 1, 1]}, "sphere_intensity": 30000}` - both keys optional, unset leaves the stage's lights alone; the default stage has a single 100 000-intensity sphere light, so a dome light is useful to even out colour for detection |
+| `props` | `[]` | objects spawned into the scene at boot, see below |
+| `lighting` | _unset_ | `{"dome": {"intensity": 1000, "color": [1, 1, 1]}, "sphere_intensity": 30000}` - both keys optional, unset leaves the stage's lights alone. The default stage has a single 100 000-intensity sphere light, so a dome light is useful to even out colour for detection |
+| `render` | _unset_ | render-cost levers applied at boot, best-effort: `{"motion_bvh": bool, "disable_viewport_updates": bool}` - both keys optional, unset leaves the renderer's defaults alone. `disable_viewport_updates: true` requires `livestream: false` (the livestream needs viewport updates) and is refused otherwise |
 
 Each entry in `props` is an object: `name` (string, snake_cased for the prim
 path), `type` (`"cube"` or `"usd"`), `position` ([x,y,z] meters, the prop's
 **centre**), `size` (meters, the cube's base edge length, > 0), `scale`
 ([sx,sy,sz], multiplies `size` per axis), `color` ([r,g,b] each in `[0, 1]`),
 `fixed` (bool - static vs. dynamic/physics-driven), and `usd_path` (required
-when `type` is `"usd"`).
+when `type` is `"usd"`). `orientation_rpy_deg` ([r,p,y] degrees) or
+`orientation_wxyz` ([w,x,y,z], not all zero) sets the prop's initial
+orientation - at most one of the two may be set. `box_dims` ([x,y,z] meters,
+each > 0) gives the obstacle box for a `"usd"` prop whose geometry this
+module can't infer from the asset. Without it, that prop's `get_geometries` /
+`prop_geometries` box is all zero and it is skipped as an obstacle (see
+"Props and obstacles" below). Physics keys apply only when set - otherwise
+Isaac's authored defaults are left alone: `mass` (kg, > 0), `friction`
+(unitless, static = dynamic, >= 0, combine mode `max`), `restitution`
+(unitless, in `[0, 1]`), `contact_offset` (m, >= 0), `rest_offset` (m, >= 0,
+<= `contact_offset` when both are set). The shipped pick cell sets `mass:
+0.05, friction: 0.7, restitution: 0, contact_offset: 0.005` on the block and
+`friction: 0.7, restitution: 0` on the (fixed, so massless) place pad.
 
 `props` validation rules (`ValueError` on config, surfaced as
 `INVALID_ARGUMENT`):
@@ -138,10 +152,33 @@ when `type` is `"usd"`).
 * `position`, `scale`, and `color` must each be 3-number sequences
 * `color` values must be in `[0, 1]`
 * `size` must be a positive number
+* at most one of `orientation_rpy_deg` / `orientation_wxyz` may be set, and
+  `orientation_wxyz` must not be all zero
+* `box_dims` values must be positive
 
-The world also supports `DoCommand`: `{"command": "status" | "play" | "pause" |
-"reset"}` and `{"command": "add_usd", "usd_path": "...", "prim_path":
-"/World/thing", "position": [x, y, z]}` to drop extra props into the scene.
+The world also supports `DoCommand`:
+
+* `{"command": "status" | "play" | "pause"}`
+* `{"command": "reset", "soft"?: bool (default false)}`
+* `{"command": "add_usd", "usd_path": "...", "prim_path": "/World/thing",
+  "position": [x, y, z] meters, "orientation_rpy_deg"?: [r, p, y] degrees}` -
+  drop an extra USD reference into the scene
+* `{"command": "prop_geometries"}` -> `{"geometries": [{"name",
+  "box_dims_mm": [x,y,z], "pose_in_world_mm": {"x", "y", "z", "o_x", "o_y",
+  "o_z", "theta"} (theta in degrees), "color": [r,g,b] or `None`, "fixed":
+  bool}]}` - every prop's current box and pose, in millimetres, for a client
+  that builds its own `WorldState` (see "Props and obstacles" below)
+* `{"command": "spawn_prop", "prop": {...same schema as the `props` config
+  attribute...}}` - spawn a prop at runtime
+* `{"command": "set_prop_pose", "name": "...", "position": [x,y,z] mm,
+  "orientation_rpy_deg"?: [r,p,y] degrees}` - move an existing prop
+* `{"command": "randomize_props", "names": [...], "region": [[x0,y0,z],
+  [x1,y1,z]] mm, "seed": int, "min_separation"?: mm (default 150)}` ->
+  `{"positions": {name: [x,y,z] mm}}` - scatter the named props inside the
+  region (see the worked example below)
+* `{"command": "ignore_props", "names": [...]}` -> `{"ignored": [...]}` - an
+  empty list clears the exclusion. Excludes the named props from
+  `GetGeometries` (e.g. the block currently being grasped)
 
 ### Units and conventions
 
@@ -179,7 +216,7 @@ block of `size` 0.05 sits with its centre at `z_top + 0.025`.
 `world` (required), one of `asset` / `usd_path` / `prim_path`, plus optional
 `position` ([x,y,z] meters), `end_effector_prim` (prim path whose pose is
 reported by `GetEndPosition`, converted to Viam's orientation-vector
-convention; defaults to `<arm prim>/wrist_3_link` for UR assets), and
+convention, defaults to `<arm prim>/wrist_3_link` for UR assets), and
 `move_timeout_sec`.
 
 **`GetEndPosition` reports the end effector's pose in the arm base frame**
@@ -200,7 +237,7 @@ service instead.
 
 `GetKinematics` works: for `ur3e`/`ur5e`/`ur20` the official viam SVA
 kinematics files are fetched automatically (and cached in the module data
-dir); for anything else set `kinematics_url` to an SVA `.json` or `.urdf`
+dir). For anything else set `kinematics_url` to an SVA `.json` or `.urdf`
 (http(s):// or file://). With kinematics served, the motion service can plan
 for the simulated arm.
 
@@ -208,6 +245,89 @@ UR assets (`ur3e`/`ur5e`/`ur10`/`ur10e`/`ur16e`/`ur20`) get a built-in
 **base-frame correction** applied at spawn so the arm's frame in Isaac lines
 up with the kinematics Viam's motion service uses - without it the sim and
 Viam's idea of the arm's pose would silently disagree.
+
+**`IsMoving`** is true while any named joint's `|velocity| > VEL_EPS_RAD_S`
+OR any `|commanded - measured| > SETTLE_TOL_RAD` - a stalled arm that never
+reached its target therefore keeps reporting `True`.
+
+**Move errors**: a target outside the SVA's declared joint limits, or a
+joint count that doesn't match the arm's DOF count, raises `INVALID_ARGUMENT`.
+The arm stalling (settling short of its target, e.g. blocked by an obstacle)
+raises `ABORTED`. The move deadline (`move_timeout_sec`, capped by the SDK's
+`timeout=`) passing while still converging raises `DEADLINE_EXCEEDED`. For a
+multi-waypoint trajectory, an intermediate waypoint that times out only
+warns and continues (it uses a loose tolerance and short deadline so the arm
+flows through it). An intermediate waypoint that stalls still raises
+`ABORTED` (an obstacle blocking the path won't clear itself). The final
+waypoint settles tight against the full move deadline.
+
+**`MoveOptions`**: `max_vel_degs_per_sec_joints` (per-joint velocity limits,
+the min across joints) wins over the scalar `max_vel_degs_per_sec` when set.
+The acceleration fields and `max_tcp_speed` are logged once and not honoured.
+
+**DoCommand** `{"command": "all_dof_names"}` returns every DOF of the
+articulation (arm joints plus anything attached under it, e.g. a gripper).
+`{"command": "dof_names"}` stays just the arm's named joints.
+
+### gripper attributes
+
+`world` (required), `arm` (required, name of the `dtcurrie:isaac-sim:arm`
+component this gripper is bolted to).
+
+| attribute | default | notes |
+|---|---|---|
+| `world` | _required_ | name of the world component |
+| `arm` | _required_ | name of the arm it is bolted to |
+| `asset` | `"robotiq_2f_85"` | known gripper asset |
+| `parent_prim` | `<arm prim>/wrist_3_link` | link it is bolted to |
+| `local_position` | _unset (identity)_ | `[x,y,z]` meters, mount pose of the gripper's `base_link` on `parent_prim` |
+| `local_orientation_rpy_deg` | _unset (identity)_ | the 2F-85 base sits flush on the flange |
+| `tcp_offset_m` | `0.134` | flange -> tool centre point along tool +Z: the fingertip pad centre as measured in Isaac (the pads span 115-153 mm) |
+| `open_deg` | `0` | drive-joint angle when fully open |
+| `closed_deg` | `47` on Isaac 5.0, `45` on 4.5 | drive-joint angle when fully closed (the Isaac-release value from `compat.caps()`) |
+| `grab_timeout_sec` | `5` | how long `grab()` waits for a stall or full closure |
+| `holding_tolerance_deg` | `2` | commanded-vs-measured gap that counts as holding |
+| `mock_object_width_m` | _unset_ | mock only: width of the object between the jaws (unset = nothing to grab, so `grab()` returns `false`) |
+
+**Frame** - unlike a mounted camera, the gripper's frame does not place its
+prim: `base_link` bolts to `parent_prim` at `local_position` /
+`local_orientation_rpy_deg`, and the frame's translation is the TCP the
+motion service plans against (not the flange). `frame.parent` must be the
+arm, and the translation is the TCP offset along the arm's tool axis, e.g.:
+
+```json
+{"frame": {"parent": "pick-arm", "translation": {"x": 0, "y": 0, "z": 134}}}
+```
+
+**Tool axis (confirmed on the GPU):** the arm's tool/approach axis is the
+link frame's **+Z**, so gripper and wrist-camera `frame.translation` offsets
+off an arm link both go along +Z.
+
+**API mapping** (viam-sdk `Gripper`, all eight abstract methods): `open` /
+`stop` / `is_moving` drive the handle directly. `grab()` closes the jaw,
+waits up to `grab_timeout_sec` for a stall or full closure, and returns
+`is_holding_something()` - both are stall-short-of-closure checks, not a
+force sensor. `get_current_inputs()` / `go_to_inputs([v])` use a single
+value in `[0, 1]`: `0` = open, `1` = closed. `GetKinematics` returns a
+1-link/0-joint SVA whose link is the 36 × 146 × 153 mm gripper box (flange to fingertips, centre 57.5 mm behind the
+TCP. `GetGeometries` returns that same single box.
+
+### Lifecycle (close / reconfigure)
+
+Closing a component (`close()`) releases its handle and post-reset hooks.
+The underlying prim stays in the stage (Kit cannot un-spawn it), so a later
+`create_*` for the same name re-attaches to it.
+
+Changing a **spawn** attribute on an already-attached component - `asset`,
+`usd_path`, `prim_path`, `position`, `orientation`, the frame pose, `parent_prim`,
+camera optics, etc. - is rejected with a `ValueError` that says to restart
+the module to apply it. The component is not left silently running a stale
+prim.
+
+**Runtime attributes** re-apply live without a restart: `world`,
+`move_timeout_sec`, `max_linear_mps`, `max_angular_rps`, `arm`,
+`tcp_offset_m`, `open_deg`, `closed_deg`, `grab_timeout_sec`,
+`holding_tolerance_deg`, `mock_object_width_m`.
 
 ### camera attributes
 
@@ -220,7 +340,7 @@ one.
 | `world` | _required_ | name of the world component |
 | `prim_path` | _unset_ | attach to an existing camera prim instead of spawning one |
 | `position` | _unset_ | `[x,y,z]` meters, fallback when no `frame` is set |
-| `target` | _unset_ | aim-at point; overrides orientation to point at it |
+| `target` | _unset_ | aim-at point, overrides orientation to point at it |
 | `orientation_rpy_deg` | _unset_ | fallback orientation when no `frame` is set |
 | `width` | `848` | image width in pixels |
 | `height` | `480` | image height in pixels |
@@ -229,14 +349,15 @@ one.
 | `clip_near` | `0.05` | metres, near clip plane |
 | `clip_far` | `10.0` | metres, far clip plane |
 | `image_format` | `"png"` | colour encoding for `GetImages` (`"png"` or `"jpeg"`) |
-| `frequency` | _unset_ | capture rate; unset = every rendered frame |
-| `parent_prim` | _unset_ | ride a link (e.g. a wrist camera) instead of spawning free-standing; requires a `frame` whose `parent` is the component that owns that prim (see "Frames" above) - its translation/orientation become the camera's local pose, applied in ROS-optical axes (camera +Z = frame +Z); the legacy `local_position`/`local_orientation_rpy_deg` attributes only apply when no `frame` is set |
+| `frequency` | _unset_ | capture rate, unset = every rendered frame |
+| `parent_prim` | _unset_ | ride a link (e.g. a wrist camera) instead of spawning free-standing, requires a `frame` whose `parent` is the component that owns that prim (see "Frames" above) - its translation/orientation become the camera's local pose, applied in ROS-optical axes (camera +Z = frame +Z). The legacy `local_position`/`local_orientation_rpy_deg` attributes only apply when no `frame` is set |
+| `annotator_device` | _unset_ | GPU-resident annotator data path, e.g. `"cuda"`, applied on Isaac Sim 5.0+, logged and ignored on 4.5 |
 
 **What the camera serves:** `GetImages` returns `[NamedImage("color", png|jpeg),
 NamedImage("depth", image/vnd.viam.dep)]`, colour first, honouring
 `filter_source_names` (unknown names are dropped, so fewer images come back).
 `GetPointCloud` (depth cameras only) returns binary `pointcloud/pcd`, in
-metres, in the camera-optical frame (+X right, +Y down, +Z forward); invalid
+metres, in the camera-optical frame (+X right, +Y down, +Z forward). Invalid
 points are dropped. `GetProperties` reports `supports_pcd` (true iff `depth`
 is set), real pinhole intrinsics (`fx = fy = W/(2·tan(hfov/2))`, e.g. 420.3 px
 at 848x480 @ 90.5°), `mime_types`, and `frame_rate`. `DoCommand
@@ -284,11 +405,11 @@ Props are configured on the world with the `props` attribute (cubes or USD
 references, fixed or dynamic) - see the fragment for the shape of it.
 
 The `isaac-sim-pick-and-place` fragment in the registry is the original
-upstream public one; this fork's fragment ships with P5 - until then use
+upstream public one. This fork's fragment ships with P5, until then use
 `viam module reload-local` (local module) with the JSON in
 `fragments/pick-and-place.json`.
 
-### Table recipe
+### Props and obstacles
 
 A table is just a `fixed` cube prop on the world (see "Units and
 conventions" above for how `size`/`scale`/`position` work):
@@ -302,12 +423,35 @@ conventions" above for how `size`/`scale`/`position` work):
 }
 ```
 
-`props` are visual/physical geometry only - the motion service doesn't see
-them automatically. To make the table an obstacle the motion service plans
-around, also add its box as `frame.geometry` on the world component itself,
-in millimetres and centred on the frame origin (here 1200 × 800 × 740 mm at
-translation (600, 0, 370) - 10 mm below the real 750 mm surface so the arm
-isn't blocked from resting on it):
+`props` are visual/physical geometry in the sim. Whether the motion service
+plans around them depends on which of three routes you take:
+
+1. **Nothing extra - `sim-world`'s own `GetGeometries`.** The world
+   component serves every prop's current box live via `GetGeometries` (world
+   frame, millimetres, `label` = the prop's `name`), skipping any prop whose
+   box is all zero (an unknown-size `"usd"` prop with no `box_dims` set - see
+   "world attributes" above). A motion service that plans with the frame
+   system picks these up with no client code - active only when `sim-world`
+   itself has a `frame` (`{"parent": "world"}`, as the fragment configures).
+   When the module added its own ground plane (no `usd_stage`), the served
+   geometries also include a 10 x 10 m `floor` box whose top face is at
+   z = 0, so plans keep the arm out of the floor. Use `{"command":
+   "ignore_props", "names": [...]}` on the world to exclude the prop being
+   grasped, e.g. so the block doesn't obstruct its own pick.
+2. **A client-built `WorldState`.** A client that assembles its own
+   `WorldState` fetches `{"command": "prop_geometries"}` (see the `DoCommand`
+   list above) and converts the returned boxes into `Geometry` obstacles
+   itself. `obstacles_from_prop_geometries` in `examples/pick_red_block.py`
+   is the recipe: one `RectangularPrism` per entry, skipping the excluded
+   name(s) and any all-zero box. `table_obstacle` in the same file is the
+   worked example for the fragment's 1.2 x 0.8 m table top, centred at (600,
+   0, 370) mm.
+3. **A static `frame.geometry` on `sim-world`.** For fixed furniture that
+   never moves, add its box as `frame.geometry` on the world component
+   itself, in millimetres and centred on the frame origin. This route stays
+   valid alongside the other two. Here the table box is 1200 x 800 x 740 mm
+   at translation (600, 0, 370), 10 mm below the real 750 mm surface so the
+   arm isn't blocked from resting on it:
 
 ```json
 {
@@ -322,6 +466,28 @@ isn't blocked from resting on it):
   "attributes": { "props": [ /* ... */ ] }
 }
 ```
+
+### Randomizing props
+
+`{"command": "randomize_props", ...}` scatters named props to random
+positions inside a region, deterministically: the same `seed` always
+produces the same layout. Positions are kept at least `min_separation` mm
+apart (default 150 mm). A worked example scattering two blocks across the
+fragment's table top (1200 x 800 mm, centred at (600, 0, 370) mm, so the top
+face is at z = 740 mm):
+
+```json
+{
+  "command": "randomize_props",
+  "names": ["pick_cube", "distractor_cube"],
+  "region": [[0, -400, 740], [1200, 400, 740]],
+  "seed": 42
+}
+```
+
+-> `{"positions": {"pick_cube": [x, y, 740], "distractor_cube": [x, y, 740]}}`
+with the same `x`/`y` values every time `seed: 42` is passed for this region
+and these names.
 
 ### Arm mount recipe
 
@@ -366,7 +532,7 @@ Omniverse Kit wants to own the thread it runs on. So:
   `$ISAAC_SIM_PATH/python.sh` or `$ISAAC_PYTHON`), installing `viam-sdk` into
   it on first run.
 * The **main thread** runs the simulation loop (`SimulationApp` boot, stepping,
-  and a task queue). The **Viam module server** runs on a side thread; all
+  and a task queue). The **Viam module server** runs on a side thread, and all
   component calls are marshalled onto the sim thread.
 * All models live in one module process and share the sim through a singleton,
   so arms/cameras/bases just name their world component and get attached.
@@ -379,7 +545,7 @@ system libraries kit needs (vulkan/GL), the right python (via deadsnakes on
 24.04), an NVIDIA driver if none is present (the validated 580 branch - newer
 is not better here, see below), and Isaac Sim itself
 (pip-installed into a venv under the module's data directory - 4.5.0 on
-22.04, 5.0.0 on 24.04). `run.sh` finds that install automatically; the EULA
+22.04, 5.0.0 on 24.04). `run.sh` finds that install automatically. The EULA
 is accepted via environment variable.
 
 Notes on the automatic setup:
@@ -401,7 +567,7 @@ What the machine must already be/have (the script can't do these for you):
 * An NVIDIA driver from a branch Isaac Sim validates against - **use the 580
   branch**. Newer branches (590/595+) are known to crash Isaac's RTX renderer
   on startup (`librtx.scenedb.plugin.so`) and break CUDA init
-  (`cuDeviceGetUuid` Warp errors); see
+  (`cuDeviceGetUuid` Warp errors), see
   [isaac-sim/IsaacSim#537](https://github.com/isaac-sim/IsaacSim/issues/537).
   If you're on 595+: `sudo apt-get install -y nvidia-driver-580 && sudo reboot`.
 * viam-server installed, machine online in the Viam app, running as root (or
@@ -417,7 +583,11 @@ development.
 
 Set `"mock": true` on the world component and the module runs anywhere python
 does - arms integrate joint targets over time, cameras produce synthetic
-frames, bases accept velocity commands. This is what the test suite uses.
+frames, bases accept velocity commands, and a gripper's `grab()` succeeds iff
+its `mock_object_width_m` attribute is set (it is the width of the object
+between the jaws, unset means nothing to grab). This is what the test suite
+uses. Try it end to end with `PYTHONPATH=src python examples/pick_red_block.py
+--mock`.
 
 Set up a dev venv and run the checks with `make`:
 
@@ -427,7 +597,7 @@ uv venv --python 3.11 .venv && uv pip install -r requirements-dev.txt
 make fmt-check lint typecheck test
 ```
 
-Tests run under the `pyproject.toml` config (`pythonpath = ["src"]`); the
+Tests run under the `pyproject.toml` config (`pythonpath = ["src"]`). The
 `gpu` marker is skipped by default, so `make test` only runs mock-mode tests
 and needs no Isaac Sim install. CI runs the same suite on both Python 3.10
 and 3.11.
@@ -442,4 +612,4 @@ and 3.11.
 - [x] serve kinematics files (`GetKinematics`) so Viam's motion service can do
       IK and planning for simulated arms (all motion stays in Viam, not Isaac)
 - [x] depth / point clouds from cameras
-- [ ] gripper support
+- [x] gripper support

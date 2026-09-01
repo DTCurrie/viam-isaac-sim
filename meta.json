@@ -23,6 +23,11 @@
       "model": "dtcurrie:isaac-sim:base",
       "api": "rdk:component:base",
       "short_description": "A simulated differential-drive base"
+    },
+    {
+      "model": "dtcurrie:isaac-sim:gripper",
+      "api": "rdk:component:gripper",
+      "short_description": "A simulated parallel-jaw gripper (Robotiq 2F-85) attached to a simulated arm"
     }
   ],
   "entrypoint": "dist/run.sh",

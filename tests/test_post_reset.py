@@ -92,3 +92,41 @@ def test_boot_stores_lighting_and_fires_pre_registered_hook():
 
     assert mgr.lighting == lighting_cfg
     assert len(fired) == 1
+
+
+# ----------------------------------------------------------------------
+# XC-4: unregister_post_reset(owner) / release_handle(name) scoping
+# ----------------------------------------------------------------------
+
+
+def test_unregister_post_reset_drops_only_that_owners_hooks(sim):
+    owned: list[str] = []
+    unowned: list[str] = []
+    sim.register_post_reset(lambda: owned.append("x"), owner="x")
+    sim.register_post_reset(lambda: unowned.append("none"))
+
+    sim.unregister_post_reset("x")
+    before_owned, before_unowned = len(owned), len(unowned)
+    sim.reset()
+
+    assert len(owned) == before_owned  # dropped - did not fire
+    assert len(unowned) == before_unowned + 1  # owner-less hook survives
+
+
+def test_release_handle_after_create_camera_drops_its_post_reset_hook(sim):
+    calls: list[str] = []
+    camera = sim.create_camera("post-reset-cam", {"world": "sim-world"})
+    camera.post_reset = lambda: calls.append("fired")  # type: ignore[method-assign]
+
+    sim.reset()
+    assert calls == ["fired"]
+
+    sim.release_handle("post-reset-cam")
+    sim.reset()
+    assert calls == ["fired"]  # no further calls after release
+
+    assert "post-reset-cam" not in sim._handles
+
+
+def test_release_handle_on_unknown_name_is_a_noop(sim):
+    sim.release_handle("no-such-component")  # must not raise

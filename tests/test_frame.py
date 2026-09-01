@@ -92,7 +92,7 @@ def test_validate_frame_parent_other_with_parent_prim_ok():
         parent="pick-arm",
     )
     deps, _ = IsaacCamera.validate_config(cfg)
-    assert list(deps) == ["sim-world"]
+    assert list(deps) == ["sim-world", "pick-arm"]
 
 
 def test_apply_frame_with_parent_prim_writes_local_position():
@@ -134,7 +134,7 @@ def test_validate_parent_prim_with_component_frame_parent_ok():
         parent="pick-arm",
     )
     deps, _ = IsaacCamera.validate_config(cfg)
-    assert list(deps) == ["sim-world"]
+    assert list(deps) == ["sim-world", "pick-arm"]
 
 
 def test_validate_parent_prim_with_link_frame_parent_ok():
@@ -144,7 +144,7 @@ def test_validate_parent_prim_with_link_frame_parent_ok():
         parent="pick-arm:ee_link",
     )
     deps, _ = IsaacCamera.validate_config(cfg)
-    assert list(deps) == ["sim-world"]
+    assert list(deps) == ["sim-world", "pick-arm"]
 
 
 def test_validate_parent_prim_wrong_owner_rejected():
@@ -181,4 +181,4 @@ def test_validate_parent_prim_not_under_world_ok():
         parent="pick-arm",
     )
     deps, _ = IsaacCamera.validate_config(cfg)
-    assert list(deps) == ["sim-world"]
+    assert list(deps) == ["sim-world", "pick-arm"]

@@ -105,3 +105,44 @@ def test_lighting_dome_zero_intensity_rejected():
     cfg = _config({"lighting": {"dome": {"intensity": 0}}})
     with pytest.raises(ValueError, match="intensity"):
         IsaacWorld.validate_config(cfg)
+
+
+def test_prop_physics_pick_cell_values_pass():
+    cfg = _config(
+        {
+            "props": [
+                {
+                    "name": "block",
+                    "mass": 0.05,
+                    "friction": 0.7,
+                    "restitution": 0.0,
+                    "contact_offset": 0.005,
+                }
+            ]
+        }
+    )
+    IsaacWorld.validate_config(cfg)
+
+
+def test_prop_negative_mass_rejected():
+    cfg = _config({"props": [{"name": "block", "mass": -0.1}]})
+    with pytest.raises(ValueError, match="mass"):
+        IsaacWorld.validate_config(cfg)
+
+
+def test_prop_restitution_out_of_range_rejected():
+    cfg = _config({"props": [{"name": "block", "restitution": 1.5}]})
+    with pytest.raises(ValueError, match="restitution"):
+        IsaacWorld.validate_config(cfg)
+
+
+def test_prop_rest_offset_above_contact_offset_rejected():
+    cfg = _config({"props": [{"name": "block", "rest_offset": 0.01, "contact_offset": 0.005}]})
+    with pytest.raises(ValueError, match="rest_offset"):
+        IsaacWorld.validate_config(cfg)
+
+
+def test_prop_nonnumeric_friction_rejected():
+    cfg = _config({"props": [{"name": "block", "friction": "slippery"}]})
+    with pytest.raises(ValueError, match="friction"):
+        IsaacWorld.validate_config(cfg)

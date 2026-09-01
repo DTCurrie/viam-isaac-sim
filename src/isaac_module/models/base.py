@@ -13,6 +13,11 @@ Attributes:
   wheel_base (meters)          - default from asset, else 0.3
   max_linear_mps (float)       - full-power linear speed, default 0.5
   max_angular_rps (float)      - full-power angular speed (rad/s), default 2.0
+
+close() releases the handle (XC-4); the prim stays in the stage. A
+reconfigure that changes a spawn attribute (asset, usd_path, prim_path,
+position, wheel_joints, or the frame it derives from) after the base is
+already attached raises ValueError - restart the module to apply it.
 """
 
 import asyncio
@@ -63,6 +68,11 @@ class IsaacBase(Base, EasyResource):  # type: ignore[misc]  # SDK: API is Final 
         self._max_angular = float(attrs.get("max_angular_rps", 2.0))
         self._attrs = attrs
         self._handle = SimManager.get().create_base(self.name, attrs)
+
+    async def close(self) -> None:
+        """XC-4: release the handle; the prim stays attached."""
+        SimManager.get().release_handle(self.name)
+        self._handle = None
 
     def _h(self) -> BaseHandle:
         if self._handle is None:

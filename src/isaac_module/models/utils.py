@@ -110,7 +110,10 @@ def validate_sim_component(
 ) -> tuple[Sequence[str], Sequence[str]]:
     """Shared validation for arm/camera/base: they must name their world
     component (so viam-server starts it first) and, when they spawn a prim,
-    say what to spawn."""
+    say what to spawn. A component riding another prim (parent_prim) also
+    depends on the component that owns that prim, so viam-server builds the
+    owner first - siblings build concurrently, and a mounted camera built
+    before its arm fails with PrimNotFoundError (seen on the GPU, phase 3)."""
     attrs = struct_to_dict(config.attributes)
     world = attrs.get("world")
     if not world or not isinstance(world, str):
@@ -126,7 +129,9 @@ def validate_sim_component(
     parent_prim = attrs.get("parent_prim")
     if parent_prim:
         _validate_parent_prim_frame(config, attrs)
-    elif config.HasField("frame"):
+        owner = config.frame.parent.split(":")[0]
+        return [world, owner], []
+    if config.HasField("frame"):
         parent = config.frame.parent
         if parent not in ("", "world"):
             raise ValueError(

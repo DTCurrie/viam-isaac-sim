@@ -127,3 +127,31 @@ def test_import_isaac_moved_into_sim_manager() -> None:
     from isaac_module.sim_manager import import_isaac
 
     assert import_isaac is compat.import_isaac
+
+
+def test_gripper_caps_follow_the_2f85_asset_per_release():
+    """FINDINGS R-9 / W13: the 2F-85 finger_joint closes at 47 deg on 5.0 and
+    45 deg on 4.5, with drive maxForce 26 vs 16.5 - version splits live here,
+    never in models/gripper.py."""
+    row_45 = compat.CAPS_BY_RELEASE[(4, 5)]
+    row_50 = compat.CAPS_BY_RELEASE[(5, 0)]
+    assert (row_45.gripper_closed_deg, row_45.gripper_max_force) == (45.0, 16.5)
+    assert (row_50.gripper_closed_deg, row_50.gripper_max_force) == (47.0, 26.0)
+    assert compat.caps((5, 0, 0)).gripper_dof_count == 6
+
+
+def test_gripper_open_angle_is_zero_on_both_releases():
+    """GPU run 19: with the articulation fixes in place the 5.0 2F-85 reaches
+    0.4 deg at an open target of 0 (the 7.76 deg rest seen in run 12 was an
+    artifact of the broken wrapper); W13's 0 stands on both releases."""
+    assert compat.CAPS_BY_RELEASE[(5, 0)].gripper_open_deg == 0.0
+    assert compat.CAPS_BY_RELEASE[(4, 5)].gripper_open_deg == 0.0
+
+
+def test_camera_supports_annotator_device_only_on_5_0():
+    """CAM-12: Camera(annotator_device=...) is a 5.0-only GPU-resident data
+    path (CHANGELOG 0.4.0); 4.5 always lands in host numpy."""
+    assert compat.CAPS_BY_RELEASE[(4, 5)].camera_supports_annotator_device is False
+    assert compat.CAPS_BY_RELEASE[(5, 0)].camera_supports_annotator_device is True
+    assert compat.caps((4, 5, 0)).camera_supports_annotator_device is False
+    assert compat.caps((5, 0, 0)).camera_supports_annotator_device is True

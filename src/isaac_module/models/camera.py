@@ -28,10 +28,18 @@ Attributes:
   local_orientation_rpy_deg       - orientation relative to parent_prim;
                                     default [180,0,0] = look out the +Z
                                     (tool) axis
+  annotator_device (string)       - GPU-resident annotator data path
+                                    (CAM-12), e.g. "cuda"; 5.0 only - ignored
+                                    with a log line on 4.5
 
 DoCommand:
   {"command": "sample_color", "region": [x0, y0, x1, y1]} - mean RGB over the
   given pixel region of the most recent frame -> {"srgb_hex", "mean_rgb"}.
+
+close() releases the handle and its post-reset hook (XC-4); the prim stays
+in the stage. A reconfigure that changes a spawn attribute (prim_path,
+position, parent_prim, or the frame it derives from) after the camera is
+already attached raises ValueError - restart the module to apply it.
 """
 
 from __future__ import annotations
@@ -116,6 +124,11 @@ class IsaacCamera(Camera, EasyResource):  # type: ignore[misc]  # SDK: API is Fi
         attrs = apply_frame_to_attrs(config, get_attrs(config))
         self._attrs = attrs
         self._handle = SimManager.get().create_camera(self.name, attrs)
+
+    async def close(self) -> None:
+        """XC-4: release the handle (hooks, callbacks); the prim stays attached."""
+        SimManager.get().release_handle(self.name)
+        self._handle = None
 
     def _h(self) -> CameraHandle:
         if self._handle is None:
@@ -292,3 +305,12 @@ def _validate_camera_attrs(name: str, attrs: dict[str, Any]) -> None:
     depth = attrs.get("depth", False)
     if not isinstance(depth, bool):
         raise ValueError(f'{name}: "depth" must be a bool, got {depth!r}')
+
+    annotator_device = attrs.get("annotator_device")
+    if annotator_device is not None and not (
+        isinstance(annotator_device, str) and annotator_device
+    ):
+        raise ValueError(
+            f'{name}: "annotator_device" must be a non-empty string when set, '
+            f"got {annotator_device!r}"
+        )

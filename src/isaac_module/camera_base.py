@@ -74,5 +74,11 @@ class CameraHandle:
         Backends drop cached frames / re-arm acquisition here."""
         return None
 
+    def release(self) -> None:
+        """Called by SimManager.release_handle when the owning component
+        closes (XC-4). Backends drop annotators / render products here; the
+        camera prim itself stays in the stage."""
+        return None
+
     def get_attr_summary(self) -> dict[str, Any]:  # diagnostics only
         return {"depth": self.depth_enabled, "image_format": self.image_format}
