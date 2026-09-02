@@ -26,6 +26,16 @@ class PrimNotFoundError(SimError, ValueError):
     """A configured prim path does not exist in the stage."""
 
 
+class CameraInitError(SimError, RuntimeError):
+    """A camera's render product never became readable.
+
+    ``Camera.initialize()`` looks up the render product's SDG pipeline node,
+    which a freshly booted renderer only materializes after render ticks; this
+    is raised once the bounded retry in ``SimManager._initialize_camera`` is
+    exhausted.
+    """
+
+
 class SimTimeoutError(SimError, TimeoutError):
     """A call marshalled to the sim thread did not complete in time.
 

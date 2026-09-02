@@ -449,13 +449,15 @@ and places it on `place_pad`. Run it against the fragment with:
 ```sh
 PYTHONPATH=src python examples/pick_red_block.py \
   --address <machine-address> --api-key <key> --api-key-id <key-id> \
-  --table --support-z-mm 750
+  --support-z-mm 750
 ```
 
-`--table` adds the table box as a motion obstacle and `--support-z-mm 750`
-tells the script the block rests on the 0.75 m table, not the floor. Add
-`--randomize-seed <n>` to scatter the three blocks deterministically first
-(see "Randomizing props" below).
+`--support-z-mm 750` tells the script the block rests on the 0.75 m table,
+not the floor. The table is already a planner obstacle - the world serves
+every prop geometry live - so `--table` (the recipe box for scenes that
+serve none) is unnecessary and is dropped automatically when a live
+`table` box is present. Add `--randomize-seed <n>` to scatter the three
+blocks deterministically first (see "Randomizing props" below).
 
 ### Props and obstacles
 

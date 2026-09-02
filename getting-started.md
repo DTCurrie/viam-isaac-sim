@@ -45,10 +45,10 @@ First, find your connection details. In the web UI, go to the 'connect' tab and 
 Then run:
 
 ```
-.venv/bin/python examples/pick_red_block.py --address <machine-address> --api-key <key> --api-key-id <key-id> --table --support-z-mm 750
+.venv/bin/python examples/pick_red_block.py --address <machine-address> --api-key <key> --api-key-id <key-id> --support-z-mm 750
 ```
 
-The `--table` flag adds the table as a motion obstacle, and `--support-z-mm 750` tells the script the block rests 750 mm up, on top of the table, instead of on the floor. Both are required for the P5 table cell.
+`--support-z-mm 750` tells the script the block rests 750 mm up, on top of the table, instead of on the floor. The table itself is already a motion obstacle: the sim world serves every prop's geometry to the planner live, so no extra flag is needed.
 
 To scatter the three blocks into a different layout before the pick, add `--randomize-seed <n>` with any integer. Leave it off to use the fragment's fixed starting layout.
 

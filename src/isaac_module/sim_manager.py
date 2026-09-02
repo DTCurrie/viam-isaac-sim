@@ -31,7 +31,7 @@ from . import FAMILY, NAMESPACE
 from .camera_base import CameraHandle, Frame, NoFrameYetError
 from .compat import caps, import_isaac, isaac_version
 from .encoding import Intrinsics
-from .errors import PrimNotFoundError, SimNotBootedError, SimTimeoutError
+from .errors import CameraInitError, PrimNotFoundError, SimNotBootedError, SimTimeoutError
 from .mock_camera import MockCameraHandle
 from .physics import ARM_SOLVER_POSITION_ITERATIONS, apply_prop_physics
 from .spatial import (
@@ -187,6 +187,16 @@ def _as_quat(values: Sequence[float]) -> Quat:
 
 # create_camera attrs contract defaults (camera_base.py module docstring,
 # FINDINGS W18/W19).
+# A freshly booted renderer creates a render product's SDG pipeline nodes
+# only after render ticks, so Camera.initialize()'s immediate node lookup can
+# die with KeyError('/Render/PostProcess/SDGPipeline/..._LdrColorSDhostPtr')
+# - observed on the first cold boot of a fresh install (empty shader cache,
+# every component building at once). 5 attempts x 30 ticks is ~2 s of
+# stepping at 60 Hz, well inside create_camera's 120 s budget even with
+# shader compilation on top.
+CAMERA_INIT_ATTEMPTS = 5
+CAMERA_INIT_RENDER_TICKS = 30
+
 DEFAULT_CAMERA_WIDTH = 848
 DEFAULT_CAMERA_HEIGHT = 480
 DEFAULT_CAMERA_FOV_DEG = 90.5
@@ -1150,7 +1160,7 @@ class SimManager:
         cam = self._isaac.Camera(**kwargs)
         # 4.5: get_resolution()/apertures only read back correctly once the
         # render product exists (IS-1), so initialize() must come first.
-        cam.initialize()
+        self._initialize_camera(name, cam)
 
         _place_camera(cam, attrs)
         rendering_dt = self.cfg.rendering_dt if self.cfg is not None else 1.0 / 60.0
@@ -1163,6 +1173,41 @@ class SimManager:
             image_format=attrs.get("image_format", "png"),
             frequency=attrs.get("frequency"),
         )
+
+    def _initialize_camera(self, name: str, cam: Any) -> None:
+        """Bounded retry around ``Camera.initialize()`` for a cold renderer
+        (CAMERA_INIT_ATTEMPTS's comment has the failure). Runs on the sim
+        thread, where the loop is paused while we execute, so the render
+        ticks between attempts are stepped here. On final failure the
+        half-created render product is destroyed so the next resource build
+        starts clean instead of wrapping the corpse."""
+        last_error: Exception | None = None
+        for attempt in range(CAMERA_INIT_ATTEMPTS):
+            if attempt:
+                for _ in range(CAMERA_INIT_RENDER_TICKS):
+                    self.world.step(render=True)
+            try:
+                cam.initialize()
+                return
+            except Exception as exc:
+                last_error = exc
+                LOGGER.warning(
+                    "camera %s: initialize attempt %d/%d failed: %r",
+                    name,
+                    attempt + 1,
+                    CAMERA_INIT_ATTEMPTS,
+                    exc,
+                )
+        destroy = getattr(cam, "destroy", None)
+        if destroy is not None:
+            try:
+                destroy()
+            except Exception:
+                LOGGER.exception("camera %s: destroy() after failed initialize", name)
+        raise CameraInitError(
+            f"camera {name}: initialize() failed after {CAMERA_INIT_ATTEMPTS} attempts "
+            f"with {CAMERA_INIT_RENDER_TICKS} render ticks between them"
+        ) from last_error
 
     def _require_prim(self, prim_path: str) -> None:
         """Raise a helpful error if prim_path doesn't exist in the stage."""

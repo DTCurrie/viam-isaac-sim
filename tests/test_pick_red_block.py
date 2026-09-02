@@ -253,6 +253,22 @@ def test_world_state_with_the_table_carries_it():
     assert list(state.obstacles[0].geometries) == [table]
 
 
+def test_table_recipe_dropped_when_the_live_scene_serves_a_table():
+    """P5 cell regression: the fragment's table prop arrives via
+    prop_geometries, and the motion service rejects two WorldState geometries
+    named 'table' - the --table recipe box must yield to the live one."""
+    recipe = pick_red_block.table_obstacle()
+    live_table = pick_red_block.table_obstacle()
+    assert pick_red_block.table_recipe_unless_served(recipe, [live_table]) is None
+
+
+def test_table_recipe_kept_when_the_live_scene_has_no_table():
+    recipe = pick_red_block.table_obstacle()
+    support = pick_red_block.support_obstacle(0.0)
+    assert pick_red_block.table_recipe_unless_served(recipe, [support]) is recipe
+    assert pick_red_block.table_recipe_unless_served(None, []) is None
+
+
 def test_grasp_height_lifts_a_low_depth_centroid_off_the_support():
     # GPU run 13/19: detected z 17 mm for a 60 mm cube on the floor -> the
     # fingertip floor (19 mm overhang + 20 mm clearance) wins over the centre (30)
@@ -1019,6 +1035,25 @@ def test_pick_area_keepout_boxes_the_region_with_margin():
     assert (dims.x, dims.y, dims.z) == (350.0, 600.0, 130.0)
 
 
+def test_pick_area_keepout_stands_on_the_region_support():
+    """P5 cell regression (GPU run 13): the scatter region's z is the table
+    top, and the no-fly box must cover the block airspace ABOVE it, not the
+    floor's."""
+    keepout = pick_red_block.pick_area_keepout(([450.0, -250.0, 750.0], [700.0, 250.0, 750.0]))
+    assert keepout.center.z == 750.0 + 65.0
+    assert keepout.box.dims_mm.z == 130.0
+
+
+def test_default_scan_pose_rides_the_support_height():
+    """GPU run 13: an absolute 350 mm scan z sent the camera 400 mm below the
+    P5 table top - the default scan height is above the support."""
+    floor = pick_red_block.default_scan_pose(0.0)
+    table = pick_red_block.default_scan_pose(750.0)
+    assert (floor.x, floor.y, floor.z) == (500.0, 150.0, 350.0)
+    assert (table.x, table.y, table.z) == (500.0, 150.0, 1100.0)
+    assert table.o_z == pick_red_block.POINTING_DOWN_O_Z
+
+
 def test_randomized_carry_plans_freely_over_the_keepout(monkeypatch):
     monkeypatch.setattr(pick_red_block, "RESET_SETTLE_S", 0.0)
     monkeypatch.setattr(pick_red_block, "PLACE_SETTLE_S", 0.0)
@@ -1074,7 +1109,7 @@ def test_randomized_carry_plans_freely_over_the_keepout(monkeypatch):
     # pre-grasp, grasp, lift, raise-above-keepout, free carry, place, retreat
     assert len(moves) == 7
     clear_pose, clear_state, clear_linear = moves[3]
-    assert clear_pose.z == 200.0  # CARRY_CLEAR_Z_MM
+    assert clear_pose.z == 200.0  # support 0 + CARRY_CLEAR_ABOVE_SUPPORT_MM
     assert clear_linear is True
     labels = {g.label for frame in clear_state.obstacles for g in frame.geometries}
     assert "pick_area_keepout" not in labels  # the hop starts inside the box

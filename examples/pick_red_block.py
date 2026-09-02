@@ -128,7 +128,17 @@ def _pointing_down(x: float, y: float, z: float, theta_deg: float = 0.0) -> Pose
     return Pose(x=x, y=y, z=z, o_x=0.0, o_y=0.0, o_z=POINTING_DOWN_O_Z, theta=theta_deg)
 
 
-DEFAULT_LOOK_AT_MM = "500,150,350"
+# default scan spot: inside UR5e reach with the shipped cell's blocks in the
+# 90 deg field of view; the height is ABOVE THE SUPPORT, because an absolute
+# scan z is a floor-cell assumption (GPU run 13: the P5 table cell sent the
+# camera 400 mm below the table top)
+DEFAULT_LOOK_XY_MM = (500.0, 150.0)
+SCAN_HEIGHT_ABOVE_SUPPORT_MM = 350.0
+
+
+def default_scan_pose(support_z_mm: float) -> Pose:
+    x, y = DEFAULT_LOOK_XY_MM
+    return _pointing_down(x, y, support_z_mm + SCAN_HEIGHT_ABOVE_SUPPORT_MM)
 
 
 DEPTH_PROBE_RADIUS_MM = 20.0
@@ -159,7 +169,11 @@ def look_pose_from(xyz_mm: str) -> Pose:
 
 
 def _look_pose_from_args(args: argparse.Namespace) -> Pose | None:
-    return None if args.no_look else look_pose_from(args.look_at)
+    if args.no_look:
+        return None
+    if args.look_at:
+        return look_pose_from(args.look_at)
+    return default_scan_pose(args.support_z_mm)
 
 
 def pre_grasp_pose(block_pose: Pose, standoff_mm: float = PRE_GRASP_STANDOFF_MM) -> Pose:
@@ -309,6 +323,20 @@ def obstacles_from_prop_geometries(
     return obstacles
 
 
+def table_recipe_unless_served(
+    table: Geometry | None, sim_obstacles: Sequence[Geometry]
+) -> Geometry | None:
+    """The --table recipe box, or None when the live scene already serves a
+    geometry with the same label - the motion service rejects two WorldState
+    geometries sharing a name, and the P5 cell's table arrives live via
+    ``prop_geometries``."""
+    if table is None:
+        return None
+    if any(obstacle.label == table.label for obstacle in sim_obstacles):
+        return None
+    return table
+
+
 RANDOMIZE_REGION_MARGIN_MM = 50.0
 
 # placing: the held block hovers this gap above the pad top at release and
@@ -325,20 +353,22 @@ HELD_BLOCK_PADDING_MM = 20.0
 # the pick-area keep-out (GPU run 12): a no-fly box over the scatter region
 # lets the carry plan FREELY (fast joint-space motion) instead of crawling
 # along a constrained linear line - the planner simply may not enter the
-# airspace where blocks live. Top = block tops (60) + held-cube hang + margin.
-KEEPOUT_TOP_Z_MM = 130.0
+# airspace where blocks live. Height above the support = block tops (60) +
+# held-cube hang + margin; the region's own z is the support it stands on.
+KEEPOUT_HEIGHT_MM = 130.0
 KEEPOUT_MARGIN_MM = 50.0
-# TCP height whose held padded cube bottom (TCP - 9 offset - 40 half-box)
-# clears the keep-out ceiling with ~20 mm to spare
-CARRY_CLEAR_Z_MM = 200.0
+# TCP height above the support whose held padded cube bottom (TCP - 9 offset
+# - 40 half-box) clears the keep-out ceiling with ~20 mm to spare
+CARRY_CLEAR_ABOVE_SUPPORT_MM = 200.0
 
 
 def pick_area_keepout(
     region_mm: tuple[Sequence[float], Sequence[float]],
 ) -> Geometry:
-    """The carry-phase no-fly box over the scatter region, floor to
-    KEEPOUT_TOP_Z_MM, grown by KEEPOUT_MARGIN_MM sideways."""
-    (x0, y0, _z0), (x1, y1, _z1) = region_mm
+    """The carry-phase no-fly box over the scatter region: from the region's
+    own z (the support surface) up KEEPOUT_HEIGHT_MM, grown by
+    KEEPOUT_MARGIN_MM sideways."""
+    (x0, y0, z0), (x1, y1, _z1) = region_mm
     lo_x = min(x0, x1) - KEEPOUT_MARGIN_MM
     hi_x = max(x0, x1) + KEEPOUT_MARGIN_MM
     lo_y = min(y0, y1) - KEEPOUT_MARGIN_MM
@@ -347,14 +377,14 @@ def pick_area_keepout(
         center=Pose(
             x=(lo_x + hi_x) / 2.0,
             y=(lo_y + hi_y) / 2.0,
-            z=KEEPOUT_TOP_Z_MM / 2.0,
+            z=z0 + KEEPOUT_HEIGHT_MM / 2.0,
             o_x=0.0,
             o_y=0.0,
             o_z=1.0,
             theta=0.0,
         ),
         box=RectangularPrism(
-            dims_mm=Vector3(x=hi_x - lo_x, y=hi_y - lo_y, z=KEEPOUT_TOP_Z_MM)
+            dims_mm=Vector3(x=hi_x - lo_x, y=hi_y - lo_y, z=KEEPOUT_HEIGHT_MM)
         ),
         label="pick_area_keepout",
     )
@@ -779,7 +809,9 @@ class PickPipeline:
         if carry_world_state is not None:
             # keep-out carry (GPU run 12): hop above the no-fly box, then let
             # the planner move freely - it cannot enter the block airspace
-            clear = _pointing_down(lift.x, lift.y, CARRY_CLEAR_Z_MM)
+            clear = _pointing_down(
+                lift.x, lift.y, self.support_z_mm + CARRY_CLEAR_ABOVE_SUPPORT_MM
+            )
             print(f"step: raise above the pick-area keep-out: {_pose_to_dict(clear)}")
             await self._move_or_diagnose(clear, held_world_state, linear=True)
             print(f"step: carry to pre-place (free, keep-out boxed): {_pose_to_dict(pre_place)}")
@@ -945,6 +977,10 @@ class PickPipeline:
 
     async def _run_steps(self) -> Transform:
         sim_obstacles = await self._sim_obstacles()
+        table = table_recipe_unless_served(self.table, sim_obstacles)
+        if table is None and self.table is not None:
+            print(f"  --table dropped: the live scene already serves a {self.table.label!r} box")
+        self.table = table
         move_world_state = world_state(
             self.table, (*self.other_blocks, *sim_obstacles), support_obstacle(self.support_z_mm)
         )
@@ -1290,7 +1326,12 @@ async def _run_real(args: argparse.Namespace) -> Transform:
     robot = await RobotClient.at_address(args.address, opts)
     try:
         if args.probe_depth:
-            await _probe_depth(robot, args, look_pose_from(args.look_at))
+            probe_pose = (
+                look_pose_from(args.look_at)
+                if args.look_at
+                else default_scan_pose(args.support_z_mm)
+            )
+            await _probe_depth(robot, args, probe_pose)
             return held_block_transform(args.block, args.block_size_mm, args.gripper)
         await robot.refresh()  # the resource list is a snapshot from connect time
         vision = VisionClient.from_robot(robot, args.vision)
@@ -1499,10 +1540,11 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--look-at",
-        default=DEFAULT_LOOK_AT_MM,
+        default=None,
         help="x,y,z (mm, world) the wrist camera is moved to, pointing down, before detecting "
-        f"(default {DEFAULT_LOOK_AT_MM}: within UR5e reach, with the fragment's pick_cube at "
-        "(700, 250) inside the 90 deg field of view)",
+        f"(default {DEFAULT_LOOK_XY_MM[0]:.0f},{DEFAULT_LOOK_XY_MM[1]:.0f},"
+        f"<--support-z-mm + {SCAN_HEIGHT_ABOVE_SUPPORT_MM:.0f}>: within UR5e reach, with the "
+        "fragment's blocks inside the 90 deg field of view)",
     )
     parser.add_argument(
         "--no-look", action="store_true", help="detect from wherever the arm already is"
@@ -1541,8 +1583,9 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     parser.add_argument(
         "--table",
         action="store_true",
-        help="add the W4 table box (README recipe) as a motion obstacle - only for a scene that "
-        "has it; the current fragment puts the arm and block on the floor",
+        help="add the W4 table box (README recipe) as a motion obstacle - only for a scene "
+        "whose table is NOT served live; the shipped fragment serves its table via "
+        "prop_geometries, and the flag is dropped automatically when the live box is present",
     )
     return parser.parse_args(argv)
 
