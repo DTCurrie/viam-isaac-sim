@@ -29,7 +29,7 @@ detector -> detections-to-segments) and motion service from
       "name": "pick-grip",
       "namespace": "rdk",
       "type": "gripper",
-      "model": "dtcurrie:isaac-sim:gripper",
+      "model": "viam:isaac-sim-devin:gripper",
       "frame": {"parent": "pick-arm", "translation": {"x": 0, "y": 0, "z": 115}},
       "attributes": {"world": "sim-world", "arm": "pick-arm"}
     },

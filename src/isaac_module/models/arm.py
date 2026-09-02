@@ -1,7 +1,7 @@
-"""dtcurrie:isaac-sim:arm - a simulated arm.
+"""viam:isaac-sim-devin:arm - a simulated arm.
 
 Attributes:
-  world (string, required)   - name of the dtcurrie:isaac-sim:world component
+  world (string, required)   - name of the viam:isaac-sim-devin:world component
   asset (string)             - known robot, e.g. "ur20", "ur10", "franka"
   usd_path (string)          - explicit USD to spawn instead of a known asset
   prim_path (string)         - where to place it (default /World/<name>), or

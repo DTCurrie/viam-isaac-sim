@@ -1,7 +1,7 @@
-"""dtcurrie:isaac-sim:camera - a simulated RGB(-D) camera.
+"""viam:isaac-sim-devin:camera - a simulated RGB(-D) camera.
 
 Attributes:
-  world (string, required)        - name of the dtcurrie:isaac-sim:world component
+  world (string, required)        - name of the viam:isaac-sim-devin:world component
   prim_path (string)              - existing camera prim to attach to, or
                                     where to create one (default /World/<name>)
   width / height (int)            - resolution, default 848x480

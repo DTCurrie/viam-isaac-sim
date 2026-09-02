@@ -2,19 +2,25 @@
   "modules": [
     {
       "type": "registry",
-      "name": "dtcurrie_isaac-sim",
-      "module_id": "dtcurrie:isaac-sim",
+      "name": "viam_isaac-sim-devin",
+      "module_id": "viam:isaac-sim-devin",
       "version": "latest-with-prerelease"
     }
   ],
   "components": [
     {
       "name": "sim-world",
-      "namespace": "rdk",
-      "type": "generic",
-      "model": "dtcurrie:isaac-sim:world",
+      "api": "rdk:component:generic",
+      "model": "viam:isaac-sim-devin:world",
       "frame": {
-        "parent": "world"
+        "parent": "world",
+        "geometry": {
+          "type": "box",
+          "x": 1200,
+          "y": 800,
+          "z": 740,
+          "translation": { "x": 600, "y": 0, "z": 370 }
+        }
       },
       "attributes": {
         "headless": true,
@@ -23,11 +29,34 @@
         "rendering_dt": 0.016666666666666666,
         "props": [
           {
+            "name": "table",
+            "type": "cube",
+            "fixed": true,
+            "size": 1.0,
+            "scale": [
+              1.2,
+              0.8,
+              {
+                "$variable": { "name": "table-height-m", "default_value": 0.75 }
+              }
+            ],
+            "position": [0.6, 0.0, 0.375],
+            "color": [0.32, 0.3, 0.28],
+            "friction": 0.7,
+            "restitution": 0,
+            "contact_offset": 0.005
+          },
+          {
             "name": "pick_cube",
             "type": "cube",
-            "position": [0.7, 0.25, 0.03],
+            "position": [0.6, 0.1, 0.7805],
             "size": 0.06,
-            "color": [0.9, 0.1, 0.1],
+            "color": {
+              "$variable": {
+                "name": "pick-block-color",
+                "default_value": [0.9, 0.1, 0.1]
+              }
+            },
             "mass": 0.05,
             "friction": 0.7,
             "restitution": 0,
@@ -36,9 +65,14 @@
           {
             "name": "ignore_cube_green",
             "type": "cube",
-            "position": [0.55, -0.05, 0.03],
+            "position": [0.78, -0.22, 0.7805],
             "size": 0.06,
-            "color": [0.05, 0.65, 0.1],
+            "color": {
+              "$variable": {
+                "name": "distractor-color-green",
+                "default_value": [0.05, 0.65, 0.1]
+              }
+            },
             "mass": 0.05,
             "friction": 0.7,
             "restitution": 0,
@@ -47,9 +81,14 @@
           {
             "name": "ignore_cube_blue",
             "type": "cube",
-            "position": [0.5, 0.15, 0.03],
+            "position": [0.45, -0.05, 0.7805],
             "size": 0.06,
-            "color": [0.05, 0.1, 0.9],
+            "color": {
+              "$variable": {
+                "name": "distractor-color-blue",
+                "default_value": [0.05, 0.1, 0.9]
+              }
+            },
             "mass": 0.05,
             "friction": 0.7,
             "restitution": 0,
@@ -59,10 +98,10 @@
             "name": "place_pad",
             "type": "cube",
             "fixed": true,
-            "position": [0.7, -0.35, 0.005],
+            "position": [0.3, 0.25, 0.755],
             "size": 0.2,
             "scale": [1, 1, 0.05],
-            "color": [0.1, 0.3, 0.9],
+            "color": [0.26, 0.28, 0.26],
             "friction": 0.7,
             "restitution": 0
           }
@@ -78,11 +117,11 @@
     },
     {
       "name": "pick-arm",
-      "namespace": "rdk",
-      "type": "arm",
-      "model": "dtcurrie:isaac-sim:arm",
+      "api": "rdk:component:arm",
+      "model": "viam:isaac-sim-devin:arm",
       "frame": {
-        "parent": "world"
+        "parent": "world",
+        "translation": { "x": 150, "y": -250, "z": 750 }
       },
       "attributes": {
         "world": "sim-world",
@@ -91,9 +130,8 @@
     },
     {
       "name": "pick-grip",
-      "namespace": "rdk",
-      "type": "gripper",
-      "model": "dtcurrie:isaac-sim:gripper",
+      "api": "rdk:component:gripper",
+      "model": "viam:isaac-sim-devin:gripper",
       "frame": {
         "parent": "pick-arm",
         "translation": { "x": 0, "y": 0, "z": 134 }
@@ -105,9 +143,8 @@
     },
     {
       "name": "scene-cam",
-      "namespace": "rdk",
-      "type": "camera",
-      "model": "dtcurrie:isaac-sim:camera",
+      "api": "rdk:component:camera",
+      "model": "viam:isaac-sim-devin:camera",
       "frame": {
         "parent": "world",
         "translation": { "x": 2200, "y": 2200, "z": 2000 }
@@ -121,9 +158,8 @@
     },
     {
       "name": "wrist-cam",
-      "namespace": "rdk",
-      "type": "camera",
-      "model": "dtcurrie:isaac-sim:camera",
+      "api": "rdk:component:camera",
+      "model": "viam:isaac-sim-devin:camera",
       "frame": {
         "parent": "pick-arm",
         "translation": { "x": 0, "y": 0, "z": 60 },
@@ -144,21 +180,17 @@
   ],
   "services": [
     {
-      "name": "builtin",
-      "api": "rdk:service:motion",
-      "model": "rdk:builtin:builtin",
-      "attributes": {}
-    },
-    {
       "name": "red-detector",
       "api": "rdk:service:vision",
       "model": "color_detector",
       "attributes": {
-        "detect_color": "#EA8D8D",
+        "detect_color": {
+          "$variable": { "name": "detect-color", "default_value": "#EA8D8D" }
+        },
+        "camera_name": "wrist-cam",
         "hue_tolerance_pct": 0.1,
         "segment_size_px": 100,
-        "value_cutoff_pct": 0.15,
-        "camera_name": "wrist-cam"
+        "value_cutoff_pct": 0.15
       }
     },
     {

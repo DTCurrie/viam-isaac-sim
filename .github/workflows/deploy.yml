@@ -10,8 +10,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       # secrets.viam_key_id / secrets.viam_key_value must be an API key from
-      # the dtcurrie org with module-write permission. The registry entry is
-      # created once with: viam module create --name isaac-sim --public-namespace dtcurrie
+      # the viam-dev org with module-write permission. The registry entry is
+      # created once with: viam module create --name isaac-sim-devin --public-namespace viam
       - uses: viamrobotics/build-action@v1
         with:
           # note: you can replace this line with 'version: ""' if

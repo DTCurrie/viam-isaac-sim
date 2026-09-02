@@ -1,2 +1,2 @@
-NAMESPACE = "dtcurrie"
-FAMILY = "isaac-sim"
+NAMESPACE = "viam"
+FAMILY = "isaac-sim-devin"

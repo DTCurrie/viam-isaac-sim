@@ -20,11 +20,11 @@ What it is/does
 
 | Model | Viam API | What it does |
 |---|---|---|
-| `dtcurrie:isaac-sim:world` | `generic` | Boots Isaac Sim, opens the USD stage, runs the sim loop. Configure exactly one. |
-| `dtcurrie:isaac-sim:arm` | `arm` | Spawns (or attaches to) an articulation - UR arms, Franka, or any USD - and exposes joint control. |
-| `dtcurrie:isaac-sim:camera` | `camera` | Creates (or attaches to) a camera prim and serves RGB, depth (`image/vnd.viam.dep`) and point clouds (`pointcloud/pcd`). |
-| `dtcurrie:isaac-sim:base` | `base` | Spawns a differential-drive robot (e.g. jetbot) and drives it. |
-| `dtcurrie:isaac-sim:gripper` | `gripper` | Bolts a parallel-jaw gripper (e.g. Robotiq 2F-85) onto an arm's link and drives it open/closed. |
+| `viam:isaac-sim-devin:world` | `generic` | Boots Isaac Sim, opens the USD stage, runs the sim loop. Configure exactly one. |
+| `viam:isaac-sim-devin:arm` | `arm` | Spawns (or attaches to) an articulation - UR arms, Franka, or any USD - and exposes joint control. |
+| `viam:isaac-sim-devin:camera` | `camera` | Creates (or attaches to) a camera prim and serves RGB, depth (`image/vnd.viam.dep`) and point clouds (`pointcloud/pcd`). |
+| `viam:isaac-sim-devin:base` | `base` | Spawns a differential-drive robot (e.g. jetbot) and drives it. |
+| `viam:isaac-sim-devin:gripper` | `gripper` | Bolts a parallel-jaw gripper (e.g. Robotiq 2F-85) onto an arm's link and drives it open/closed. |
 
 Known assets (usable via the `asset` attribute): `ur3e`, `ur5e`, `ur10`,
 `ur10e`, `ur16e`, `ur20`, `franka`, `jetbot`. Anything else can be loaded with
@@ -37,8 +37,8 @@ Known assets (usable via the `asset` attribute): `ur3e`, `ur5e`, `ur10`,
   "components": [
     {
       "name": "sim-world",
-      "model": "dtcurrie:isaac-sim:world",
-      "type": "generic",
+      "api": "rdk:component:generic",
+      "model": "viam:isaac-sim-devin:world",
       "attributes": {
         "headless": true,
         "livestream": true
@@ -46,8 +46,8 @@ Known assets (usable via the `asset` attribute): `ur3e`, `ur5e`, `ur10`,
     },
     {
       "name": "my-ur20",
-      "model": "dtcurrie:isaac-sim:arm",
-      "type": "arm",
+      "api": "rdk:component:arm",
+      "model": "viam:isaac-sim-devin:arm",
       "frame": { "parent": "world" },
       "attributes": {
         "world": "sim-world",
@@ -56,8 +56,8 @@ Known assets (usable via the `asset` attribute): `ur3e`, `ur5e`, `ur10`,
     },
     {
       "name": "overhead-cam",
-      "model": "dtcurrie:isaac-sim:camera",
-      "type": "camera",
+      "api": "rdk:component:camera",
+      "model": "viam:isaac-sim-devin:camera",
       "frame": {
         "parent": "world",
         "translation": { "x": 2000, "y": 2000, "z": 2000 }
@@ -71,8 +71,8 @@ Known assets (usable via the `asset` attribute): `ur3e`, `ur5e`, `ur10`,
     },
     {
       "name": "my-jetbot",
-      "model": "dtcurrie:isaac-sim:base",
-      "type": "base",
+      "api": "rdk:component:base",
+      "model": "viam:isaac-sim-devin:base",
       "frame": {
         "parent": "world",
         "translation": { "x": 1000, "y": 0, "z": 100 }
@@ -213,11 +213,17 @@ block of `size` 0.05 sits with its centre at `z_top + 0.025`.
 
 ### arm attributes
 
-`world` (required), one of `asset` / `usd_path` / `prim_path`, plus optional
-`position` ([x,y,z] meters), `end_effector_prim` (prim path whose pose is
-reported by `GetEndPosition`, converted to Viam's orientation-vector
-convention, defaults to `<arm prim>/wrist_3_link` for UR assets), and
-`move_timeout_sec`.
+| attribute | default | notes |
+|---|---|---|
+| `world` | _required_ | name of the world component |
+| `asset` | _one of asset/usd_path/prim_path required_ | known asset, e.g. `"ur20"` |
+| `usd_path` | _one of asset/usd_path/prim_path required_ | arbitrary USD file or omniverse:// URL |
+| `prim_path` | _one of asset/usd_path/prim_path required_ | attach to an articulation already in the stage |
+| `position` | _unset_ | `[x,y,z]` meters, fallback when no `frame` is set |
+| `orientation_wxyz` | _unset (identity)_ | `[w,x,y,z]`, fallback orientation when no `frame` is set - the frame config is converted into this same field |
+| `end_effector_prim` | `<arm prim>/wrist_3_link` for UR assets, else unset | prim path whose pose is reported by `GetEndPosition`, converted to Viam's orientation-vector convention |
+| `move_timeout_sec` | `30` | deadline for a move to converge |
+| `kinematics_url` | _unset_ | SVA `.json` or `.urdf` (http(s):// or file://) for assets `GetKinematics` doesn't fetch automatically |
 
 **`GetEndPosition` reports the end effector's pose in the arm base frame**
 (a breaking change this release - it previously reported world frame). This
@@ -271,7 +277,7 @@ articulation (arm joints plus anything attached under it, e.g. a gripper).
 
 ### gripper attributes
 
-`world` (required), `arm` (required, name of the `dtcurrie:isaac-sim:arm`
+`world` (required), `arm` (required, name of the `viam:isaac-sim-devin:arm`
 component this gripper is bolted to).
 
 | attribute | default | notes |
@@ -342,6 +348,9 @@ one.
 | `position` | _unset_ | `[x,y,z]` meters, fallback when no `frame` is set |
 | `target` | _unset_ | aim-at point, overrides orientation to point at it |
 | `orientation_rpy_deg` | _unset_ | fallback orientation when no `frame` is set |
+| `orientation_wxyz` | _unset (identity)_ | `[w,x,y,z]`, alternate fallback orientation when no `frame` is set and no `target` - the frame config is converted into this same field |
+| `local_position` | `[0, 0, 0.05]` | mount position on `parent_prim` when no `frame` is set (legacy) |
+| `local_orientation_rpy_deg` | `[180, 0, 0]` | mount orientation on `parent_prim` when no `frame` is set (legacy) |
 | `width` | `848` | image width in pixels |
 | `height` | `480` | image height in pixels |
 | `fov_deg` | `90.5` | horizontal field of view |
@@ -372,8 +381,8 @@ A wrist camera riding an arm link:
 ```json
 {
   "name": "wrist-cam",
-  "model": "dtcurrie:isaac-sim:camera",
-  "type": "camera",
+  "api": "rdk:component:camera",
+  "model": "viam:isaac-sim-devin:camera",
   "frame": {
     "parent": "pick-arm",
     "translation": { "x": 0, "y": 0, "z": 60 },
@@ -396,18 +405,57 @@ A wrist camera riding an arm link:
 ## Pick-and-place fragment
 
 The `isaac-sim-pick-and-place` fragment (source in
-`fragments/pick-and-place.json`) is a ready-made scene: a UR20 (`pick-arm`)
-at the origin, a red 6cm cube to pick up, a flat blue pad to place it on, and
-a `scene-cam` watching the workspace. Add the fragment to any machine that
-meets the requirements above and the world spawns everything at boot.
+`fragments/pick-and-place.json`) is a ready-made work cell: a UR5e
+(`pick-arm`) mounted at the corner of a 0.75 m table, a `pick-grip`
+gripper, a red 6 cm cube (`pick_cube`) plus two distractor cubes
+(`ignore_cube_green`, `ignore_cube_blue`), a `place_pad` to set the block
+down on, a `wrist-cam` riding the arm's flange, a `scene-cam` watching the
+whole workspace, the `builtin` motion service, and the `red-detector` /
+`block-segmenter` vision services that find the block. Add the fragment to
+any machine that meets the requirements above and the world spawns
+everything at boot.
 
 Props are configured on the world with the `props` attribute (cubes or USD
 references, fixed or dynamic) - see the fragment for the shape of it.
+
+The fragment ships five `$variable`s, each with a `default_value` equal to
+the numbers below, so a machine that sets nothing boots the exact cell:
+
+| variable | binds | default |
+|---|---|---|
+| `table-height-m` | table prop `scale[2]` | `0.75` |
+| `pick-block-color` | `pick_cube.color` | `[0.9, 0.1, 0.1]` |
+| `distractor-color-green` | `ignore_cube_green.color` | `[0.05, 0.65, 0.1]` |
+| `distractor-color-blue` | `ignore_cube_blue.color` | `[0.05, 0.1, 0.9]` |
+| `detect-color` | `red-detector`'s `detect_color` | `"#EA8D8D"` |
+
+`table-height-m` only substitutes the table prop's `scale[2]`: it has no
+arithmetic, so overriding it desyncs every other number derived from the
+table height - the table's own `position[2]` (`h / 2`), `sim-world`'s
+`frame.geometry` z (`h - 0.01` m, box centred at `(h - 0.01) / 2`), the
+three blocks' and `place_pad`'s z, and `pick-arm`'s frame z (`h` in mm).
+Override the table height only via `fragment_mods` `$set` overrides on
+those other fields too, kept in sync by hand.
 
 The `isaac-sim-pick-and-place` fragment in the registry is the original
 upstream public one. This fork's fragment ships with P5, until then use
 `viam module reload-local` (local module) with the JSON in
 `fragments/pick-and-place.json`.
+
+`examples/pick_red_block.py` drives this cell end to end: it detects the
+red block with `red-detector`/`block-segmenter` on `wrist-cam`, picks it,
+and places it on `place_pad`. Run it against the fragment with:
+
+```sh
+PYTHONPATH=src python examples/pick_red_block.py \
+  --address <machine-address> --api-key <key> --api-key-id <key-id> \
+  --table --support-z-mm 750
+```
+
+`--table` adds the table box as a motion obstacle and `--support-z-mm 750`
+tells the script the block rests on the 0.75 m table, not the floor. Add
+`--randomize-seed <n>` to scatter the three blocks deterministically first
+(see "Randomizing props" below).
 
 ### Props and obstacles
 
@@ -456,12 +504,17 @@ plans around them depends on which of three routes you take:
 ```json
 {
   "name": "sim-world",
-  "model": "dtcurrie:isaac-sim:world",
-  "type": "generic",
+  "api": "rdk:component:generic",
+  "model": "viam:isaac-sim-devin:world",
   "frame": {
     "parent": "world",
-    "translation": { "x": 600, "y": 0, "z": 370 },
-    "geometry": { "type": "box", "x": 1200, "y": 800, "z": 740 }
+    "geometry": {
+      "type": "box",
+      "x": 1200,
+      "y": 800,
+      "z": 740,
+      "translation": { "x": 600, "y": 0, "z": 370 }
+    }
   },
   "attributes": { "props": [ /* ... */ ] }
 }
@@ -472,22 +525,22 @@ plans around them depends on which of three routes you take:
 `{"command": "randomize_props", ...}` scatters named props to random
 positions inside a region, deterministically: the same `seed` always
 produces the same layout. Positions are kept at least `min_separation` mm
-apart (default 150 mm). A worked example scattering two blocks across the
-fragment's table top (1200 x 800 mm, centred at (600, 0, 370) mm, so the top
-face is at z = 740 mm):
+apart (default 150 mm). A worked example scattering the fragment's three
+blocks across the table top (1200 x 800 mm, centred at (600, 0, 370) mm, so
+the top face is at z = 740 mm):
 
 ```json
 {
   "command": "randomize_props",
-  "names": ["pick_cube", "distractor_cube"],
+  "names": ["pick_cube", "ignore_cube_green", "ignore_cube_blue"],
   "region": [[0, -400, 740], [1200, 400, 740]],
   "seed": 42
 }
 ```
 
--> `{"positions": {"pick_cube": [x, y, 740], "distractor_cube": [x, y, 740]}}`
-with the same `x`/`y` values every time `seed: 42` is passed for this region
-and these names.
+-> `{"positions": {"pick_cube": [x, y, 740], "ignore_cube_green": [x, y, 740],
+"ignore_cube_blue": [x, y, 740]}}` with the same `x`/`y` values every time
+`seed: 42` is passed for this region and these names.
 
 ### Arm mount recipe
 
@@ -497,8 +550,8 @@ inset from the edge:
 ```json
 {
   "name": "pick-arm",
-  "model": "dtcurrie:isaac-sim:arm",
-  "type": "arm",
+  "api": "rdk:component:arm",
+  "model": "viam:isaac-sim-devin:arm",
   "frame": { "parent": "world", "translation": { "x": 150, "y": -250, "z": 750 } },
   "attributes": { "world": "sim-world", "asset": "ur5e" }
 }
@@ -512,7 +565,7 @@ so this frame placement and Viam's kinematics agree with the simulated pose
 
 ## Viewing the simulator
 
-* **Through Viam (recommended)**: add an `dtcurrie:isaac-sim:camera` component with
+* **Through Viam (recommended)**: add an `viam:isaac-sim-devin:camera` component with
   `position` + `target` (see the example config) and watch it in the Viam app
   like any other camera - control tab, data capture, SDKs, everything works.
 * **Full interactive viewport**: install NVIDIA's

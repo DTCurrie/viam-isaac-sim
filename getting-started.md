@@ -20,10 +20,36 @@ These instructions were tested with:
 
 ## Start Isaac in Viam
 
-In the 'configure' tab of the web UI, hit the '+' button or tap 'A', then tap 'B' for blocks, then find the `isaac-sim-pick-and-place` fragment from `erh` (the upstream public fragment; this fork is run as a local module via `viam module reload-local` for now) and install it. Click 'Save' in the top right.
+In the 'configure' tab of the web UI, hit the '+' button or tap 'A', then tap 'B' for blocks, then find the `isaac-sim-pick-and-place` fragment from the `viam-dev` org (it pulls in the private `viam:isaac-sim-devin` registry module — the machine must be in `viam-dev` to see it) and install it. Click 'Save' in the top right.
+
+The fragment card has a 'Variables' section with five entries: `table-height-m`, `pick-block-color`, `distractor-color-green`, `distractor-color-blue`, and `detect-color`. Each one has a default value. Leave them all unset for your first run. The defaults boot the exact shipped cell: a table, a red block to pick, a green and a blue distractor block, and a place pad.
 
 Switch to the 'logs' tab to watch the installed components start up. On the test machine this takes around 15 seconds. You'll see an 'event=complete' event from the rdk.activity logger when this is done.
 
-Now switch to the 'control' tab to interact with the cameras and arm.
+Now switch to the 'control' tab to interact with the cameras and arm. Open the `scene-cam` livestream. You should see a table with three colored blocks on it (red, green, blue) and a UR5e arm with a gripper mounted at one corner of the table. If the table, blocks, or arm are missing, something failed during boot. Check the logs tab before continuing.
 
-If something goes wrong, the place to debug is the logs tab; to cut down on noise, find the components list on the left-side menu bar and click the `dtcurrie_isaac-sim` module (or whatever you named the local module) to filter down the output.
+If something goes wrong, the place to debug is the logs tab; to cut down on noise, find the components list on the left-side menu bar and click the `viam_isaac-sim-devin` module (or whatever you named the local module) to filter down the output.
+
+## Run the pick-and-place client
+
+Once the machine is online and the cell looks right in the livestream, run the client script from your dev machine to pick the red block and place it on the pad.
+
+Clone this repository on your dev machine, then create the venv it uses:
+
+```
+python3.11 -m venv .venv && .venv/bin/pip install -r requirements-dev.txt
+```
+
+First, find your connection details. In the web UI, go to the 'connect' tab and select 'Python'. Or go to the 'code sample' tab, which shows a runnable connection snippet with your machine's address and API key filled in. Copy the address, the API key, and the API key ID from there.
+
+Then run:
+
+```
+.venv/bin/python examples/pick_red_block.py --address <machine-address> --api-key <key> --api-key-id <key-id> --table --support-z-mm 750
+```
+
+The `--table` flag adds the table as a motion obstacle, and `--support-z-mm 750` tells the script the block rests 750 mm up, on top of the table, instead of on the floor. Both are required for the P5 table cell.
+
+To scatter the three blocks into a different layout before the pick, add `--randomize-seed <n>` with any integer. Leave it off to use the fragment's fixed starting layout.
+
+On success, the script prints a line starting with `PLACED_BLOCK_JSON=` followed by a JSON object with `"placed_on_pad": true`. That means the arm found the red block, picked it up, and set it down on the place pad.

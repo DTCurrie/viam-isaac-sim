@@ -1,8 +1,8 @@
-"""dtcurrie:isaac-sim:gripper - a simulated parallel-jaw gripper riding an arm.
+"""viam:isaac-sim-devin:gripper - a simulated parallel-jaw gripper riding an arm.
 
 Attributes:
-  world (string, required)        - name of the dtcurrie:isaac-sim:world component
-  arm (string, required)          - name of the dtcurrie:isaac-sim:arm it is bolted to
+  world (string, required)        - name of the viam:isaac-sim-devin:world component
+  arm (string, required)          - name of the viam:isaac-sim-devin:arm it is bolted to
   asset (string)                  - known gripper asset, default "robotiq_2f_85"
   parent_prim (string)            - link it is bolted to, default <arm prim>/wrist_3_link
   local_position ([x,y,z] m)      - mount pose of the gripper's base_link on parent_prim

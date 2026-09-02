@@ -1,31 +1,31 @@
 {
-  "module_id": "dtcurrie:isaac-sim",
+  "module_id": "viam:isaac-sim-devin",
   "visibility": "private",
   "url": "https://github.com/DTCurrie/viam-isaac-sim",
   "description": "Control and simulate robots in NVIDIA Isaac Sim through Viam",
   "models": [
     {
-      "model": "dtcurrie:isaac-sim:world",
+      "model": "viam:isaac-sim-devin:world",
       "api": "rdk:component:generic",
       "short_description": "Boots and manages the Isaac Sim world/stage"
     },
     {
-      "model": "dtcurrie:isaac-sim:arm",
+      "model": "viam:isaac-sim-devin:arm",
       "api": "rdk:component:arm",
       "short_description": "A simulated arm (UR, Franka, or any articulation USD)"
     },
     {
-      "model": "dtcurrie:isaac-sim:camera",
+      "model": "viam:isaac-sim-devin:camera",
       "api": "rdk:component:camera",
       "short_description": "A simulated RGB camera in the Isaac Sim stage"
     },
     {
-      "model": "dtcurrie:isaac-sim:base",
+      "model": "viam:isaac-sim-devin:base",
       "api": "rdk:component:base",
       "short_description": "A simulated differential-drive base"
     },
     {
-      "model": "dtcurrie:isaac-sim:gripper",
+      "model": "viam:isaac-sim-devin:gripper",
       "api": "rdk:component:gripper",
       "short_description": "A simulated parallel-jaw gripper (Robotiq 2F-85) attached to a simulated arm"
     }
