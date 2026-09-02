@@ -367,3 +367,22 @@ def test_isaac_handle_spawn_prop_appears_and_survives_reset(isaac_handle):
 def test_isaac_handle_spawn_prop_duplicate_name_raises_value_error(isaac_handle):
     with pytest.raises(ValueError):
         isaac_handle.spawn_prop(_cube("a"))
+
+
+def test_sample_prop_positions_restarts_stranded_layouts():
+    """GPU run 8: with per-prop-only retries, seed 6 strands the third cube in
+    the demo cell's exact region. A stranded layout must be redrawn whole."""
+    dims = {
+        name: (0.06, 0.06, 0.06) for name in ("pick_cube", "ignore_cube_green", "ignore_cube_blue")
+    }
+    region = ((0.45, -0.25, 0.0), (0.7, 0.25, 0.0))
+    for seed in range(50):
+        placed = sample_prop_positions(dims, region, seed=seed, min_separation_m=0.2)
+        assert set(placed) == set(dims)
+        positions = list(placed.values())
+        for i in range(len(positions)):
+            for j in range(i + 1, len(positions)):
+                gap = math.hypot(
+                    positions[i][0] - positions[j][0], positions[i][1] - positions[j][1]
+                )
+                assert gap >= 0.2

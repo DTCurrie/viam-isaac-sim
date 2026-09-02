@@ -1846,7 +1846,10 @@ class SettleOutcome(str, Enum):
 
 # randomize_props separation default: FINDINGS W26 block spacing rule
 DEFAULT_MIN_SEPARATION_M = 0.15
-RANDOMIZE_MAX_ATTEMPTS = 1000
+RANDOMIZE_MAX_ATTEMPTS = 100  # per prop, within one layout attempt
+# a dense-but-feasible request can strand the LAST prop no matter how many
+# single-prop draws it gets (GPU run 8, seed 6) - redraw the whole layout
+RANDOMIZE_LAYOUT_RESTARTS = 50
 
 
 class PropGeometry(NamedTuple):
@@ -1910,36 +1913,45 @@ def sample_prop_positions(
     placed centre in the x/y plane (FINDINGS W26), and its centre z at
     face z + dims_z / 2 so it rests on the face.
 
-    Same inputs -> the same placements on every call: draws come from
-    ``random.Random(seed)`` and props place in ``dims_by_name`` insertion
-    order. Raises ValueError when the region cannot hold a footprint or a
-    prop finds no clear spot in RANDOMIZE_MAX_ATTEMPTS draws.
+    Same inputs -> the same placements on every call: draws come from one
+    ``random.Random(seed)`` stream and props place in ``dims_by_name``
+    insertion order. A layout that strands a prop (no clear spot within
+    RANDOMIZE_MAX_ATTEMPTS draws) is redrawn wholesale, up to
+    RANDOMIZE_LAYOUT_RESTARTS times, so a dense-but-feasible request still
+    converges. Raises ValueError when the region cannot hold a footprint
+    or no layout fits.
     """
     (x0, y0, z0), (x1, y1, z1) = region
     lo_x, hi_x = min(x0, x1), max(x0, x1)
     lo_y, hi_y = min(y0, y1), max(y0, y1)
     face_z = (float(z0) + float(z1)) / 2.0
-    rng = random.Random(seed)
-    placed: dict[str, Vec3] = {}
     for name, dims in dims_by_name.items():
         half_x, half_y = dims[0] / 2.0, dims[1] / 2.0
         if lo_x + half_x > hi_x - half_x or lo_y + half_y > hi_y - half_y:
             raise ValueError(f"randomize_props: region cannot hold {name!r}'s footprint")
-        for _ in range(RANDOMIZE_MAX_ATTEMPTS):
-            x = rng.uniform(lo_x + half_x, hi_x - half_x)
-            y = rng.uniform(lo_y + half_y, hi_y - half_y)
-            if all(
-                math.hypot(x - px, y - py) >= min_separation_m for px, py, _pz in placed.values()
-            ):
-                placed[name] = (x, y, face_z + dims[2] / 2.0)
-                break
+    rng = random.Random(seed)
+    for _restart in range(RANDOMIZE_LAYOUT_RESTARTS):
+        placed: dict[str, Vec3] = {}
+        for name, dims in dims_by_name.items():
+            half_x, half_y = dims[0] / 2.0, dims[1] / 2.0
+            for _ in range(RANDOMIZE_MAX_ATTEMPTS):
+                x = rng.uniform(lo_x + half_x, hi_x - half_x)
+                y = rng.uniform(lo_y + half_y, hi_y - half_y)
+                if all(
+                    math.hypot(x - px, y - py) >= min_separation_m
+                    for px, py, _pz in placed.values()
+                ):
+                    placed[name] = (x, y, face_z + dims[2] / 2.0)
+                    break
+            else:
+                break  # this layout stranded ``name``: redraw everything
         else:
-            raise ValueError(
-                f"randomize_props: could not place {name!r} after "
-                f"{RANDOMIZE_MAX_ATTEMPTS} attempts (seed {seed}); widen the "
-                "region, drop props, or lower min_separation"
-            )
-    return placed
+            return placed
+    raise ValueError(
+        f"randomize_props: no layout for {sorted(dims_by_name)} after "
+        f"{RANDOMIZE_LAYOUT_RESTARTS} layout attempts (seed {seed}); widen "
+        "the region, drop props, or lower min_separation"
+    )
 
 
 class WorldHandle:

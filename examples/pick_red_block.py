@@ -71,6 +71,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import math
 import sys
 import threading
 import traceback
@@ -123,8 +124,8 @@ HOLD_SAMPLE_S = 1.0
 RESET_SETTLE_S = 2.0
 
 
-def _pointing_down(x: float, y: float, z: float) -> Pose:
-    return Pose(x=x, y=y, z=z, o_x=0.0, o_y=0.0, o_z=POINTING_DOWN_O_Z, theta=0.0)
+def _pointing_down(x: float, y: float, z: float, theta_deg: float = 0.0) -> Pose:
+    return Pose(x=x, y=y, z=z, o_x=0.0, o_y=0.0, o_z=POINTING_DOWN_O_Z, theta=theta_deg)
 
 
 DEFAULT_LOOK_AT_MM = "500,150,350"
@@ -316,7 +317,66 @@ PLACE_CLEARANCE_MM = 15.0
 PLACE_XY_TOLERANCE_MM = 100.0  # verdict: block centre inside the 200 mm pad footprint
 PLACE_Z_TOLERANCE_MM = 10.0
 PLACE_SETTLE_S = 1.0  # wall-clock pause before reading the placed pose back
+# extra size on the held block's planning box: absorbs the ~4 mm believed-vs-
+# physical TCP gap (ARM-10) plus tracking error, so a grazing plan cannot
+# become a touch
+HELD_BLOCK_PADDING_MM = 20.0
+
+# the pick-area keep-out (GPU run 12): a no-fly box over the scatter region
+# lets the carry plan FREELY (fast joint-space motion) instead of crawling
+# along a constrained linear line - the planner simply may not enter the
+# airspace where blocks live. Top = block tops (60) + held-cube hang + margin.
+KEEPOUT_TOP_Z_MM = 130.0
+KEEPOUT_MARGIN_MM = 50.0
+# TCP height whose held padded cube bottom (TCP - 9 offset - 40 half-box)
+# clears the keep-out ceiling with ~20 mm to spare
+CARRY_CLEAR_Z_MM = 200.0
+
+
+def pick_area_keepout(
+    region_mm: tuple[Sequence[float], Sequence[float]],
+) -> Geometry:
+    """The carry-phase no-fly box over the scatter region, floor to
+    KEEPOUT_TOP_Z_MM, grown by KEEPOUT_MARGIN_MM sideways."""
+    (x0, y0, _z0), (x1, y1, _z1) = region_mm
+    lo_x = min(x0, x1) - KEEPOUT_MARGIN_MM
+    hi_x = max(x0, x1) + KEEPOUT_MARGIN_MM
+    lo_y = min(y0, y1) - KEEPOUT_MARGIN_MM
+    hi_y = max(y0, y1) + KEEPOUT_MARGIN_MM
+    return Geometry(
+        center=Pose(
+            x=(lo_x + hi_x) / 2.0,
+            y=(lo_y + hi_y) / 2.0,
+            z=KEEPOUT_TOP_Z_MM / 2.0,
+            o_x=0.0,
+            o_y=0.0,
+            o_z=1.0,
+            theta=0.0,
+        ),
+        box=RectangularPrism(
+            dims_mm=Vector3(x=hi_x - lo_x, y=hi_y - lo_y, z=KEEPOUT_TOP_Z_MM)
+        ),
+        label="pick_area_keepout",
+    )
 PLACED_BLOCK_MARKER = "PLACED_BLOCK_JSON="
+# refine the look when the detected block sits farther than this from the scan
+# centre; closer than this, a second measurement gains nothing
+FOCUS_LOOK_OFFSET_MM = 30.0
+# a resting block's centre must sit at support + size/2; a reading farther off
+# than this is not the block (GPU run 10: a gripper-shadowed cube read z 115)
+DETECT_Z_TOLERANCE_MM = 15.0
+# retry ladder for a gripper-shadowed detection: the fingers hang ~150 mm
+# below the wrist camera, ~80 mm off its axis, so a quarter wrist turn sweeps
+# the shadow to a new direction while the camera stays put; stepping the
+# camera sideways is the last resort. Entries are (x offset, y offset, theta).
+SCAN_ATTEMPTS = (
+    (0.0, 0.0, 0.0),
+    (0.0, 0.0, 90.0),
+    (0.0, 0.0, 180.0),
+    (0.0, 0.0, 270.0),
+    (150.0, 150.0, 0.0),
+    (-150.0, -150.0, 0.0),
+)
 
 
 def randomize_region_mm(
@@ -371,10 +431,12 @@ def world_state(
     table: Geometry | None,
     other_blocks: Sequence[Geometry] = (),
     support: Geometry | None = None,
+    transforms: Sequence[Transform] = (),
 ) -> WorldState:
     """A WorldState whose obstacles are the support surface, the table (when
     the scene has one) and any distractor blocks (SCN-5), all in the world
-    frame."""
+    frame. ``transforms`` carries the held block while grasping (DEC-14), so
+    the planner treats it as geometry attached to the gripper."""
     return WorldState(
         obstacles=[
             GeometriesInFrame(
@@ -382,17 +444,26 @@ def world_state(
                 geometries=[g for g in (support, table, *other_blocks) if g is not None],
             )
         ],
+        transforms=list(transforms),
     )
 
 
-def held_block_transform(block_name: str, block_size_mm: float, gripper_name: str) -> Transform:
+def held_block_transform(
+    block_name: str, block_size_mm: float, gripper_name: str, centre_below_tcp_mm: float = 0.0
+) -> Transform:
     """DEC-14(a): once grasped, the block's pose is reported to the motion
     service as a Transform parented to the gripper (the gripper's own
-    GetGeometries cannot carry it - see DEC-14's rationale)."""
+    GetGeometries cannot carry it - see DEC-14's rationale).
+    ``centre_below_tcp_mm`` hangs the box below the gripper frame by the
+    grasp offset, so the planner carries it at its real height (GPU run 9:
+    an unmodelled held cube clipped a distractor the arm itself cleared)."""
     origin = Pose(x=0.0, y=0.0, z=0.0, o_x=0.0, o_y=0.0, o_z=1.0, theta=0.0)
+    held_centre = Pose(
+        x=0.0, y=0.0, z=-centre_below_tcp_mm, o_x=0.0, o_y=0.0, o_z=1.0, theta=0.0
+    )
     return Transform(
         reference_frame=block_name,
-        pose_in_observer_frame=PoseInFrame(reference_frame=gripper_name, pose=origin),
+        pose_in_observer_frame=PoseInFrame(reference_frame=gripper_name, pose=held_centre),
         physical_object=Geometry(
             center=origin,
             box=RectangularPrism(
@@ -593,13 +664,23 @@ class PickPipeline:
     # has no configured props, so this is a no-op there without --randomize-seed)
     world: WorldApi | None = None
     target_prop_name: str | None = None  # excluded from sim obstacles and from randomize_props
-    # blocks randomised together with the target; currently just the target,
-    # since the fragment configures a single movable prop (pick_cube)
+    # blocks randomised together with the target; empty = derive every
+    # non-fixed prop with known dims from the live scene (distractors too)
     movable_prop_names: Sequence[str] = ()
     randomize_seed: int | None = None  # checklist item 1: re-randomise before this pick
     randomize_region_mm: tuple[Sequence[float], Sequence[float]] | None = None
-    # where randomize_props actually put the target block; set by _sim_obstacles
-    randomized_target_mm: tuple[float, float, float] | None = None
+    # FINDINGS W26: scattered blocks stay >= 200 mm apart, so the gripper can
+    # descend on any one of them without clipping a neighbour
+    randomize_min_separation_mm: float = 200.0
+    # centre of the scatter region a randomize run used; the camera scans the
+    # workspace from above it - the DETECTOR finds the block, never sim truth
+    scan_centre_mm: tuple[float, float] | None = None
+    # the scatter region itself; when known, the carry gets a keep-out box
+    # over it instead of the slow constrained linear traverse
+    pick_region_mm: tuple[Sequence[float], Sequence[float]] | None = None
+    # the mock detector reports a camera-frame z (mock mode has no frame
+    # system), so the resting-height gate only applies to real detections
+    verify_detection_height: bool = True
     # the fixed prop to set the block down on; None = release at the lift pose
     place_prop_name: str | None = None
     place_clearance_mm: float = PLACE_CLEARANCE_MM
@@ -639,29 +720,37 @@ class PickPipeline:
         if self.world is None:
             return []
         if self.randomize_seed is not None:
-            region = self.randomize_region_mm or reachable_region_mm(
-                face_z_mm=self.support_z_mm
-            )
-            print(
-                f"step: randomize props (checklist item 1, seed {self.randomize_seed}, "
-                f"names {list(self.movable_prop_names)}, region {region})"
-            )
-            response = await self.world.do_command(
-                {
-                    "command": "randomize_props",
-                    "names": list(self.movable_prop_names),
-                    "region": [list(region[0]), list(region[1])],
-                    "seed": self.randomize_seed,
-                }
-            )
-            target = (response.get("positions") or {}).get(self.target_prop_name)
-            if target is not None:
-                self.randomized_target_mm = (
-                    float(target[0]),
-                    float(target[1]),
-                    float(target[2]),
+            names = list(self.movable_prop_names)
+            if not names:
+                pre = await self.world.do_command({"command": "prop_geometries"})
+                names = [
+                    g["name"]
+                    for g in pre.get("geometries", [])
+                    if not g["fixed"] and any(d > 0 for d in g["box_dims_mm"])
+                ]
+            if not names:
+                print("step: randomize skipped - no movable props in the scene")
+            else:
+                region = self.randomize_region_mm or reachable_region_mm(
+                    face_z_mm=self.support_z_mm
                 )
-                print(f"  {self.target_prop_name} scattered to {self.randomized_target_mm}")
+                print(
+                    f"step: randomize props (checklist item 1, seed {self.randomize_seed}, "
+                    f"names {names}, region {region})"
+                )
+                response = await self.world.do_command(
+                    {
+                        "command": "randomize_props",
+                        "names": names,
+                        "region": [list(region[0]), list(region[1])],
+                        "seed": self.randomize_seed,
+                        "min_separation": self.randomize_min_separation_mm,
+                    }
+                )
+                (x0, y0, _z0), (x1, y1, _z1) = region
+                self.scan_centre_mm = ((x0 + x1) / 2.0, (y0 + y1) / 2.0)
+                self.pick_region_mm = region
+                print(f"  scattered: {sorted(response.get('positions') or {})}")
         response = await self.world.do_command({"command": "prop_geometries"})
         geometries = response.get("geometries", [])
         if self.place_prop_name is not None:
@@ -669,7 +758,14 @@ class PickPipeline:
         exclude = {self.target_prop_name} if self.target_prop_name else set()
         return obstacles_from_prop_geometries(geometries, exclude)
 
-    async def _place(self, grasp: Pose, lift: Pose, move_world_state: WorldState) -> bool:
+    async def _place(
+        self,
+        grasp: Pose,
+        lift: Pose,
+        held_world_state: WorldState,
+        carry_world_state: WorldState | None,
+        free_world_state: WorldState,
+    ) -> bool:
         """Carry the held block over the pad, descend as far as the planner
         allows, release, retreat, then report whether the block rests on the
         pad. Returns True once the block has been released here (the caller
@@ -680,8 +776,30 @@ class PickPipeline:
         # offset, the support is now the pad top, plus the drop gap
         place_z = grasp.z + (pad_top_z - self.support_z_mm) + self.place_clearance_mm
         pre_place = _pointing_down(pad_x, pad_y, max(lift.z, place_z + PRE_GRASP_STANDOFF_MM))
-        print(f"step: move to pre-place: {_pose_to_dict(pre_place)}")
-        await self._move_or_diagnose(pre_place, move_world_state)
+        if carry_world_state is not None:
+            # keep-out carry (GPU run 12): hop above the no-fly box, then let
+            # the planner move freely - it cannot enter the block airspace
+            clear = _pointing_down(lift.x, lift.y, CARRY_CLEAR_Z_MM)
+            print(f"step: raise above the pick-area keep-out: {_pose_to_dict(clear)}")
+            await self._move_or_diagnose(clear, held_world_state, linear=True)
+            print(f"step: carry to pre-place (free, keep-out boxed): {_pose_to_dict(pre_place)}")
+            try:
+                await self.mover.move_to(pre_place, carry_world_state, False)
+            except Exception as error:
+                print(f"  keep-out carry failed ({error}); falling back to the linear carry")
+                await self._move_or_diagnose(pre_place, held_world_state, linear=True)
+        else:
+            # no known scatter region to box off: carry along a straight line
+            # at constant height so the held cube cannot dip (GPU run 11)
+            carry_start = _pointing_down(lift.x, lift.y, pre_place.z)
+            print(f"step: raise to carry height: {_pose_to_dict(carry_start)}")
+            await self._move_or_diagnose(carry_start, held_world_state, linear=True)
+            print(f"step: carry to pre-place: {_pose_to_dict(pre_place)}")
+            try:
+                await self.mover.move_to(pre_place, held_world_state, True)
+            except Exception as error:
+                print(f"  linear carry failed ({error}); replanning the carry freely")
+                await self._move_or_diagnose(pre_place, held_world_state)
 
         # the current fragment's pad sits 783 mm from the arm base - near the
         # UR5e's reach boundary, where a constraint-locked straight descent can
@@ -699,7 +817,7 @@ class PickPipeline:
         for label, pose, linear in descents:
             print(f"step: move to place ({label}): {_pose_to_dict(pose)}")
             try:
-                await self.mover.move_to(pose, move_world_state, linear)
+                await self.mover.move_to(pose, held_world_state, linear)
             except Exception as error:
                 print(f"  place descent ({label}) failed: {error}")
                 continue
@@ -713,9 +831,9 @@ class PickPipeline:
         if release_pose is not pre_place:
             print("step: retreat after place")
             try:
-                await self.mover.move_to(pre_place, move_world_state, True)
+                await self.mover.move_to(pre_place, free_world_state, True)
             except Exception:
-                await self.mover.move_to(pre_place, move_world_state, False)
+                await self.mover.move_to(pre_place, free_world_state, False)
         await self._report_placement(pad_x, pad_y, pad_top_z, stage)
         return True
 
@@ -764,28 +882,77 @@ class PickPipeline:
         finally:
             await self._set_ignored([])
 
+    def _expected_block_z_mm(self) -> float:
+        return self.support_z_mm + self.block_size_mm / 2.0
+
+    def _is_resting_height(self, pose: Pose) -> bool:
+        if not self.verify_detection_height:
+            return True
+        return abs(pose.z - self._expected_block_z_mm()) <= DETECT_Z_TOLERANCE_MM
+
+    async def _detect_block(self, move_world_state: WorldState) -> Pose:
+        """Scan, detect, focus, and sanity-check the red block's pose. A
+        detection whose height cannot be a resting block means the gripper's
+        shadow swallowed it (GPU run 10: z 115 for a 60 mm cube), so the scan
+        walks SCAN_ATTEMPTS instead of grasping at a phantom."""
+        for offset_x, offset_y, wrist_theta_deg in SCAN_ATTEMPTS:
+            look_pose = self.look_pose
+            if look_pose is not None and self.scan_centre_mm is not None:
+                look_pose = _pointing_down(
+                    self.scan_centre_mm[0] + offset_x,
+                    self.scan_centre_mm[1] + offset_y,
+                    look_pose.z,
+                    theta_deg=wrist_theta_deg,
+                )
+            if look_pose is not None:
+                print(f"step: look (scan the workspace from {_pose_to_dict(look_pose)})")
+                await self.mover.look_from(look_pose, move_world_state)
+
+            print("step: detect (from the stationary look pose)")
+            block_pose = await self.detector.block_pose_world()
+            print(f"  block_pose_world (mm): {_pose_to_dict(block_pose)}")
+            if (
+                look_pose is not None
+                and self.scan_centre_mm is not None
+                and self._is_resting_height(block_pose)
+                and math.hypot(block_pose.x - look_pose.x, block_pose.y - look_pose.y)
+                > FOCUS_LOOK_OFFSET_MM
+            ):
+                # the top-face estimate degrades off-centre (GPU run 5: ~14 mm);
+                # re-aim above the DETECTED position and measure again
+                focus = _pointing_down(
+                    block_pose.x, block_pose.y, look_pose.z, theta_deg=wrist_theta_deg
+                )
+                print(f"step: focus above the detected block: {_pose_to_dict(focus)}")
+                await self.mover.look_from(focus, move_world_state)
+                print("step: detect (focused)")
+                block_pose = await self.detector.block_pose_world()
+                print(f"  block_pose_world (mm): {_pose_to_dict(block_pose)}")
+            if self._is_resting_height(block_pose):
+                print(f"{DETECTED_BLOCK_POSE_MARKER}{json.dumps(_pose_to_dict(block_pose))}")
+                return block_pose
+            print(
+                f"  implausible detection: z {block_pose.z:.1f} vs expected "
+                f"{self._expected_block_z_mm():.1f} mm for a resting block - the "
+                "gripper likely shadows it; re-scanning from an offset pose"
+            )
+            if self.scan_centre_mm is None:
+                break
+        raise RuntimeError(
+            "no plausible red-block detection from any scan pose - is the block "
+            "visible and resting on its support?"
+        )
+
     async def _run_steps(self) -> Transform:
         sim_obstacles = await self._sim_obstacles()
         move_world_state = world_state(
             self.table, (*self.other_blocks, *sim_obstacles), support_obstacle(self.support_z_mm)
         )
-        look_pose = self.look_pose
-        if look_pose is not None and self.randomized_target_mm is not None:
-            # a fixed look pose stares at the pre-randomize spot (GPU run 4);
-            # hover the wrist camera above wherever the block actually went
-            x_mm, y_mm, _z_mm = self.randomized_target_mm
-            look_pose = _pointing_down(x_mm, y_mm, look_pose.z)
-        if look_pose is not None:
-            print(f"step: look (move the wrist camera to {_pose_to_dict(look_pose)})")
-            await self.mover.look_from(look_pose, move_world_state)
-
-        print("step: detect (from the stationary look pose)")
-        block_pose = await self.detector.block_pose_world()
-        print(f"  block_pose_world (mm): {_pose_to_dict(block_pose)}")
-        print(f"{DETECTED_BLOCK_POSE_MARKER}{json.dumps(_pose_to_dict(block_pose))}")
+        block_pose = await self._detect_block(move_world_state)
         grasp_z = grasp_height_mm(
             block_pose.z, self.block_size_mm, self.support_z_mm, self.fingertip_overhang_mm
         )
+        held_centre_below_tcp_mm = grasp_z - block_pose.z
         if grasp_z != block_pose.z:
             print(
                 f"  grasp height raised from {block_pose.z:.1f} to {grasp_z:.1f} mm "
@@ -826,8 +993,34 @@ class PickPipeline:
                 f"{_pose_to_dict(grasp)}"
             )
 
+        transform = held_block_transform(
+            self.block_name,
+            self.block_size_mm,
+            self.gripper_name,
+            centre_below_tcp_mm=held_centre_below_tcp_mm,
+        )
+        padded_transform = held_block_transform(
+            self.block_name,
+            self.block_size_mm + HELD_BLOCK_PADDING_MM,
+            self.gripper_name,
+            centre_below_tcp_mm=held_centre_below_tcp_mm,
+        )
+        held_world_state = world_state(
+            self.table,
+            (*self.other_blocks, *sim_obstacles),
+            support_obstacle(self.support_z_mm),
+            transforms=(padded_transform,),
+        )
+        carry_world_state = None
+        if self.pick_region_mm is not None:
+            carry_world_state = world_state(
+                self.table,
+                (*self.other_blocks, *sim_obstacles, pick_area_keepout(self.pick_region_mm)),
+                support_obstacle(self.support_z_mm),
+                transforms=(padded_transform,),
+            )
         print(f"step: move to lift: {_pose_to_dict(lift)}")
-        await self._move_or_diagnose(lift, move_world_state, linear=True)
+        await self._move_or_diagnose(lift, held_world_state, linear=True)
 
         if self.hold_s > 0:
             print(f"step: hold at the lift pose for {self.hold_s:.0f} s (checklist item 5)")
@@ -862,7 +1055,6 @@ class PickPipeline:
                     "returns props to their spawn state; judge RESET_MID_HOLD_JSON)"
                 )
 
-        transform = held_block_transform(self.block_name, self.block_size_mm, self.gripper_name)
         transform_json = json.dumps(
             MessageToDict(transform, preserving_proto_field_name=True), sort_keys=True
         )
@@ -871,7 +1063,9 @@ class PickPipeline:
 
         placed = False
         if self.place_pad_top_mm is not None and self.mid_hold_reset is None:
-            placed = await self._place(grasp, lift, move_world_state)
+            placed = await self._place(
+                grasp, lift, held_world_state, carry_world_state, move_world_state
+            )
         elif self.place_prop_name is not None and self.place_pad_top_mm is None:
             print(f"step: place skipped - no prop {self.place_prop_name!r} in the scene")
         if not placed:
@@ -1118,7 +1312,6 @@ async def _run_real(args: argparse.Namespace) -> Transform:
             fingertip_overhang_mm=args.fingertip_overhang_mm,
             world=world,
             target_prop_name=args.block,
-            movable_prop_names=[args.block],
             randomize_seed=args.randomize_seed,
             place_prop_name=None if args.no_place else args.place_pad,
             diagnose=lambda: _grab_diagnostics(arm, gripper, args.block),
@@ -1247,13 +1440,13 @@ async def _run_mock(args: argparse.Namespace) -> Transform:
         detector=MockDetector(camera),
         mover=MockMover(arm, _MOCK_JOINT_SETS_DEG),
         gripper=gripper,
+        verify_detection_height=False,
         block_name=args.block,
         block_size_mm=args.block_size_mm,
         gripper_name=gripper_name,
         look_pose=_look_pose_from_args(args),
         world=world,
         target_prop_name=args.block,
-        movable_prop_names=[args.block],
         randomize_seed=args.randomize_seed,
         place_prop_name=None if args.no_place else args.place_pad,
         hold_s=args.hold_s,

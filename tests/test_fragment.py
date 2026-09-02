@@ -110,3 +110,29 @@ def test_sim_world_is_in_the_frame_system():
     frame (GPU run 7: without it, app-side moves plan with no obstacles)."""
     world = next(c for c in _fragment()["components"] if c["name"] == "sim-world")
     assert world.get("frame", {}).get("parent") == "world"
+
+
+def test_three_blocks_follow_the_layout_rules():
+    """W23-W26 via the DEC-20 naming: one red target, two colour-distinct
+    distractors, all movable, spawned >= 0.20 m apart (W26) and inside the
+    verified 743 mm pick radius."""
+    import itertools
+    import math
+
+    world = next(c for c in _fragment()["components"] if c["name"] == "sim-world")
+    props = {p["name"]: p for p in world["attributes"]["props"]}
+    blocks = ["pick_cube", "ignore_cube_green", "ignore_cube_blue"]
+    assert all(name in props for name in blocks)
+
+    dominant_channels = [max(range(3), key=lambda i: props[b]["color"][i]) for b in blocks]
+    assert dominant_channels == [0, 1, 2]  # red target, green and blue distractors
+
+    for name in blocks:
+        assert not props[name].get("fixed", False)
+        x, y, _z = props[name]["position"]
+        assert math.hypot(x, y) <= 0.7434
+
+    for a, b in itertools.combinations(blocks, 2):
+        ax, ay, _az = props[a]["position"]
+        bx, by, _bz = props[b]["position"]
+        assert math.hypot(ax - bx, ay - by) >= 0.20
