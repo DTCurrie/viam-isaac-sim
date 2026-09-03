@@ -10,10 +10,17 @@ import pytest
 from viam.proto.app.robot import ComponentConfig
 from viam.utils import dict_to_struct
 
+from isaac_module import cell_layout
 from isaac_module.models.world import IsaacWorld
 from isaac_module.sim_manager import DEFAULT_MIN_SEPARATION_M, RandomizeResult, SimManager
 
 MIN_SEPARATION_MM = DEFAULT_MIN_SEPARATION_M * 1000.0
+
+POOL_NAMES = [
+    cell_layout.pool_block_name(color, index)
+    for color in cell_layout.BLOCK_COLORS
+    for index in range(1, cell_layout.POOL_BLOCKS_PER_COLOR + 1)
+]
 
 
 def _config(name: str, attrs: dict) -> ComponentConfig:
@@ -380,6 +387,104 @@ def test_spawn_prop_validation_errors(world):
 
     with pytest.raises(ValueError, match="prop"):
         asyncio.run(world.do_command({"command": "spawn_prop"}))
+
+
+@pytest.fixture(scope="module")
+def pool_world(world):
+    """The session ``world`` fixture with all 18 pool blocks spawned once,
+    so scatter_cell/clear_cell have prims to draw from and park."""
+
+    async def spawn():
+        for name in POOL_NAMES:
+            x, y = cell_layout.park_positions_m()[name]
+            await world.do_command(
+                {
+                    "command": "spawn_prop",
+                    "prop": {
+                        "type": "cube",
+                        "name": name,
+                        "size": 0.06,
+                        "position": [x, y, 0.03 + 0.0005],
+                    },
+                }
+            )
+
+    asyncio.run(spawn())
+    return world
+
+
+def test_scatter_cell_response_shape_and_mm_conversion(pool_world):
+    handle = pool_world._handle()
+    seed = 9001
+
+    async def scenario():
+        return await pool_world.do_command(
+            {"command": "scatter_cell", "seed": seed, "size_range_mm": [30.0, 90.0]}
+        )
+
+    result = asyncio.run(scenario())
+    direct = handle.scatter_cell(seed, size_range_m=(0.03, 0.09))
+
+    assert result["seed"] == seed
+    assert result["counts"] == direct.counts
+    assert set(result["positions"]) == set(direct.positions_m)
+    assert set(result["sizes_mm"]) == set(direct.sizes_m)
+    assert sorted(result["parked"]) == sorted(direct.parked)
+    assert set(result["positions"]) | set(result["parked"]) == set(POOL_NAMES)
+
+    for name, position_m in direct.positions_m.items():
+        assert result["positions"][name] == pytest.approx([v * 1000.0 for v in position_m])
+    for name, dims_m in direct.sizes_m.items():
+        assert result["sizes_mm"][name] == pytest.approx([v * 1000.0 for v in dims_m])
+
+
+def test_scatter_cell_same_seed_is_deterministic(pool_world):
+    async def scatter():
+        return await pool_world.do_command({"command": "scatter_cell", "seed": 42})
+
+    first = asyncio.run(scatter())
+    second = asyncio.run(scatter())
+    assert first == second
+    assert set(first["positions"]) | set(first["parked"]) == set(POOL_NAMES)
+
+
+def test_scatter_cell_missing_seed_raises_value_error(pool_world):
+    with pytest.raises(ValueError):
+        asyncio.run(pool_world.do_command({"command": "scatter_cell"}))
+
+
+def test_scatter_cell_bad_size_range_mm_raises_value_error(pool_world):
+    with pytest.raises(ValueError):
+        asyncio.run(
+            pool_world.do_command(
+                {"command": "scatter_cell", "seed": 1, "size_range_mm": [90.0, 30.0]}
+            )
+        )
+
+
+def test_clear_cell_parks_all_eighteen_pool_blocks(pool_world):
+    async def scenario():
+        await pool_world.do_command({"command": "scatter_cell", "seed": 7})
+        return await pool_world.do_command({"command": "clear_cell"})
+
+    result = asyncio.run(scenario())
+    assert sorted(result["parked"]) == sorted(POOL_NAMES)
+
+
+def test_scatter_cell_counts_override_zero_parks_the_whole_color(pool_world):
+    async def scenario():
+        return await pool_world.do_command(
+            {"command": "scatter_cell", "seed": 3, "counts": {"red": 0}}
+        )
+
+    result = asyncio.run(scenario())
+    red_names = [
+        cell_layout.pool_block_name("red", index)
+        for index in range(1, cell_layout.POOL_BLOCKS_PER_COLOR + 1)
+    ]
+    assert result["counts"]["red"] == 0
+    assert all(name not in result["positions"] for name in red_names)
+    assert all(name in result["parked"] for name in red_names)
 
 
 def test_usd_stage_without_lighting_warns(caplog):

@@ -81,7 +81,15 @@ DoCommand:
      current dims otherwise) |
   {"command": "ignore_props", "names": [...]} -> {"ignored": [...]}
     (empty list clears; excludes named props from get_geometries - DEC-21:
-     excludes the pick target while grasping)
+     excludes the pick target while grasping) |
+  {"command": "scatter_cell", "seed": int, "size_range_mm"?: [lo, hi]
+   (applies to every drawn block; 0 < lo <= hi; omit to keep current
+   sizes), "counts"?: {color: int} (overrides the default 1-3 per-color
+   draw for that color)} -> {"seed", "counts": {color: n},
+   "positions": {name: [x,y,z] mm}, "sizes_mm": {name: [x,y,z] mm},
+   "parked": [names]} (log-only evidence, never control input - DEC-4) |
+  {"command": "clear_cell"} -> {"parked": [names]} (log-only evidence,
+   never control input - DEC-4)
 """
 
 import math
@@ -126,6 +134,8 @@ _SUPPORTED_COMMANDS = (
     "set_prop_pose",
     "randomize_props",
     "ignore_props",
+    "scatter_cell",
+    "clear_cell",
 )
 
 
@@ -563,4 +573,40 @@ class IsaacWorld(Generic, EasyResource):  # type: ignore[misc]  # SDK: API is Fi
             self._ignored_props = set(names)
             ignored_names = cast("list[ValueTypes]", sorted(self._ignored_props))
             return {"ignored": ignored_names}
+        if cmd == "scatter_cell":
+            seed_value = command.get("seed")
+            if not isinstance(seed_value, (int, float)) or isinstance(seed_value, bool):
+                raise ValueError("scatter_cell requires 'seed'")
+            seed = int(seed_value)
+            scatter_range_mm = command.get("size_range_mm")
+            scatter_range_m: tuple[float, float] | None = None
+            if scatter_range_mm is not None:
+                lo_mm, hi_mm = _validate_size_range_pair(scatter_range_mm)
+                scatter_range_m = (lo_mm / MM_PER_M, hi_mm / MM_PER_M)
+            counts = command.get("counts")
+            counts_arg: dict[str, int] | None = None
+            if counts is not None:
+                if not isinstance(counts, Mapping):
+                    raise ValueError("scatter_cell: counts must be an object")
+                counts_arg = {
+                    str(color): int(cast("Any", value)) for color, value in counts.items()
+                }
+            scatter = handle.scatter_cell(seed, size_range_m=scatter_range_m, counts=counts_arg)
+            scatter_positions_mm: dict[str, ValueTypes] = {
+                name: [v * MM_PER_M for v in position]
+                for name, position in scatter.positions_m.items()
+            }
+            scatter_sizes_mm: dict[str, ValueTypes] = {
+                name: [v * MM_PER_M for v in dims] for name, dims in scatter.sizes_m.items()
+            }
+            return {
+                "seed": scatter.seed,
+                "counts": cast("Any", scatter.counts),
+                "positions": scatter_positions_mm,
+                "sizes_mm": scatter_sizes_mm,
+                "parked": cast("Any", scatter.parked),
+            }
+        if cmd == "clear_cell":
+            cleared = handle.clear_cell()
+            return {"parked": cast("Any", cleared.parked)}
         raise ValueError(f"unknown command {cmd!r}; supported: {', '.join(_SUPPORTED_COMMANDS)}")

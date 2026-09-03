@@ -240,6 +240,112 @@ def test_move_to_joint_positions_out_of_limits_raises(world, tmp_path):
     asyncio.run(scenario())
 
 
+def test_boundary_joint_target_clamps_instead_of_raising(world, tmp_path):
+    """GPU phase-1 wedge: physics settle drifted wrist_2 to -360.00003 deg,
+    the motion service echoed that reported state back as a plan waypoint,
+    and the strict limit check rejected every subsequent plan. A target
+    within the tolerance of a limit must clamp onto the limit and execute;
+    only a target beyond the tolerance raises."""
+    sva = {
+        "name": "limit-test",
+        "kinematic_param_type": "SVA",
+        "links": [],
+        "joints": [
+            {
+                "id": f"j{i}",
+                "type": "revolute",
+                "parent": "base_link",
+                "axis": {"x": 0, "y": 0, "z": 1},
+                "min": -90,
+                "max": 90,
+            }
+            for i in range(6)
+        ],
+    }
+    path = tmp_path / "limit-test.json"
+    path.write_text(json.dumps(sva))
+
+    arm = IsaacArm.new(
+        _config(
+            "arm-boundary-limits",
+            {
+                "world": "sim-world",
+                "asset": "ur20",
+                "mock_dof": 6,
+                "kinematics_url": path.as_uri(),
+            },
+        ),
+        {},
+    )
+
+    async def scenario():
+        just_past = JointPositions(values=[-90.00003, 0, 0, 0, 0, 0])
+        await arm.move_to_joint_positions(just_past)
+        end = await arm.get_joint_positions()
+        assert end.values[0] == pytest.approx(-90.0, abs=0.5)
+
+        beyond_tolerance = JointPositions(values=[-90.02, 0, 0, 0, 0, 0])
+        with pytest.raises(ValueError) as excinfo:
+            await arm.move_to_joint_positions(beyond_tolerance)
+        assert isinstance(excinfo.value, JointTargetOutOfLimitsError)
+
+    asyncio.run(scenario())
+
+
+def test_get_joint_positions_clamps_a_micro_drift_past_a_limit(world, tmp_path):
+    """The reported state is the motion planner's start state, so a reading
+    micro-degrees past a limit must be reported AS the limit (a reading beyond
+    the tolerance stays visible - truth over cosmetics)."""
+    sva = {
+        "name": "limit-test",
+        "kinematic_param_type": "SVA",
+        "links": [],
+        "joints": [
+            {
+                "id": f"j{i}",
+                "type": "revolute",
+                "parent": "base_link",
+                "axis": {"x": 0, "y": 0, "z": 1},
+                "min": -90,
+                "max": 90,
+            }
+            for i in range(6)
+        ],
+    }
+    path = tmp_path / "limit-test.json"
+    path.write_text(json.dumps(sva))
+
+    arm = IsaacArm.new(
+        _config(
+            "arm-report-limits",
+            {
+                "world": "sim-world",
+                "asset": "ur20",
+                "mock_dof": 6,
+                "kinematics_url": path.as_uri(),
+            },
+        ),
+        {},
+    )
+
+    async def scenario():
+        import math as math_module
+
+        handle = arm._h()
+        drifted = [math_module.radians(v) for v in (-90.00003, 0, 0, 0, 90.005, -91.0)]
+        original = handle.get_joint_positions
+        handle.get_joint_positions = lambda: drifted  # type: ignore[method-assign]
+        try:
+            reported = await arm.get_joint_positions()
+        finally:
+            handle.get_joint_positions = original  # type: ignore[method-assign]
+        assert reported.values[0] == -90.0  # micro-drift below min: clamped
+        assert reported.values[4] == 90.0  # within tolerance above max: clamped
+        assert reported.values[5] == pytest.approx(-91.0)  # beyond tolerance: reported as-is
+
+    asyncio.run(scenario())
+
+
 def test_move_to_joint_positions_no_kinematics_skips_limit_check(world):
     arm = IsaacArm.new(
         _config("arm-no-kinematics", {"world": "sim-world", "asset": "franka", "mock_dof": 6}), {}

@@ -80,6 +80,10 @@ from .utils import apply_frame_to_attrs, get_attrs, validate_sim_component
 _TOLERANCE_RAD = SETTLE_TOL_RAD
 _WAYPOINT_TOLERANCE_RAD = math.radians(2.0)
 _WAYPOINT_DEADLINE_S = 10.0
+# observed settle drift past a limit is ~3e-5 deg (GPU phase-1, wrist_2 at
+# -360.00003); 0.01 covers it by orders of magnitude while a genuinely wrong
+# target still raises
+_JOINT_LIMIT_TOLERANCE_DEG = 0.01
 
 
 class JointTargetOutOfLimitsError(ViamGRPCError, ValueError):
@@ -224,22 +228,35 @@ class IsaacArm(Arm, EasyResource):  # type: ignore[misc]  # SDK: API is Final on
                 self._kinematics_load_has_failed = True
             return None
 
-    async def _check_joint_targets(self, targets_rad: Sequence[float]) -> None:
-        """Raise JointTargetOutOfLimitsError if a target is outside the SVA's
-        declared limits (ARM-13). A no-op when limits aren't available."""
+    async def _clamped_joint_targets(self, targets_rad: Sequence[float]) -> list[float]:
+        """The targets with any boundary value within _JOINT_LIMIT_TOLERANCE_DEG
+        of an SVA limit clamped onto that limit; raises
+        JointTargetOutOfLimitsError beyond the tolerance (ARM-13). Physics
+        settle drifts a joint micro-degrees past its limit and the motion
+        service echoes that reported state back as a plan waypoint (GPU
+        phase-1: wrist_2 at -360.00003 deg wedged every subsequent plan), so
+        an exact-boundary target must execute, not raise. Targets pass through
+        unchecked when limits aren't available."""
         limits = await self._joint_limits_deg()
         if limits is None:
-            return
+            return list(targets_rad)
+        clamped = list(targets_rad)
         for i, t in enumerate(targets_rad):
             if i >= len(limits):
                 break
             joint_id, min_deg, max_deg = limits[i]
             deg = math.degrees(t)
-            if deg < min_deg or deg > max_deg:
+            if (
+                deg < min_deg - _JOINT_LIMIT_TOLERANCE_DEG
+                or deg > max_deg + _JOINT_LIMIT_TOLERANCE_DEG
+            ):
                 raise JointTargetOutOfLimitsError(
                     f"arm {self.name}: joint {joint_id} target {deg:.2f} deg "
                     f"out of range [{min_deg:.2f}, {max_deg:.2f}]"
                 )
+            if deg < min_deg or deg > max_deg:
+                clamped[i] = math.radians(min(max(deg, min_deg), max_deg))
+        return clamped
 
     async def _settle_or_raise(
         self,
@@ -276,7 +293,7 @@ class IsaacArm(Arm, EasyResource):  # type: ignore[misc]  # SDK: API is Final on
             raise JointTargetOutOfLimitsError(
                 f"arm {self.name}: expected {len(current)} joint values, got {len(targets)}"
             )
-        await self._check_joint_targets(targets)
+        targets = await self._clamped_joint_targets(targets)
         await asyncio.to_thread(handle.set_joint_targets, targets, None)
 
         await self._settle_or_raise(
@@ -342,7 +359,7 @@ class IsaacArm(Arm, EasyResource):  # type: ignore[misc]  # SDK: API is Final on
                 raise JointTargetOutOfLimitsError(
                     f"arm {self.name}: expected {len(current)} joint values, got {len(targets)}"
                 )
-            await self._check_joint_targets(targets)
+            targets = await self._clamped_joint_targets(targets)
             await asyncio.to_thread(handle.set_joint_targets, targets, max_vel_rad_s)
 
             last = i == len(waypoints) - 1
@@ -379,7 +396,20 @@ class IsaacArm(Arm, EasyResource):  # type: ignore[misc]  # SDK: API is Final on
 
     async def get_joint_positions(self, **kwargs) -> JointPositions:
         radians = await asyncio.to_thread(self._h().get_joint_positions)
-        return JointPositions(values=[math.degrees(r) for r in radians])
+        degrees = [math.degrees(r) for r in radians]
+        limits = await self._joint_limits_deg()
+        if limits is not None:
+            for i, deg in enumerate(degrees):
+                if i >= len(limits):
+                    break
+                _joint_id, min_deg, max_deg = limits[i]
+                # physics settle drifts micro-degrees past a limit; report the
+                # limit itself so the planner never plans from an illegal state
+                if min_deg - _JOINT_LIMIT_TOLERANCE_DEG <= deg < min_deg:
+                    degrees[i] = min_deg
+                elif max_deg < deg <= max_deg + _JOINT_LIMIT_TOLERANCE_DEG:
+                    degrees[i] = max_deg
+        return JointPositions(values=degrees)
 
     async def stop(self, **kwargs) -> None:
         await asyncio.to_thread(self._h().stop)

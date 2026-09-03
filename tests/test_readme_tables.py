@@ -13,6 +13,7 @@ silenced.
 """
 
 import ast
+import json
 import re
 from pathlib import Path
 
@@ -29,6 +30,9 @@ CAMERA_MODEL_FILE = SRC / "models" / "camera.py"
 SIM_MANAGER_FILE = SRC / "sim_manager.py"
 UTILS_FILE = SRC / "models" / "utils.py"
 MOCK_CAMERA_FILE = SRC / "mock_camera.py"
+CONDUCTOR_MODEL_FILE = SRC / "models" / "conductor.py"
+SORTER_SENSOR_MODEL_FILE = SRC / "models" / "sorter_sensor.py"
+META_JSON = REPO_ROOT / "meta.json"
 
 # Matches attrs.get("key"), attrs["key"], attrs.setdefault("key", ...) and
 # the same on self._attrs (models/arm.py, models/gripper.py store the config
@@ -120,11 +124,24 @@ CAMERA_CODE_KEYS = (
     | {"world", "parent_prim"}
 )
 
+CONDUCTOR_CODE_KEYS = _keys_from_whole_file(CONDUCTOR_MODEL_FILE) | {
+    # validate_config/reconfigure read these through `_DEPENDENCY_ATTRS`
+    # (a loop over a tuple of key names) rather than a literal
+    # `attrs["world"]`, so the literal-string regex can't see them.
+    "world",
+    "arm",
+    "motion",
+}
+
+SORTER_SENSOR_CODE_KEYS = _keys_from_whole_file(SORTER_SENSOR_MODEL_FILE)
+
 CODE_KEYS = {
     "world": WORLD_CODE_KEYS,
     "arm": ARM_CODE_KEYS,
     "gripper": GRIPPER_CODE_KEYS,
     "camera": CAMERA_CODE_KEYS,
+    "conductor": CONDUCTOR_CODE_KEYS,
+    "sorter-sensor": SORTER_SENSOR_CODE_KEYS,
 }
 
 # Keys the code reads that are deliberately absent from the README table:
@@ -151,6 +168,8 @@ ALLOWLIST: dict[str, set[str]] = {
         # frame config itself, not this internal representation).
         "local_orientation_wxyz",
     },
+    "conductor": set(),
+    "sorter-sensor": set(),
 }
 
 SECTION_HEADINGS = {
@@ -158,6 +177,8 @@ SECTION_HEADINGS = {
     "arm": "### arm attributes",
     "gripper": "### gripper attributes",
     "camera": "### camera attributes",
+    "conductor": "### conductor attributes",
+    "sorter-sensor": "### sorter-sensor attributes",
 }
 
 
@@ -185,7 +206,9 @@ def readme_lines() -> list[str]:
     return README.read_text().splitlines()
 
 
-@pytest.mark.parametrize("model", ["world", "arm", "gripper", "camera"])
+@pytest.mark.parametrize(
+    "model", ["world", "arm", "gripper", "camera", "conductor", "sorter-sensor"]
+)
 def test_readme_attribute_table_matches_code(readme_lines: list[str], model: str) -> None:
     documented = _table_keys_for_section(readme_lines, SECTION_HEADINGS[model])
     expected_code_keys = CODE_KEYS[model] - ALLOWLIST[model]
@@ -201,3 +224,24 @@ def test_readme_attribute_table_matches_code(readme_lines: list[str], model: str
         f"{model}: README documents these attrs but no scanned code reads "
         f"them: {sorted(stale_in_readme)}"
     )
+
+
+def test_readme_models_table_matches_meta_json(readme_lines: list[str]) -> None:
+    """The `## Models` table's model names must equal `meta.json`'s, in
+    both directions: no model shipped without a README row, no row for a
+    model the manifest no longer registers."""
+    start = next(i for i, line in enumerate(readme_lines) if line.strip() == "## Models")
+    table_start = next(
+        i
+        for i in range(start, len(readme_lines))
+        if readme_lines[i].startswith("| Model") or readme_lines[i].startswith("|Model")
+    )
+    documented: set[str] = set()
+    for line in readme_lines[table_start + 2 :]:
+        if not line.startswith("|"):
+            break
+        first_cell = line.split("|")[1]
+        documented.update(re.findall(r"`([a-zA-Z0-9_:.\-]+)`", first_cell))
+
+    manifest_models = {entry["model"] for entry in json.loads(META_JSON.read_text())["models"]}
+    assert documented == manifest_models

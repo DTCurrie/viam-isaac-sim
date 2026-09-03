@@ -12,22 +12,26 @@ machines without Isaac Sim installed.
 """
 
 import concurrent.futures
+import hashlib
 import math
+import os
 import queue
 import random
 import sys
+import tempfile
 import threading
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Container, Sequence
 from concurrent.futures import Future
 from dataclasses import dataclass, field
 from enum import Enum
+from pathlib import Path
 from typing import Any, NamedTuple, Optional
 
 import numpy as np
 from viam.logging import getLogger
 
-from . import FAMILY, NAMESPACE
+from . import FAMILY, NAMESPACE, cell_layout
 from .camera_base import CameraHandle, Frame, NoFrameYetError
 from .compat import caps, import_isaac, isaac_version
 from .encoding import Intrinsics
@@ -1349,6 +1353,12 @@ class SimManager:
         usd, meta = self._resolve_usd(gripper_attrs)
         if usd is None:
             raise ValueError(f"gripper {name!r}: no usd_path or known asset resolved")
+        try:
+            from pxr import UsdUtils as usd_utils
+        except ImportError:  # pragma: no cover - older Kit builds
+            usd_utils = None
+        usd, prepared = self._prepared_asset_layer(Sdf, usd_utils, usd)
+        LOGGER.info("gripper %r asset layer %s: %s", name, prepared["reason"], prepared)
 
         arm_prim = arm._prim_path
         gripper_prim = f"{arm_prim}/Gripper"
@@ -1578,6 +1588,107 @@ class SimManager:
             LOGGER.exception("could not read the drive joint limits for %r", drive_joint)
         return None, None
 
+    def _prepared_asset_layer(
+        self, sdf: Any, usd_utils: Any, usd: str
+    ) -> tuple[str, dict[str, Any]]:
+        """R-4 / OQ-4 applied BEFORE composition. Measured on the GPU
+        (2026-09-03): the 2F-85 layer's 11 ``omniverse://isaac-dev`` part
+        references each stalled omni.client ~12 s while the stage composed
+        them - 131 s per module start, past viam-server's 2-minute resource
+        timeout, so the gripper only came up on the retry. Opening the asset's
+        own layer resolves none of its sub-references, so when that layer
+        points at the unresolvable host, write a copy with those references
+        moved onto the assets root (and its layer-relative paths made
+        absolute, so the copy can live anywhere) under asset_cache_dir(), and
+        reference the copy. Later module starts find the copy and skip even
+        this. Returns (path to reference, report); the original path when
+        nothing needs rewriting or the rewrite is unavailable. Sim thread."""
+        report: dict[str, Any] = {"source": usd, "applied": [], "missing": [], "anchored": []}
+        if usd_utils is None:
+            report["reason"] = "pxr.UsdUtils unavailable"
+            return usd, report
+        prepared = self._prepare_layer(sdf, usd_utils, usd, report, {}, ASSET_PREPARE_MAX_DEPTH)
+        if prepared == usd and "reason" not in report:
+            if usd in report.get("unopened", ()):
+                report["reason"] = "layer did not open"
+            else:
+                report["reason"] = f"no {UNRESOLVABLE_ASSET_HOST} references in the closure"
+        return prepared, report
+
+    def _prepare_layer(
+        self,
+        sdf: Any,
+        usd_utils: Any,
+        usd: str,
+        report: dict[str, Any],
+        prepared_by_source: dict[str, str],
+        depth_left: int,
+    ) -> str:
+        """The recursive step of ``_prepared_asset_layer`` (GPU 2026-09-04:
+        the 5.0 ``Robotiq_2F_85_edit.usd`` carries its isaac-dev references
+        one layer DOWN, in its payload ``Robotiq_2F_85_base.usda``, so the
+        old single-layer check said "no references" and every module start
+        re-paid ~13 dead-host stalls - 2 m 11 s, past the RDK's hard
+        2-minute AddResource deadline, which is why reload-local could never
+        reconfigure). Returns the path to reference for ``usd``: a cached
+        rewritten copy when its composition closure touches the unresolvable
+        host (parents are rewritten to reference their children's copies),
+        else ``usd`` unchanged. Sim thread."""
+        if usd in prepared_by_source:
+            return prepared_by_source[usd]
+        prepared_by_source[usd] = usd  # cycle guard; overwritten on a rewrite
+        stem = usd.rsplit("/", 1)[-1].rsplit(".", 1)[0]
+        digest = hashlib.sha1(usd.encode()).hexdigest()[:12]
+        local = asset_cache_dir() / f"{stem}-{digest}-v{ASSET_LAYER_CACHE_VERSION}.usd"
+        if local.exists():
+            report["reason"] = "cached"
+            prepared_by_source[usd] = str(local)
+            return str(local)
+        layer = sdf.Layer.FindOrOpen(usd)
+        if layer is None:
+            report.setdefault("unopened", []).append(usd)
+            return usd
+        dependencies_of = (
+            getattr(layer, "GetCompositionAssetDependencies", None) or layer.GetExternalReferences
+        )
+        dependencies = [str(path) for path in dependencies_of()]
+        child_copies: dict[str, str] = {}
+        if depth_left > 0:
+            for dependency in dependencies:
+                if UNRESOLVABLE_ASSET_HOST in dependency or not _is_layer_path(dependency):
+                    continue
+                absolute = _anchor_asset_path(dependency, usd)
+                prepared_child = self._prepare_layer(
+                    sdf, usd_utils, absolute, report, prepared_by_source, depth_left - 1
+                )
+                if prepared_child != absolute:
+                    child_copies[dependency] = prepared_child
+        has_unresolvable = any(UNRESOLVABLE_ASSET_HOST in dependency for dependency in dependencies)
+        if not child_copies and not has_unresolvable:
+            return usd
+        assets_root = self._isaac.get_assets_root_path()
+        if not assets_root:
+            report["reason"] = "no assets root"
+            return usd
+        copy = sdf.Layer.CreateAnonymous(f"{stem}-prepared.usd")
+        copy.TransferContent(layer)
+
+        def rewrite(path: Any) -> str:
+            raw = str(path)
+            if raw in child_copies:
+                report.setdefault("relinked", []).append((raw, child_copies[raw]))
+                return child_copies[raw]
+            return _prepared_asset_path(raw, usd, assets_root, self._usd_exists, report)
+
+        usd_utils.ModifyAssetPaths(copy, rewrite)
+        local.parent.mkdir(parents=True, exist_ok=True)
+        if not copy.Export(str(local)):
+            report["reason"] = f"could not write {local}"
+            return usd
+        report["reason"] = "prepared"
+        prepared_by_source[usd] = str(local)
+        return str(local)
+
     def _rewrite_unresolvable_references(
         self, usd: Any, sdf: Any, root_prim: Any
     ) -> dict[str, Any]:
@@ -1663,6 +1774,93 @@ class SimManager:
 UNRESOLVABLE_ASSET_HOST = "isaac-dev"
 ASSETS_PATH_MARKER = "/Isaac/"  # every asset path is rooted here under both hosts
 
+# Prepared asset layers (SimManager._prepared_asset_layer) are cached across
+# module restarts under viam-server's per-module data dir when it sets one,
+# else the system temp dir. Bump the version when the preparation rules
+# change so stale copies are redone.
+ASSET_CACHE_DIRNAME = "viam-isaac-sim-assets"
+ASSET_LAYER_CACHE_VERSION = 2
+
+# How many composition-dependency levels _prepared_asset_layer walks looking
+# for unresolvable-host references. The 5.0 2F-85 needs 2 (root asset ->
+# payload -> parts); the cap only bounds pathological reference chains.
+ASSET_PREPARE_MAX_DEPTH = 4
+
+
+def _is_layer_path(asset_path: str) -> bool:
+    """A dependency worth recursing into: an explicit path or URL to a USD
+    layer. A bare search path (``OmniPBR.mdl``) belongs to the MDL resolver,
+    and textures/MDLs cannot carry references."""
+    if not (asset_path.startswith(("./", "../", "/")) or "://" in asset_path):
+        return False
+    return asset_path.rsplit("?", 1)[0].lower().endswith((".usd", ".usda", ".usdc"))
+
+
+def asset_cache_dir() -> Path:
+    base = os.environ.get("VIAM_MODULE_DATA") or tempfile.gettempdir()
+    return Path(base) / ASSET_CACHE_DIRNAME
+
+
+def _bucket_candidate(asset_path: str, assets_root: str) -> str | None:
+    """``assets_root`` + the ``/Isaac/...`` tail of a path on the unresolvable
+    host; None for a path anywhere else."""
+    marker_at = asset_path.find(ASSETS_PATH_MARKER)
+    if UNRESOLVABLE_ASSET_HOST not in asset_path or marker_at < 0:
+        return None
+    return assets_root.rstrip("/") + asset_path[marker_at:]
+
+
+def _anchor_asset_path(asset_path: str, anchor_layer: str) -> str:
+    """A layer-relative path (``./x`` or ``../x``) resolved against the layer
+    at ``anchor_layer``. Every other path - absolute, URL, or a search path
+    such as an MDL module name - is returned unchanged, since only the
+    explicitly relative forms break when the layer is copied elsewhere."""
+    if not (asset_path.startswith("./") or asset_path.startswith("../")):
+        return asset_path
+    segments = anchor_layer.rsplit("/", 1)[0].split("/")
+    # never pop into the scheme/host of a URL ("https:", "", host) or past
+    # the leading "" of an absolute path
+    floor = 3 if "://" in anchor_layer else 1
+    for part in asset_path.split("/"):
+        if part in ("", "."):
+            continue
+        if part == "..":
+            if len(segments) > floor:
+                segments.pop()
+            continue
+        segments.append(part)
+    return "/".join(segments)
+
+
+def _prepared_asset_path(
+    asset_path: str,
+    anchor_layer: str,
+    assets_root: str,
+    exists: Callable[[str], bool | None],
+    report: dict[str, Any],
+) -> str:
+    """What a prepared copy of ``anchor_layer`` holds in place of
+    ``asset_path``: a path on the unresolvable host moves onto ``assets_root``
+    (when the bucket has the file, or that cannot be checked - None), a
+    layer-relative path becomes absolute. Records the (old, new) pairs under
+    ``report["applied"]`` / ``["anchored"]`` and bucket files that provably
+    do not exist under ``report["missing"]`` - those references are DROPPED
+    (empty path removes them): a dead-host reference can never load and
+    costs a ~12 s composition stall each (GPU 2026-09-04), so a missing
+    visual is strictly better."""
+    candidate = _bucket_candidate(asset_path, assets_root)
+    if candidate is not None:
+        if exists(candidate) is False:
+            report["missing"].append(candidate)
+            return ""
+        report["applied"].append((asset_path, candidate))
+        return candidate
+    anchored = _anchor_asset_path(asset_path, anchor_layer)
+    if anchored != asset_path:
+        report["anchored"].append((asset_path, anchored))
+    return anchored
+
+
 # R-4: the 2F-85 asset has no `*_pad` links; the fingertip geometry that must
 # collide is the `..._fingertipsstep_..` mesh under `left/right_inner_finger`.
 PAD_PRIM_NAME_FRAGMENTS = ("pad", "fingertip", "inner_finger")
@@ -1685,11 +1883,10 @@ def _rewritten_references(
     missing: list[str] = []
     for item in items:
         asset_path = str(getattr(item, "assetPath", ""))
-        marker_at = asset_path.find(ASSETS_PATH_MARKER)
-        if UNRESOLVABLE_ASSET_HOST not in asset_path or marker_at < 0:
+        candidate = _bucket_candidate(asset_path, assets_root)
+        if candidate is None:
             new_items.append(item)
             continue
-        candidate = assets_root.rstrip("/") + asset_path[marker_at:]
         if exists(candidate) is False:
             LOGGER.warning("assets root has no %s; keeping %s", candidate, asset_path)
             new_items.append(item)
@@ -1897,6 +2094,11 @@ class SettleOutcome(str, Enum):
 
 # randomize_props separation default: FINDINGS W26 block spacing rule
 DEFAULT_MIN_SEPARATION_M = 0.15
+# scatter_cell's own floor: DEFAULT_MIN_SEPARATION_M is infeasible for the
+# full 18-block pool inside cell_layout.scatter_region_m() (0.15m fails
+# every seed; 0.12m holds 0 failures across 3000) - comfortably above the
+# footprint-based edge clearance (0.07m for two 60mm blocks) with margin
+POOL_SCATTER_MIN_SEPARATION_M = 0.12
 # sized props (dynamic-blocks phase 1): pairwise face gap beyond the two
 # footprints, and how far above the support face a placed prop rests
 PROP_EDGE_CLEARANCE_M = 0.01
@@ -1930,6 +2132,89 @@ class RandomizeResult(NamedTuple):
 
     positions_m: dict[str, Vec3]
     dims_m: dict[str, tuple[float, float, float]]
+
+
+class ScatterCellResult(NamedTuple):
+    """What scatter_cell drew and placed: the drawn roster only (undrawn
+    pool blocks are reported by name in ``parked``, not by pose/size)."""
+
+    seed: int
+    counts: dict[str, int]
+    positions_m: dict[str, Vec3]
+    sizes_m: dict[str, tuple[float, float, float]]
+    parked: list[str]
+
+
+class ClearCellResult(NamedTuple):
+    """clear_cell's result: every pool block, now parked."""
+
+    parked: list[str]
+
+
+def _pool_block_names() -> list[str]:
+    """All 18 pool block prop names, colors in BLOCK_COLORS order, pool
+    index 1..POOL_BLOCKS_PER_COLOR within a color."""
+    return [
+        cell_layout.pool_block_name(color, index)
+        for color in cell_layout.BLOCK_COLORS
+        for index in range(1, cell_layout.POOL_BLOCKS_PER_COLOR + 1)
+    ]
+
+
+def _scattered_block_names(counts: dict[str, int]) -> list[str]:
+    """The drawn roster's names for a scatter_cell count draw, in
+    BLOCK_COLORS/pool-index order (the order sizes then positions draw
+    in, and the order they place in)."""
+    return [
+        cell_layout.pool_block_name(color, index)
+        for color in cell_layout.BLOCK_COLORS
+        for index in range(1, counts[color] + 1)
+    ]
+
+
+def _validate_pool_counts_override(counts: dict[str, int]) -> None:
+    unknown = set(counts) - set(cell_layout.BLOCK_COLORS)
+    if unknown:
+        raise ValueError(f"scatter_cell: counts names not in BLOCK_COLORS: {sorted(unknown)}")
+    for color, value in counts.items():
+        if not (0 <= value <= cell_layout.POOL_BLOCKS_PER_COLOR):
+            raise ValueError(
+                f"scatter_cell: counts[{color!r}]={value} out of "
+                f"[0, {cell_layout.POOL_BLOCKS_PER_COLOR}]"
+            )
+
+
+def _draw_pool_counts(rng: random.Random, counts: dict[str, int] | None) -> dict[str, int]:
+    """Per-color drawn count, joining the seeded stream ahead of sizes and
+    positions (scatter_cell contract): one ``rng.randint(1,
+    POOL_BLOCKS_PER_COLOR)`` per color in BLOCK_COLORS order, with no draw
+    consumed for a color given in ``counts``."""
+    if counts:
+        _validate_pool_counts_override(counts)
+    drawn: dict[str, int] = {}
+    for color in cell_layout.BLOCK_COLORS:
+        if counts is not None and color in counts:
+            drawn[color] = counts[color]
+        else:
+            drawn[color] = rng.randint(1, cell_layout.POOL_BLOCKS_PER_COLOR)
+    return drawn
+
+
+def _require_pool_blocks(available: Container[str], verb: str) -> list[str]:
+    """All 18 pool block names, or ValueError naming whichever are missing
+    from ``available``."""
+    pool_names = _pool_block_names()
+    missing = [name for name in pool_names if name not in available]
+    if missing:
+        raise ValueError(f"{verb}: missing pool blocks: {sorted(missing)}")
+    return pool_names
+
+
+def _park_pose_m(dims: tuple[float, float, float], park_xy: tuple[float, float]) -> Vec3:
+    """A pool block's park pose: the seam's floor (x, y), z = half its
+    CURRENT height + the contact-offset convention."""
+    x, y = park_xy
+    return (x, y, dims[2] / 2.0 + PROP_REST_EPSILON_M)
 
 
 def prop_spawn_orientation(prop: dict[str, Any]) -> Quat:
@@ -2067,12 +2352,18 @@ def _draw_sizes_and_positions(
     seed: int,
     min_separation_m: float,
     size_range_m: dict[str, tuple[float, float]] | None,
+    rng: random.Random | None = None,
 ) -> tuple[dict[str, Vec3], dict[str, tuple[float, float, float]]]:
     """One ``random.Random(seed)`` stream: sizes first (``names`` order,
     only props with a range), then positions (WorldHandle.randomize_props
     contract). Returns the placements and every named prop's post-draw
-    dims."""
-    rng = random.Random(seed)
+    dims.
+
+    ``rng`` lets a caller join an already-seeded stream ahead of this call
+    (scatter_cell's counts-then-sizes-then-positions draw); omitted, a
+    fresh ``random.Random(seed)`` is used (randomize_props' own contract,
+    unchanged)."""
+    rng = rng if rng is not None else random.Random(seed)
     drawn_dims = dict(dims_by_name)
     if size_range_m:
         for name in names:
@@ -2177,6 +2468,41 @@ class WorldHandle:
         the max of its x/y dims, and each prop rests at
         face z + dims_z / 2 + PROP_REST_EPSILON_M.
         Unknown name -> ValueError."""
+        raise NotImplementedError
+
+    def scatter_cell(
+        self,
+        seed: int,
+        size_range_m: tuple[float, float] | None = None,
+        counts: dict[str, int] | None = None,
+    ) -> ScatterCellResult:
+        """Draw a fresh sorting problem from the 18 parked pool blocks
+        (`block_<color>_1..3`, cell_layout.BLOCK_COLORS x
+        POOL_BLOCKS_PER_COLOR).
+
+        One ``random.Random(seed)`` stream, in order: a per-color count
+        (``rng.randint(1, POOL_BLOCKS_PER_COLOR)`` in BLOCK_COLORS order,
+        skipped for a color given in ``counts``), then sizes, then
+        positions. Drawn blocks per color are ``block_<color>_1..n`` and
+        place inside ``cell_layout.scatter_region_m()`` with the same
+        separation machinery as randomize_props, at
+        POOL_SCATTER_MIN_SEPARATION_M (DEFAULT_MIN_SEPARATION_M is
+        infeasible for the full 18-block pool in this region);
+        ``size_range_m`` (lo, hi)
+        applies to every drawn block, or None to keep current sizes.
+        Undrawn blocks re-park at ``cell_layout.park_positions_m()`` with
+        z = half their current height + the contact-offset convention.
+
+        ``counts`` values must be in [0, POOL_BLOCKS_PER_COLOR], keys in
+        BLOCK_COLORS (ValueError naming the offender). Any missing pool
+        prim -> ValueError listing the missing names. XC-4-safe: only the
+        18 pool prims move or rescale."""
+        raise NotImplementedError
+
+    def clear_cell(self) -> ClearCellResult:
+        """Re-park all 18 pool blocks at ``cell_layout.park_positions_m()``,
+        poses only - no rescale, since rescaling is absolute against spawn
+        size and the next scatter_cell's draw is unaffected either way."""
         raise NotImplementedError
 
     def spawn_prop(self, prop: dict[str, Any]) -> None:
@@ -2297,25 +2623,76 @@ class MockWorldHandle(WorldHandle):
         placed, drawn_dims = _draw_sizes_and_positions(
             names, dims, region, seed, min_separation_m, size_range_m
         )
-        for name in size_range_m or ():
-            drawn_edge = drawn_dims[name][0]
-            entries[name]["spawn"] = {
-                **entries[name]["spawn"],
-                "size": drawn_edge,
-                "scale": (1.0, 1.0, 1.0),
-            }
-        if size_range_m:
-            # parity with IsaacWorldHandle: a sized randomize replays
-            # spawn_prop's full-reset pattern (all props snap to spawn poses,
-            # hooks fire) before the named props teleport to their draws
-            for entry in self._registry.values():
-                entry["position"] = entry["spawn_position"]
-                entry["orientation"] = entry["spawn_orientation"]
-            self._sim._reset_world()
+        self._rescale_and_reset(drawn_dims, size_range_m)
         for name in names:
             self.set_prop_pose(name, placed[name])
         dims_m = {name: prop_box_dims(entries[name]["spawn"]) for name in names}
         return RandomizeResult(positions_m=placed, dims_m=dims_m)
+
+    def _rescale_and_reset(
+        self,
+        drawn_dims: dict[str, tuple[float, float, float]],
+        size_range_m: dict[str, tuple[float, float]] | None,
+    ) -> None:
+        """Absolute rescale against spawn size (never compounds), then
+        parity with IsaacWorldHandle: a sized call replays spawn_prop's
+        full-reset pattern (all props snap to spawn poses, hooks fire)
+        before any teleport. A no-range call is a no-op."""
+        for name in size_range_m or ():
+            drawn_edge = drawn_dims[name][0]
+            self._registry[name]["spawn"] = {
+                **self._registry[name]["spawn"],
+                "size": drawn_edge,
+                "scale": (1.0, 1.0, 1.0),
+            }
+        if size_range_m:
+            for entry in self._registry.values():
+                entry["position"] = entry["spawn_position"]
+                entry["orientation"] = entry["spawn_orientation"]
+            self._sim._reset_world()
+
+    def scatter_cell(
+        self,
+        seed: int,
+        size_range_m: tuple[float, float] | None = None,
+        counts: dict[str, int] | None = None,
+    ) -> ScatterCellResult:
+        pool_names = _require_pool_blocks(self._registry, "scatter_cell")
+        rng = random.Random(seed)
+        drawn_counts = _draw_pool_counts(rng, counts)
+        scattered = _scattered_block_names(drawn_counts)
+        parked = [name for name in pool_names if name not in scattered]
+        entries = {name: self._registry[name] for name in pool_names}
+        dims = {name: prop_box_dims(entries[name]["spawn"]) for name in scattered}
+        size_range_by_name = {name: size_range_m for name in scattered} if size_range_m else None
+        placed, drawn_dims = _draw_sizes_and_positions(
+            scattered,
+            dims,
+            cell_layout.scatter_region_m(),
+            seed,
+            POOL_SCATTER_MIN_SEPARATION_M,
+            size_range_by_name,
+            rng=rng,
+        )
+        self._rescale_and_reset(drawn_dims, size_range_by_name)
+        for name in scattered:
+            self.set_prop_pose(name, placed[name])
+        park_xy = cell_layout.park_positions_m()
+        for name in parked:
+            dims_now = prop_box_dims(entries[name]["spawn"])
+            self.set_prop_pose(name, _park_pose_m(dims_now, park_xy[name]))
+        sizes_m = {name: drawn_dims[name] for name in scattered}
+        return ScatterCellResult(
+            seed=seed, counts=drawn_counts, positions_m=placed, sizes_m=sizes_m, parked=parked
+        )
+
+    def clear_cell(self) -> ClearCellResult:
+        pool_names = _require_pool_blocks(self._registry, "clear_cell")
+        park_xy = cell_layout.park_positions_m()
+        for name in pool_names:
+            dims_now = prop_box_dims(self._registry[name]["spawn"])
+            self.set_prop_pose(name, _park_pose_m(dims_now, park_xy[name]))
+        return ClearCellResult(parked=pool_names)
 
     def spawn_prop(self, prop: dict[str, Any]) -> None:
         self._register(prop)
@@ -2453,26 +2830,80 @@ class IsaacWorldHandle(WorldHandle):
         placed, drawn_dims = _draw_sizes_and_positions(
             names, dims, region, seed, min_separation_m, size_range_m
         )
-        if size_range_m:
-
-            def _rescale_and_rebuild() -> None:
-                # stop BEFORE writing the scale: the stop inside reset restores
-                # the stage's pre-play state, so a scale authored mid-play is
-                # reverted (GPU: drawn 44.7 mm, block stayed 60 mm) - and a
-                # live-play write also invalidates PhysX's tensor view (GPU:
-                # "Failed to get rigid body transforms from backend")
-                self._sim.world.stop()
-                self._rescale_props(specs, drawn_dims, size_range_m)
-                # spawn_prop's pattern: full reset re-cooks the colliders at
-                # the new scale and refires the post-reset hooks (arm gains,
-                # camera re-inits) before any teleport touches a pose
-                self._sim._reset_world()
-
-            self._sim.run(_rescale_and_rebuild)
+        self._rescale_and_reset(specs, drawn_dims, size_range_m)
         for name, position in placed.items():
             self.set_prop_pose(name, position)
         dims_m = {name: prop_box_dims(specs[name]) for name in names}
         return RandomizeResult(positions_m=placed, dims_m=dims_m)
+
+    def _rescale_and_reset(
+        self,
+        specs: dict[str, dict[str, Any]],
+        drawn_dims: dict[str, tuple[float, float, float]],
+        size_range_m: dict[str, tuple[float, float]] | None,
+    ) -> None:
+        """A no-op with no ranges; otherwise runs on the sim thread. Stop
+        BEFORE writing the scale: the stop inside reset restores the
+        stage's pre-play state, so a scale authored mid-play is reverted
+        (GPU: drawn 44.7 mm, block stayed 60 mm) - and a live-play write
+        also invalidates PhysX's tensor view (GPU: "Failed to get rigid
+        body transforms from backend"). Then spawn_prop's pattern: full
+        reset re-cooks the colliders at the new scale and refires the
+        post-reset hooks (arm gains, camera re-inits) before any teleport
+        touches a pose."""
+        if not size_range_m:
+            return
+
+        def _rescale_and_rebuild() -> None:
+            self._sim.world.stop()
+            self._rescale_props(specs, drawn_dims, size_range_m)
+            self._sim._reset_world()
+
+        self._sim.run(_rescale_and_rebuild)
+
+    def scatter_cell(
+        self,
+        seed: int,
+        size_range_m: tuple[float, float] | None = None,
+        counts: dict[str, int] | None = None,
+    ) -> ScatterCellResult:
+        pool_names = _require_pool_blocks(self._sim._prop_specs, "scatter_cell")
+        rng = random.Random(seed)
+        drawn_counts = _draw_pool_counts(rng, counts)
+        scattered = _scattered_block_names(drawn_counts)
+        parked = [name for name in pool_names if name not in scattered]
+        specs = {name: self._prop_spec(name) for name in pool_names}
+        dims = {name: prop_box_dims(specs[name]) for name in scattered}
+        size_range_by_name = {name: size_range_m for name in scattered} if size_range_m else None
+        placed, drawn_dims = _draw_sizes_and_positions(
+            scattered,
+            dims,
+            cell_layout.scatter_region_m(),
+            seed,
+            POOL_SCATTER_MIN_SEPARATION_M,
+            size_range_by_name,
+            rng=rng,
+        )
+        self._rescale_and_reset(specs, drawn_dims, size_range_by_name)
+        for name, position in placed.items():
+            self.set_prop_pose(name, position)
+        park_xy = cell_layout.park_positions_m()
+        for name in parked:
+            dims_now = prop_box_dims(specs[name])
+            self.set_prop_pose(name, _park_pose_m(dims_now, park_xy[name]))
+        sizes_m = {name: drawn_dims[name] for name in scattered}
+        return ScatterCellResult(
+            seed=seed, counts=drawn_counts, positions_m=placed, sizes_m=sizes_m, parked=parked
+        )
+
+    def clear_cell(self) -> ClearCellResult:
+        pool_names = _require_pool_blocks(self._sim._prop_specs, "clear_cell")
+        specs = {name: self._prop_spec(name) for name in pool_names}
+        park_xy = cell_layout.park_positions_m()
+        for name in pool_names:
+            dims_now = prop_box_dims(specs[name])
+            self.set_prop_pose(name, _park_pose_m(dims_now, park_xy[name]))
+        return ClearCellResult(parked=pool_names)
 
     def _rescale_props(
         self,
@@ -2910,10 +3341,11 @@ class IsaacArmHandle(ArmHandle):
 
     def post_reset(self) -> None:
         """ARM-15/ARM-16: a world.reset() resets the solver iteration count
-        and controller gains to the prim's authored defaults, and can
-        teleport the articulation to its default pose - re-apply the
-        snapshotted solver count/gains and re-command the last targets so a
-        reset mid-move holds position."""
+        and controller gains to the prim's authored defaults, and teleports
+        the articulation to its default pose - re-apply the snapshotted
+        solver count/gains, teleport the joints back to the last targets
+        (zero velocity), then re-command those targets so the arm holds
+        position across the reset instead of sweeping back unplanned."""
 
         def _redo() -> None:
             set_iterations = getattr(self._art, "set_solver_position_iteration_count", None)
@@ -2923,8 +3355,21 @@ class IsaacArmHandle(ArmHandle):
                 kps, kds = self._gains
                 self._art.get_articulation_controller().set_gains(kps=kps, kds=kds)
             if self._targets is not None:
+                positions = np.array(self._targets, dtype=float)
+                # State write BEFORE the hold action: the reset left the arm
+                # at its default pose, and driving from there to the targets
+                # is an unplanned full-speed sweep through the scene.
+                set_positions = getattr(self._art, "set_joint_positions", None)
+                if set_positions is not None:
+                    set_positions(positions, joint_indices=self._joint_indices)
+                set_velocities = getattr(self._art, "set_joint_velocities", None)
+                if set_velocities is not None:
+                    set_velocities(
+                        np.zeros(len(self._targets), dtype=float),
+                        joint_indices=self._joint_indices,
+                    )
                 action = self._sim._isaac.ArticulationAction(
-                    joint_positions=np.array(self._targets, dtype=float),
+                    joint_positions=positions,
                     joint_indices=self._joint_indices,
                 )
                 self._art.apply_action(action)

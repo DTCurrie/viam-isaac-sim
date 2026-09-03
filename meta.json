@@ -28,6 +28,16 @@
       "model": "viam:isaac-sim-devin:gripper",
       "api": "rdk:component:gripper",
       "short_description": "A simulated parallel-jaw gripper (Robotiq 2F-85) attached to a simulated arm"
+    },
+    {
+      "model": "viam:isaac-sim-devin:conductor",
+      "api": "rdk:service:generic",
+      "short_description": "Color-sorts scattered blocks onto per-color pads by DoCommand start/stop/status, N loops or forever"
+    },
+    {
+      "model": "viam:isaac-sim-devin:sorter-sensor",
+      "api": "rdk:component:sensor",
+      "short_description": "Proxies a conductor's status for data management, emitting each new loop record at most once"
     }
   ],
   "entrypoint": "dist/run.sh",

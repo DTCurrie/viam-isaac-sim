@@ -40,6 +40,7 @@ red_centroid_m = pick_red_block.red_centroid_m
 HELD_BLOCK_TRANSFORM_MARKER = pick_red_block.HELD_BLOCK_TRANSFORM_MARKER
 DETECTED_BLOCK_POSE_MARKER = pick_red_block.DETECTED_BLOCK_POSE_MARKER
 HOLD_SAMPLES_MARKER = pick_red_block.HOLD_SAMPLES_MARKER
+GRAB_DIAGNOSTICS_MARKER = pick_red_block.GRAB_DIAGNOSTICS_MARKER
 RESET_MID_HOLD_MARKER = pick_red_block.RESET_MID_HOLD_MARKER
 MEASURED_BLOCK_MARKER = pick_red_block.MEASURED_BLOCK_MARKER
 JAW_MAX_BLOCK_MM = pick_red_block.JAW_MAX_BLOCK_MM
@@ -88,9 +89,9 @@ def test_grasp_pose_keeps_block_z_and_points_down():
 def test_table_obstacle_matches_readme_recipe():
     table = table_obstacle()
     box = table.box
-    assert (box.dims_mm.x, box.dims_mm.y, box.dims_mm.z) == (1200.0, 800.0, 740.0)
+    assert (box.dims_mm.x, box.dims_mm.y, box.dims_mm.z) == (1200.0, 800.0, 750.0)
     center = table.center
-    assert (center.x, center.y, center.z) == (600.0, 0.0, 370.0)
+    assert (center.x, center.y, center.z) == (-1200.0, 0.0, 375.0)
 
 
 def test_held_block_transform_shape():
@@ -170,7 +171,7 @@ def test_main_mock_runs_the_full_pick_sequence(capsys):
         line for line in out.splitlines() if line.startswith(HELD_BLOCK_TRANSFORM_MARKER)
     )
     payload = json.loads(transform_line.removeprefix(HELD_BLOCK_TRANSFORM_MARKER))
-    assert payload["reference_frame"] == "pick_cube"
+    assert payload["reference_frame"] == "block_red_1"
     assert payload["pose_in_observer_frame"]["reference_frame"] == "mock-pick-grip"
 
     camera_handle = SimManager.get()._handles["mock-wrist-cam"][1]
@@ -456,8 +457,8 @@ def test_obstacles_from_prop_geometries_skips_zero_dim_entries():
 
 def test_randomize_region_mm_is_the_table_footprint_at_the_support_height():
     (x0, y0, z0), (x1, y1, z1) = pick_red_block.randomize_region_mm(margin_mm=50.0)
-    assert (x0, y0, z0) == (50.0, -350.0, 0.0)
-    assert (x1, y1, z1) == (1150.0, 350.0, 0.0)
+    assert (x0, y0, z0) == (-1750.0, -350.0, 0.0)
+    assert (x1, y1, z1) == (-650.0, 350.0, 0.0)
     (_, _, top0), (_, _, top1) = pick_red_block.randomize_region_mm(margin_mm=50.0, face_z_mm=750.0)
     assert (top0, top1) == (750.0, 750.0)
 
@@ -483,7 +484,7 @@ def test_sim_pipeline_randomizes_then_fetches_geometries_in_order(monkeypatch):
             return Pose(x=100.0, y=200.0, z=30.0, o_x=0.0, o_y=0.0, o_z=1.0, theta=0.0)
 
     class FakeMover:
-        async def look_from(self, pose, world_state):
+        async def look_from(self, pose, world_state, linear=False):
             return None
 
         async def move_to(self, pose, world_state, linear=False):
@@ -523,7 +524,7 @@ def test_sim_pipeline_randomizes_then_fetches_geometries_in_order(monkeypatch):
     assert randomize_command["names"] == ["pick_cube"]
     assert randomize_command["seed"] == 7
     # default region: the reach-safe rectangle at the pipeline's support_z_mm (floor)
-    assert randomize_command["region"] == [[450.0, -250.0, 0.0], [700.0, 250.0, 0.0]]
+    assert randomize_command["region"] == [[-1350.0, -300.0, 0.0], [-700.0, 300.0, 0.0]]
 
 
 def test_sim_obstacles_excludes_the_target_and_includes_other_props(monkeypatch):
@@ -548,7 +549,7 @@ def test_sim_obstacles_excludes_the_target_and_includes_other_props(monkeypatch)
     move_world_states = []
 
     class RecordingMover:
-        async def look_from(self, pose, world_state):
+        async def look_from(self, pose, world_state, linear=False):
             return None
 
         async def move_to(self, pose, world_state, linear=False):
@@ -583,13 +584,14 @@ def test_sim_obstacles_excludes_the_target_and_includes_other_props(monkeypatch)
 
 def test_reachable_region_mm_stays_inside_the_arm_envelope():
     lo, hi = pick_red_block.reachable_region_mm(face_z_mm=5.0)
-    assert lo == [450.0, -250.0, 5.0]
-    assert hi == [700.0, 250.0, 5.0]
-    # no corner beyond the phase-3 verified pick radius: the (700, 250) pick
-    verified_radius = (700.0**2 + 250.0**2) ** 0.5
+    assert lo == [-1350.0, -300.0, 5.0]
+    assert hi == [-700.0, 300.0, 5.0]
+    # no corner beyond 80% of the ur20's 1750 mm reach (cell_layout's
+    # MAX_PLANAR_REACH_MM), arm base at the origin
+    max_planar_reach_mm = 1750.0 * 0.8
     for x in (lo[0], hi[0]):
         for y in (lo[1], hi[1]):
-            assert (x**2 + y**2) ** 0.5 <= verified_radius + 1e-9
+            assert (x**2 + y**2) ** 0.5 <= max_planar_reach_mm + 1e-9
 
 
 def test_scan_then_focus_uses_the_detector_not_sim_truth(monkeypatch):
@@ -607,7 +609,7 @@ def test_scan_then_focus_uses_the_detector_not_sim_truth(monkeypatch):
             return Pose(x=123.0, y=-45.0, z=30.0, o_x=0.0, o_y=0.0, o_z=1.0, theta=0.0)
 
     class FakeMover:
-        async def look_from(self, pose, world_state):
+        async def look_from(self, pose, world_state, linear=False):
             look_poses.append(pose)
 
         async def move_to(self, pose, world_state, linear=False):
@@ -640,7 +642,7 @@ def test_scan_then_focus_uses_the_detector_not_sim_truth(monkeypatch):
 
     # scan from the scatter-region centre, never from the sim's ground truth
     scan = look_poses[0]
-    assert (scan.x, scan.y, scan.z) == (575.0, 0.0, 350.0)
+    assert (scan.x, scan.y, scan.z) == (-1025.0, 0.0, 350.0)
     # then focus above where the DETECTOR said the block is
     focus = look_poses[1]
     assert (focus.x, focus.y, focus.z) == (123.0, -45.0, 350.0)
@@ -722,7 +724,7 @@ class _PlaceFakes:
                 return Pose(x=600.0, y=100.0, z=30.0, o_x=0.0, o_y=0.0, o_z=1.0, theta=0.0)
 
         class Mover:
-            async def look_from(self, pose, world_state):
+            async def look_from(self, pose, world_state, linear=False):
                 return None
 
             async def move_to(self, pose, world_state, linear=False):
@@ -758,18 +760,18 @@ def test_place_step_descends_over_the_pad_and_reports_placement(monkeypatch):
     fakes = _PlaceFakes(with_pad=True)
     asyncio.run(fakes.pipeline.run())
 
-    # pre-grasp, grasp, lift, raise, carry, place, retreat
-    assert len(fakes.moves) == 7
-    grasp_pose_used = fakes.moves[1][0]
-    raise_move, carry, place, retreat = (m[0] for m in fakes.moves[3:7])
+    # waypoint, pre-grasp, grasp, lift, raise, carry, place, retreat
+    assert len(fakes.moves) == 8
+    grasp_pose_used = fakes.moves[2][0]
+    raise_move, carry, place, retreat = (m[0] for m in fakes.moves[4:8])
     # the carry runs at constant height on a straight (linear) line
     assert (raise_move.x, raise_move.y) == (grasp_pose_used.x, grasp_pose_used.y)
     assert raise_move.z == carry.z
-    assert fakes.moves[3][1] is True and fakes.moves[4][1] is True
+    assert fakes.moves[4][1] is True and fakes.moves[5][1] is True
     assert (carry.x, carry.y) == (700.0, -350.0)
     # place z reproduces the grasp offset over the pad top (10) plus the gap (15)
     assert place.z == pytest.approx(grasp_pose_used.z + 10.0 + 15.0)
-    assert fakes.moves[5][1] is True  # the descent is linear
+    assert fakes.moves[6][1] is True  # the descent is linear
     assert retreat.z == carry.z
     # open at the start plus open over the pad - and no release at the lift pose
     assert fakes.opens == 2
@@ -784,8 +786,8 @@ def test_place_skipped_when_the_scene_has_no_pad(monkeypatch):
     fakes = _PlaceFakes(with_pad=False)
     asyncio.run(fakes.pipeline.run())
 
-    # pre-grasp, grasp, lift only - and the release open still happens
-    assert len(fakes.moves) == 3  # no carry moves without a pad
+    # waypoint, pre-grasp, grasp, lift only - and the release open still happens
+    assert len(fakes.moves) == 4  # no carry moves without a pad
     assert fakes.opens == 2
 
 
@@ -798,7 +800,7 @@ class _FailingMoverFakes(_PlaceFakes):
         outer = self
 
         class Mover:
-            async def look_from(self, pose, world_state):
+            async def look_from(self, pose, world_state, linear=False):
                 return None
 
             async def move_to(self, pose, world_state, linear=False):
@@ -883,7 +885,7 @@ class _DeriveFakes:
                 return Pose(x=500.0, y=0.0, z=30.0, o_x=0.0, o_y=0.0, o_z=1.0, theta=0.0)
 
         class Mover:
-            async def look_from(self, pose, world_state):
+            async def look_from(self, pose, world_state, linear=False):
                 return None
 
             async def move_to(self, pose, world_state, linear=False):
@@ -943,12 +945,13 @@ def test_held_block_rides_in_world_state_transforms_while_grasping(monkeypatch):
     fakes = _PlaceFakes(with_pad=True)
     asyncio.run(fakes.pipeline.run())
 
-    # pre-grasp, grasp, lift, raise, carry, place, retreat
+    # waypoint, pre-grasp, grasp, lift, raise, carry, place, retreat
     states = fakes.move_world_states
-    assert len(states) == 7
+    assert len(states) == 8
     assert list(states[0].transforms) == []
     assert list(states[1].transforms) == []
-    for held in states[2:6]:
+    assert list(states[2].transforms) == []
+    for held in states[3:7]:
         (transform,) = held.transforms
         assert transform.reference_frame == "pick_cube"
         assert transform.pose_in_observer_frame.reference_frame == "pick-grip"
@@ -956,7 +959,7 @@ def test_held_block_rides_in_world_state_transforms_while_grasping(monkeypatch):
         assert transform.pose_in_observer_frame.pose.z == pytest.approx(-9.0)
         # 60 mm block + 20 mm planning padding (ARM-10 execution error)
         assert transform.physical_object.box.dims_mm.x == 80.0
-    assert list(states[6].transforms) == []  # released before the retreat
+    assert list(states[7].transforms) == []  # released before the retreat
 
 
 class _ShadowFakes:
@@ -979,7 +982,7 @@ class _ShadowFakes:
                 return queue.pop(0)
 
         class Mover:
-            async def look_from(self, pose, world_state):
+            async def look_from(self, pose, world_state, linear=False):
                 outer.look_poses.append(pose)
 
             async def move_to(self, pose, world_state, linear=False):
@@ -1026,9 +1029,9 @@ def test_detection_rescans_when_the_gripper_shadows_the_block(monkeypatch):
     asyncio.run(fakes.pipeline.run())
 
     scan, rescan, focus = fakes.look_poses[:3]
-    assert (scan.x, scan.y, scan.theta) == (575.0, 0.0, 0.0)
+    assert (scan.x, scan.y, scan.theta) == (-1025.0, 0.0, 0.0)
     # same spot, wrist turned a quarter: the shadow sweeps off the block
-    assert (rescan.x, rescan.y, rescan.theta) == (575.0, 0.0, 90.0)
+    assert (rescan.x, rescan.y, rescan.theta) == (-1025.0, 0.0, 90.0)
     assert (focus.x, focus.y, focus.theta) == (123.0, -45.0, 90.0)
     assert len(fakes.look_poses) == 3
 
@@ -1043,18 +1046,18 @@ def test_detection_raises_when_every_scan_pose_is_shadowed(monkeypatch):
 
 
 def test_pick_area_keepout_boxes_the_region_with_margin():
-    keepout = pick_red_block.pick_area_keepout(([450.0, -250.0, 0.0], [700.0, 250.0, 0.0]))
+    keepout = pick_red_block.pick_area_keepout(([-1350.0, -300.0, 0.0], [-700.0, 300.0, 0.0]))
     assert keepout.label == "pick_area_keepout"
-    assert (keepout.center.x, keepout.center.y, keepout.center.z) == (575.0, 0.0, 65.0)
+    assert (keepout.center.x, keepout.center.y, keepout.center.z) == (-1025.0, 0.0, 65.0)
     dims = keepout.box.dims_mm
-    assert (dims.x, dims.y, dims.z) == (350.0, 600.0, 130.0)
+    assert (dims.x, dims.y, dims.z) == (750.0, 700.0, 130.0)
 
 
 def test_pick_area_keepout_stands_on_the_region_support():
     """P5 cell regression (GPU run 13): the scatter region's z is the table
     top, and the no-fly box must cover the block airspace ABOVE it, not the
     floor's."""
-    keepout = pick_red_block.pick_area_keepout(([450.0, -250.0, 750.0], [700.0, 250.0, 750.0]))
+    keepout = pick_red_block.pick_area_keepout(([-1350.0, -300.0, 750.0], [-700.0, 300.0, 750.0]))
     assert keepout.center.z == 750.0 + 65.0
     assert keepout.box.dims_mm.z == 130.0
 
@@ -1064,8 +1067,8 @@ def test_default_scan_pose_rides_the_support_height():
     P5 table top - the default scan height is above the support."""
     floor = pick_red_block.default_scan_pose(0.0)
     table = pick_red_block.default_scan_pose(750.0)
-    assert (floor.x, floor.y, floor.z) == (500.0, 150.0, 350.0)
-    assert (table.x, table.y, table.z) == (500.0, 150.0, 1100.0)
+    assert (floor.x, floor.y, floor.z) == (-1025.0, 0.0, 650.0)
+    assert (table.x, table.y, table.z) == (-1025.0, 0.0, 1400.0)
     assert table.o_z == pick_red_block.POINTING_DOWN_O_Z
 
 
@@ -1090,7 +1093,7 @@ def test_randomized_carry_plans_freely_over_the_keepout(monkeypatch):
             return Pose(x=520.0, y=20.0, z=30.0, o_x=0.0, o_y=0.0, o_z=1.0, theta=0.0)
 
     class Mover:
-        async def look_from(self, pose, world_state):
+        async def look_from(self, pose, world_state, linear=False):
             return None
 
         async def move_to(self, pose, world_state, linear=False):
@@ -1121,15 +1124,15 @@ def test_randomized_carry_plans_freely_over_the_keepout(monkeypatch):
     )
     asyncio.run(pipeline.run())
 
-    # pre-grasp, grasp, lift, raise-above-keepout, free carry, place, retreat
-    assert len(moves) == 7
-    clear_pose, clear_state, clear_linear = moves[3]
+    # waypoint, pre-grasp, grasp, lift, raise-above-keepout, free carry, place, retreat
+    assert len(moves) == 8
+    clear_pose, clear_state, clear_linear = moves[4]
     assert clear_pose.z == 200.0  # support 0 + CARRY_CLEAR_ABOVE_SUPPORT_MM
     assert clear_linear is True
     labels = {g.label for frame in clear_state.obstacles for g in frame.geometries}
     assert "pick_area_keepout" not in labels  # the hop starts inside the box
 
-    carry_pose, carry_state, carry_linear = moves[4]
+    carry_pose, carry_state, carry_linear = moves[5]
     assert (carry_pose.x, carry_pose.y) == (700.0, -350.0)
     assert carry_linear is False  # free, fast plan
     carry_labels = {g.label for frame in carry_state.obstacles for g in frame.geometries}
@@ -1242,7 +1245,7 @@ def test_randomize_props_payload_omits_size_range_by_default(monkeypatch):
             return Pose(x=100.0, y=200.0, z=30.0, o_x=0.0, o_y=0.0, o_z=1.0, theta=0.0)
 
     class FakeMover:
-        async def look_from(self, pose, world_state):
+        async def look_from(self, pose, world_state, linear=False):
             return None
 
         async def move_to(self, pose, world_state, linear=False):
@@ -1292,7 +1295,7 @@ def test_randomize_props_payload_carries_size_range_mm_when_set(monkeypatch):
             return Pose(x=100.0, y=200.0, z=30.0, o_x=0.0, o_y=0.0, o_z=1.0, theta=0.0)
 
     class FakeMover:
-        async def look_from(self, pose, world_state):
+        async def look_from(self, pose, world_state, linear=False):
             return None
 
         async def move_to(self, pose, world_state, linear=False):
@@ -1336,7 +1339,7 @@ def test_jaw_refusal_skips_the_grasp_and_leaves_the_arm_parked(capsys):
             return {"footprint_mm": [80.0, 80.0], "height_mm": 80.0, "size_mm": 80.0}
 
     class RefusingMover:
-        async def look_from(self, pose, world_state):
+        async def look_from(self, pose, world_state, linear=False):
             raise AssertionError("the arm must stay parked on a jaw refusal")
 
         async def move_to(self, pose, world_state, linear=False):
@@ -1379,7 +1382,7 @@ class _MeasurementFakes:
         class World:
             async def do_command(self, command):
                 if command["command"] == "randomize_props":
-                    return {"positions": {"pick_cube": [580.0, 5.0, 20.0]}}
+                    return {"positions": {"pick_cube": [-1020.0, 5.0, 20.0]}}
                 return {"geometries": []}
 
         class Detector:
@@ -1395,7 +1398,7 @@ class _MeasurementFakes:
                 return self._measurement
 
         class Mover:
-            async def look_from(self, pose, world_state):
+            async def look_from(self, pose, world_state, linear=False):
                 outer.look_poses.append(pose)
 
             async def move_to(self, pose, world_state, linear=False):
@@ -1427,12 +1430,15 @@ class _MeasurementFakes:
 
 
 def test_detection_retries_on_a_degenerate_size_measurement(monkeypatch, capsys):
+    """A degenerate measurement that stays degenerate through the one-shot
+    focus (checklist item 3) still falls back to the SCAN_ATTEMPTS ladder."""
     monkeypatch.setattr(pick_red_block, "RESET_SETTLE_S", 0.0)
-    degenerate_pose = Pose(x=580.0, y=5.0, z=999.0, o_x=0.0, o_y=0.0, o_z=1.0, theta=0.0)
-    accepted_pose = Pose(x=580.0, y=5.0, z=20.0, o_x=0.0, o_y=0.0, o_z=1.0, theta=0.0)
+    degenerate_pose = Pose(x=-1020.0, y=5.0, z=999.0, o_x=0.0, o_y=0.0, o_z=1.0, theta=0.0)
+    accepted_pose = Pose(x=-1025.0, y=0.0, z=20.0, o_x=0.0, o_y=0.0, o_z=1.0, theta=0.0)
     fakes = _MeasurementFakes(
         [
-            (degenerate_pose, None),  # footprint/height disagree by >25% - re-scan
+            (degenerate_pose, None),  # initial: footprint/height disagree - focus once
+            (degenerate_pose, None),  # focused re-check: still degenerate - re-scan
             (
                 accepted_pose,
                 {"footprint_mm": [40.0, 40.0], "height_mm": 40.0, "size_mm": 40.0},
@@ -1442,7 +1448,8 @@ def test_detection_retries_on_a_degenerate_size_measurement(monkeypatch, capsys)
 
     transform = asyncio.run(fakes.pipeline.run())
 
-    assert len(fakes.look_poses) == 2  # one re-scan before the accepted measurement
+    # scan, focus (still degenerate), next SCAN_ATTEMPTS variant (accepted)
+    assert len(fakes.look_poses) == 3
     assert transform.physical_object.box.dims_mm.x == 40.0
     out = capsys.readouterr().out
     assert "degenerate size measurement" in out
@@ -1451,6 +1458,381 @@ def test_detection_retries_on_a_degenerate_size_measurement(monkeypatch, capsys)
     )
     measured = json.loads(measured_line.removeprefix(MEASURED_BLOCK_MARKER))
     assert measured["size_mm"] == 40.0
+
+
+def test_detection_focuses_once_on_a_degenerate_initial_measurement(monkeypatch, capsys):
+    """checklist item 3 (GPU run 20): the wide initial scan degrades the size
+    measurement but the pose is already usable, so the pipeline focuses
+    directly above it instead of walking the SCAN_ATTEMPTS offset ladder."""
+    monkeypatch.setattr(pick_red_block, "RESET_SETTLE_S", 0.0)
+    degenerate_pose = Pose(x=-1210.0, y=187.0, z=999.0, o_x=0.0, o_y=0.0, o_z=1.0, theta=0.0)
+    accepted_pose = Pose(x=-1210.0, y=187.0, z=20.0, o_x=0.0, o_y=0.0, o_z=1.0, theta=0.0)
+    fakes = _MeasurementFakes(
+        [
+            (degenerate_pose, None),  # initial: good pose, degenerate size
+            (
+                accepted_pose,
+                {"footprint_mm": [40.0, 40.0], "height_mm": 40.0, "size_mm": 40.0},
+            ),
+        ]
+    )
+
+    transform = asyncio.run(fakes.pipeline.run())
+
+    assert len(fakes.look_poses) == 2  # scan, then one focus - no offset-variant walk
+    focus = fakes.look_poses[1]
+    assert (focus.x, focus.y, focus.z) == (-1210.0, 187.0, 350.0)  # support (0) + FOCUS_HEIGHT
+    assert transform.physical_object.box.dims_mm.x == 40.0
+    out = capsys.readouterr().out
+    assert "degenerate size measurement" not in out
+
+
+def _contains_keepout(world_state) -> bool:
+    return any(
+        geometry.label == "pick_area_keepout"
+        for frame_geometries in world_state.obstacles
+        for geometry in frame_geometries.geometries
+    )
+
+
+def test_pre_grasp_move_is_linear_and_skips_the_waypoint_after_a_focus(monkeypatch):
+    """checklist item 3: the block is excluded from the planner's obstacles,
+    so looks plan freely only when the pick-area keep-out boxes the blocks'
+    airspace off, and the descent below the waypoint is linear. When detection
+    already ended at the waypoint (the common, focused-detection path), no
+    extra move runs first."""
+    monkeypatch.setattr(pick_red_block, "RESET_SETTLE_S", 0.0)
+    look_calls: list[tuple[Pose, bool, object]] = []
+    moves: list[tuple[Pose, bool, object]] = []
+    readings = iter(
+        [
+            (Pose(x=-1210.0, y=187.0, z=999.0, o_x=0.0, o_y=0.0, o_z=1.0, theta=0.0), None),
+            (
+                Pose(x=-1210.0, y=187.0, z=30.0, o_x=0.0, o_y=0.0, o_z=1.0, theta=0.0),
+                {"footprint_mm": [60.0, 60.0], "height_mm": 60.0, "size_mm": 60.0},
+            ),
+        ]
+    )
+
+    class World:
+        async def do_command(self, command):
+            if command["command"] == "randomize_props":
+                return {"positions": {"pick_cube": [-1210.0, 187.0, 30.0]}}
+            return {"geometries": []}
+
+    class Detector:
+        def __init__(self):
+            self._measurement = None
+
+        async def block_pose_world(self):
+            pose, measurement = next(readings)
+            self._measurement = measurement
+            return pose
+
+        def last_measurement(self):
+            return self._measurement
+
+    class Mover:
+        async def look_from(self, pose, world_state, linear=False):
+            look_calls.append((pose, linear, world_state))
+
+        async def move_to(self, pose, world_state, linear=False):
+            moves.append((pose, linear, world_state))
+
+    class Gripper:
+        async def open(self):
+            return None
+
+        async def grab(self):
+            return True
+
+        async def is_holding_something(self):
+            return True
+
+    pipeline = pick_red_block.PickPipeline(
+        detector=Detector(),
+        mover=Mover(),
+        gripper=Gripper(),
+        block_name="pick_cube",
+        block_size_mm=None,
+        gripper_name="pick-grip",
+        world=World(),
+        target_prop_name="pick_cube",
+        movable_prop_names=("pick_cube",),
+        randomize_seed=1,
+        look_pose=pick_red_block.default_scan_pose(0.0),
+    )
+    asyncio.run(pipeline.run())
+
+    assert len(look_calls) == 2  # scan, then the one-shot focus
+    scan_pose, scan_linear, scan_ws = look_calls[0]
+    assert scan_linear is False
+    assert _contains_keepout(scan_ws)  # boxed out of the blocks' airspace
+    focus_pose, focus_linear, focus_ws = look_calls[1]
+    assert (focus_pose.x, focus_pose.y, focus_pose.z) == (-1210.0, 187.0, 350.0)
+    assert focus_linear is False  # free (fast) BECAUSE the keep-out is present
+    assert _contains_keepout(focus_ws)
+    pre_grasp_pose, pre_grasp_linear, pre_grasp_ws = moves[0]
+    assert pre_grasp_linear is True
+    assert not _contains_keepout(pre_grasp_ws)  # the descent must pierce the box
+    assert (pre_grasp_pose.x, pre_grasp_pose.y) == (-1210.0, 187.0)
+
+
+def test_pre_grasp_waypoint_move_runs_first_when_detection_ends_elsewhere(monkeypatch):
+    """A detection that never focused (the block sits close enough to the
+    scan centre) ends at the SCAN height, not the FOCUS height the waypoint
+    uses - the waypoint move (free, keep-out boxed) must run before the
+    linear pre-grasp."""
+    monkeypatch.setattr(pick_red_block, "RESET_SETTLE_S", 0.0)
+    moves: list[tuple[Pose, bool, object]] = []
+
+    class World:
+        async def do_command(self, command):
+            if command["command"] == "randomize_props":
+                return {"positions": {"pick_cube": [-1025.0, 5.0, 30.0]}}
+            return {"geometries": []}
+
+    class Detector:
+        async def block_pose_world(self):
+            return Pose(x=-1025.0, y=5.0, z=30.0, o_x=0.0, o_y=0.0, o_z=1.0, theta=0.0)
+
+    class Mover:
+        async def look_from(self, pose, world_state, linear=False):
+            return None
+
+        async def move_to(self, pose, world_state, linear=False):
+            moves.append((pose, linear, world_state))
+
+    class Gripper:
+        async def open(self):
+            return None
+
+        async def grab(self):
+            return True
+
+        async def is_holding_something(self):
+            return True
+
+    pipeline = pick_red_block.PickPipeline(
+        detector=Detector(),
+        mover=Mover(),
+        gripper=Gripper(),
+        block_name="pick_cube",
+        block_size_mm=60.0,
+        gripper_name="pick-grip",
+        world=World(),
+        target_prop_name="pick_cube",
+        movable_prop_names=("pick_cube",),
+        randomize_seed=1,
+        look_pose=pick_red_block.default_scan_pose(0.0),
+    )
+    asyncio.run(pipeline.run())
+
+    waypoint_pose, waypoint_linear, waypoint_ws = moves[0]
+    assert (waypoint_pose.x, waypoint_pose.y, waypoint_pose.z) == (-1025.0, 5.0, 350.0)
+    assert waypoint_linear is False  # free (fast) BECAUSE the keep-out is present
+    assert _contains_keepout(waypoint_ws)
+
+    pre_grasp_pose, pre_grasp_linear, pre_grasp_ws = moves[1]
+    assert pre_grasp_linear is True
+    assert not _contains_keepout(pre_grasp_ws)
+
+
+def test_focus_falls_back_to_linear_when_the_keep_out_plan_fails(monkeypatch, capsys):
+    """A keep-out-boxed free focus plan can fail (an aborted run can strand
+    the arm inside the box); the pipeline retries the focus linear instead of
+    aborting the pick."""
+    monkeypatch.setattr(pick_red_block, "RESET_SETTLE_S", 0.0)
+    look_calls: list[tuple[Pose, bool]] = []
+    readings = iter(
+        [
+            (Pose(x=-1210.0, y=187.0, z=999.0, o_x=0.0, o_y=0.0, o_z=1.0, theta=0.0), None),
+            (
+                Pose(x=-1210.0, y=187.0, z=30.0, o_x=0.0, o_y=0.0, o_z=1.0, theta=0.0),
+                {"footprint_mm": [60.0, 60.0], "height_mm": 60.0, "size_mm": 60.0},
+            ),
+        ]
+    )
+
+    class World:
+        async def do_command(self, command):
+            if command["command"] == "randomize_props":
+                return {"positions": {"pick_cube": [-1210.0, 187.0, 30.0]}}
+            return {"geometries": []}
+
+    class Detector:
+        def __init__(self):
+            self._measurement = None
+
+        async def block_pose_world(self):
+            pose, measurement = next(readings)
+            self._measurement = measurement
+            return pose
+
+        def last_measurement(self):
+            return self._measurement
+
+    class Mover:
+        async def look_from(self, pose, world_state, linear=False):
+            look_calls.append((pose, linear))
+            if not linear and pose.z == 350.0:
+                raise RuntimeError("motion move of 'wrist-cam' reported failure")
+
+        async def move_to(self, pose, world_state, linear=False):
+            return None
+
+    class Gripper:
+        async def open(self):
+            return None
+
+        async def grab(self):
+            return True
+
+        async def is_holding_something(self):
+            return True
+
+    pipeline = pick_red_block.PickPipeline(
+        detector=Detector(),
+        mover=Mover(),
+        gripper=Gripper(),
+        block_name="pick_cube",
+        block_size_mm=None,
+        gripper_name="pick-grip",
+        world=World(),
+        target_prop_name="pick_cube",
+        movable_prop_names=("pick_cube",),
+        randomize_seed=1,
+        look_pose=pick_red_block.default_scan_pose(0.0),
+    )
+    asyncio.run(pipeline.run())
+
+    # scan (free, boxed), free focus (raises), linear focus retry, same pose
+    assert [(pose.z, linear) for pose, linear in look_calls] == [
+        (650.0, False),
+        (350.0, False),
+        (350.0, True),
+    ]
+    assert (look_calls[2][0].x, look_calls[2][0].y) == (-1210.0, 187.0)
+    assert "keep-out focus move failed" in capsys.readouterr().out
+
+
+def test_focus_is_linear_when_no_pick_region_boxes_the_airspace(monkeypatch):
+    """Without a randomize region there is no keep-out to box the blocks'
+    airspace, so the focus move must be linear (slow but incapable of
+    swinging through the excluded target block)."""
+    monkeypatch.setattr(pick_red_block, "RESET_SETTLE_S", 0.0)
+    look_calls: list[tuple[Pose, bool]] = []
+    readings = iter(
+        [
+            (Pose(x=-1210.0, y=187.0, z=999.0, o_x=0.0, o_y=0.0, o_z=1.0, theta=0.0), None),
+            (
+                Pose(x=-1210.0, y=187.0, z=30.0, o_x=0.0, o_y=0.0, o_z=1.0, theta=0.0),
+                {"footprint_mm": [60.0, 60.0], "height_mm": 60.0, "size_mm": 60.0},
+            ),
+        ]
+    )
+
+    class World:
+        async def do_command(self, command):
+            return {"geometries": []}
+
+    class Detector:
+        def __init__(self):
+            self._measurement = None
+
+        async def block_pose_world(self):
+            pose, measurement = next(readings)
+            self._measurement = measurement
+            return pose
+
+        def last_measurement(self):
+            return self._measurement
+
+    class Mover:
+        async def look_from(self, pose, world_state, linear=False):
+            look_calls.append((pose, linear))
+
+        async def move_to(self, pose, world_state, linear=False):
+            return None
+
+    class Gripper:
+        async def open(self):
+            return None
+
+        async def grab(self):
+            return True
+
+        async def is_holding_something(self):
+            return True
+
+    pipeline = pick_red_block.PickPipeline(
+        detector=Detector(),
+        mover=Mover(),
+        gripper=Gripper(),
+        block_name="pick_cube",
+        block_size_mm=None,
+        gripper_name="pick-grip",
+        world=World(),
+        target_prop_name="pick_cube",
+        look_pose=pick_red_block.default_scan_pose(0.0),
+        scan_centre_mm=(-1025.0, 0.0),
+    )
+    asyncio.run(pipeline.run())
+
+    assert [(pose.z, linear) for pose, linear in look_calls] == [
+        (650.0, False),
+        (350.0, True),
+    ]
+
+
+def test_hold_failure_prints_diagnostics_before_raising(monkeypatch, capsys):
+    monkeypatch.setattr(pick_red_block, "HOLD_SAMPLE_S", 0.01)
+
+    class Detector:
+        async def block_pose_world(self):
+            return Pose(x=100.0, y=200.0, z=30.0, o_x=0.0, o_y=0.0, o_z=1.0, theta=0.0)
+
+    class Mover:
+        async def look_from(self, pose, world_state, linear=False):
+            return None
+
+        async def move_to(self, pose, world_state, linear=False):
+            return None
+
+    class Gripper:
+        async def open(self):
+            return None
+
+        async def grab(self):
+            return True
+
+        async def is_holding_something(self):
+            return SimpleNamespace(is_holding_something=False, meta={"jaw_deg": 47.0})
+
+    async def diagnose():
+        return {"jaw_deg": 47.0, "block_pose_mm": {"x": 100.0, "y": 200.0, "z": 30.0}}
+
+    pipeline = pick_red_block.PickPipeline(
+        detector=Detector(),
+        mover=Mover(),
+        gripper=Gripper(),
+        block_name="pick_cube",
+        block_size_mm=60.0,
+        gripper_name="pick-grip",
+        verify_detection_height=False,
+        hold_s=1.0,
+        diagnose=diagnose,
+    )
+
+    with pytest.raises(RuntimeError, match="hold failed"):
+        asyncio.run(pipeline.run())
+
+    out = capsys.readouterr().out
+    diagnostics_line = next(
+        line for line in out.splitlines() if line.startswith(GRAB_DIAGNOSTICS_MARKER)
+    )
+    report = json.loads(diagnostics_line.removeprefix(GRAB_DIAGNOSTICS_MARKER))
+    assert report["jaw_deg"] == 47.0
 
 
 def test_main_mock_measures_a_non_60mm_block_and_completes_the_pick(capsys):
@@ -1681,7 +2063,7 @@ class _FakeMover:
     def __init__(self):
         self.looked = []
 
-    async def look_from(self, pose, world_state):
+    async def look_from(self, pose, world_state, linear=False):
         self.looked.append(pose)
 
     async def move_to(self, pose, world_state, linear=False):
@@ -1867,7 +2249,7 @@ def test_no_size_range_keeps_legacy_keepout_height_and_prints_no_tallest_marker(
             return Pose(x=520.0, y=20.0, z=30.0, o_x=0.0, o_y=0.0, o_z=1.0, theta=0.0)
 
     class Mover:
-        async def look_from(self, pose, world_state):
+        async def look_from(self, pose, world_state, linear=False):
             return None
 
         async def move_to(self, pose, world_state, linear=False):
@@ -1901,7 +2283,7 @@ def test_no_size_range_keeps_legacy_keepout_height_and_prints_no_tallest_marker(
     out = capsys.readouterr().out
     assert not any(line.startswith(MEASURED_TALLEST_MARKER) for line in out.splitlines())
 
-    _, carry_state, _ = moves[4]
+    _, carry_state, _ = moves[5]  # waypoint, pre-grasp, grasp, lift, raise, carry
     keepout = next(
         g
         for frame in carry_state.obstacles
@@ -1909,3 +2291,130 @@ def test_no_size_range_keeps_legacy_keepout_height_and_prints_no_tallest_marker(
         if g.label == "pick_area_keepout"
     )
     assert keepout.box.dims_mm.z == pick_red_block.KEEPOUT_HEIGHT_MM
+
+
+def test_client_defaults_match_the_cell_layout_seam():
+    """The client keeps literal geometry constants (it never imports
+    isaac_module outside --mock), so this cross-checks them against the
+    fragment's own source of truth instead of trusting a copy-paste."""
+    from isaac_module import cell_layout
+
+    assert pick_red_block.DEFAULT_LOOK_XY_MM == cell_layout.SCATTER_CENTRE_MM[:2]
+    assert pick_red_block.REACHABLE_REGION_X_MM == cell_layout.SCATTER_ZONE_X_MM
+    assert pick_red_block.REACHABLE_REGION_Y_MM == cell_layout.SCATTER_ZONE_Y_MM
+
+    args = pick_red_block._parse_args([])
+    assert args.support_z_mm == cell_layout.TABLE_TOP_Z_MM
+    assert args.block == cell_layout.pool_block_name("red", 1)
+    assert args.place_pad == cell_layout.pad_name("red")
+
+    assert pick_red_block.TABLE_CENTER_MM == cell_layout.TABLE_CENTRES_MM["table_source"] + (
+        cell_layout.TABLE_TOP_Z_MM / 2.0,
+    )
+    assert pick_red_block.TABLE_DIMS_MM == cell_layout.TABLE_DIMS_MM
+
+
+def test_parse_randomize_region_accepts_corners():
+    assert pick_red_block._parse_randomize_region_mm("-1350,-300,-700,300") == (
+        -1350.0,
+        -300.0,
+        -700.0,
+        300.0,
+    )
+
+
+def test_parse_randomize_region_rejects_wrong_count():
+    with pytest.raises(argparse.ArgumentTypeError):
+        pick_red_block._parse_randomize_region_mm("-1350,-300,-700")
+
+
+def test_parse_randomize_region_rejects_inverted_corners():
+    with pytest.raises(argparse.ArgumentTypeError):
+        pick_red_block._parse_randomize_region_mm("-700,300,-1350,-300")
+
+
+def test_randomize_names_default_keeps_every_movable_behaviour():
+    args = pick_red_block._parse_args([])
+    assert pick_red_block._movable_prop_names_from_args(args) == ()
+
+
+def test_randomize_names_parses_comma_separated_props():
+    args = pick_red_block._parse_args(["--randomize-names", "block_red_1,block_red_2"])
+    assert pick_red_block._movable_prop_names_from_args(args) == ("block_red_1", "block_red_2")
+
+
+def test_randomize_region_default_keeps_the_reachable_region_fallback():
+    args = pick_red_block._parse_args([])
+    assert pick_red_block._randomize_region_mm_from_args(args) is None
+
+
+def test_randomize_region_wires_the_flag_at_the_support_height():
+    args = pick_red_block._parse_args(
+        ["--support-z-mm", "750", "--randomize-region=-1350,-300,-700,300"]
+    )
+    assert pick_red_block._randomize_region_mm_from_args(args) == (
+        [-1350.0, -300.0, 750.0],
+        [-700.0, 300.0, 750.0],
+    )
+
+
+def test_randomize_names_and_region_land_on_the_pipeline_fields(monkeypatch):
+    monkeypatch.setattr(pick_red_block, "RESET_SETTLE_S", 0.0)
+    captured: dict = {}
+
+    class FakeWorld:
+        async def do_command(self, command):
+            if command["command"] == "randomize_props":
+                captured["names"] = command["names"]
+                captured["region"] = command["region"]
+                return {"positions": {"block_red_1": [-1020.0, 5.0, 780.0]}}
+            return {"geometries": []}
+
+    class FakeDetector:
+        async def block_pose_world(self):
+            return Pose(x=-1020.0, y=5.0, z=780.0, o_x=0.0, o_y=0.0, o_z=1.0, theta=0.0)
+
+    class FakeMover:
+        async def look_from(self, pose, world_state, linear=False):
+            return None
+
+        async def move_to(self, pose, world_state, linear=False):
+            return None
+
+    class FakeGripper:
+        async def open(self):
+            return None
+
+        async def grab(self):
+            return True
+
+        async def is_holding_something(self):
+            return True
+
+    args = pick_red_block._parse_args(
+        [
+            "--support-z-mm",
+            "750",
+            "--randomize-names",
+            "block_red_1",
+            "--randomize-region=-1350,-300,-700,300",
+        ]
+    )
+    pipeline = pick_red_block.PickPipeline(
+        detector=FakeDetector(),
+        mover=FakeMover(),
+        gripper=FakeGripper(),
+        block_name=args.block,
+        block_size_mm=60.0,
+        gripper_name="pick-grip",
+        world=FakeWorld(),
+        target_prop_name="block_red_1",
+        movable_prop_names=pick_red_block._movable_prop_names_from_args(args),
+        randomize_seed=9,
+        randomize_region_mm=pick_red_block._randomize_region_mm_from_args(args),
+        support_z_mm=args.support_z_mm,
+    )
+    asyncio.run(pipeline.run())
+
+    assert captured["names"] == ["block_red_1"]
+    assert captured["region"] == [[-1350.0, -300.0, 750.0], [-700.0, 300.0, 750.0]]

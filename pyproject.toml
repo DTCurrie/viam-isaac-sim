@@ -18,6 +18,11 @@ src = ["src", "tests"]
 [tool.ruff.lint]
 select = ["E", "F", "I", "W", "UP", "B"]
 
+[tool.ruff.lint.per-file-ignores]
+# the script re-exports pickcell symbols under its own name so the frozen
+# tests/test_pick_red_block.py regression suite keeps importing them
+"examples/pick_red_block.py" = ["F401"]
+
 [tool.mypy]
 python_version = "3.10"
 files = ["src"]

@@ -164,6 +164,7 @@ class FakeArticulation:
         self._controller = FakeArticulationController([1.0] * dof_count, [1.0] * dof_count)
         self.solver_iteration_calls: list[int] = []
         self.applied_actions: list[FakeArticulationAction] = []
+        self.state_write_log: list[tuple[str, list[float]]] = []
 
     def get_articulation_controller(self):
         return self._controller
@@ -179,8 +180,21 @@ class FakeArticulation:
         indices = range(len(self.velocities)) if joint_indices is None else joint_indices
         return [self.velocities[i] for i in indices]
 
+    def set_joint_positions(self, positions, joint_indices=None) -> None:
+        indices = range(len(self.positions)) if joint_indices is None else joint_indices
+        for i, p in zip(indices, positions, strict=True):
+            self.positions[i] = float(p)
+        self.state_write_log.append(("positions", [float(p) for p in positions]))
+
+    def set_joint_velocities(self, velocities, joint_indices=None) -> None:
+        indices = range(len(self.velocities)) if joint_indices is None else joint_indices
+        for i, v in zip(indices, velocities, strict=True):
+            self.velocities[i] = float(v)
+        self.state_write_log.append(("velocities", [float(v) for v in velocities]))
+
     def apply_action(self, action: FakeArticulationAction) -> None:
         self.applied_actions.append(action)
+        self.state_write_log.append(("action", [float(p) for p in action.joint_positions]))
         indices = (
             range(len(self.positions)) if action.joint_indices is None else action.joint_indices
         )
@@ -332,6 +346,29 @@ def test_isaac_arm_post_reset_reapplies_solver_gains_and_targets():
     assert art.applied_actions
     last = art.applied_actions[-1]
     assert list(last.joint_positions) == [0.4, 0.5]
+
+
+def test_isaac_arm_post_reset_teleports_joints_to_targets_before_the_hold_action():
+    """A world.reset() leaves the arm at its default pose; re-commanding the
+    last targets from there is an unplanned full-speed sweep through the
+    scene (the scatter_cell rescale-reset "freak out"). post_reset must
+    restore the joint STATE to the targets, zero the velocities, and only
+    then apply the hold action."""
+    handle, art, sim = _make_handle()
+    handle._targets = [0.4, 0.5]
+    # the reset's damage: default pose, residual velocity
+    art.positions = [0.0, 0.0]
+    art.velocities = [0.7, -0.7]
+
+    handle.post_reset()
+
+    assert art.state_write_log == [
+        ("positions", [0.4, 0.5]),
+        ("velocities", [0.0, 0.0]),
+        ("action", [0.4, 0.5]),
+    ]
+    assert art.positions == [0.4, 0.5]
+    assert art.velocities == [0.0, 0.0]
 
 
 def test_isaac_arm_release_removes_settle_callback_and_registry_entry():

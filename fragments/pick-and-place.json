@@ -16,10 +16,10 @@
         "parent": "world",
         "geometry": {
           "type": "box",
-          "x": 1200,
+          "x": 3600,
           "y": 800,
           "z": 740,
-          "translation": { "x": 600, "y": 0, "z": 370 }
+          "translation": { "x": 0, "y": 0, "z": 370 }
         }
       },
       "attributes": {
@@ -29,7 +29,7 @@
         "rendering_dt": 0.016666666666666666,
         "props": [
           {
-            "name": "table",
+            "name": "table_source",
             "type": "cube",
             "fixed": true,
             "size": 1.0,
@@ -40,20 +40,122 @@
                 "$variable": { "name": "table-height-m", "default_value": 0.75 }
               }
             ],
-            "position": [0.6, 0.0, 0.375],
+            "position": [-1.2, 0.0, 0.375],
             "color": [0.32, 0.3, 0.28],
             "friction": 0.7,
             "restitution": 0,
             "contact_offset": 0.005
           },
           {
-            "name": "pick_cube",
+            "name": "table_arm",
             "type": "cube",
-            "position": [0.6, 0.1, 0.7805],
+            "fixed": true,
+            "size": 1.0,
+            "scale": [
+              1.2,
+              0.8,
+              {
+                "$variable": { "name": "table-height-m", "default_value": 0.75 }
+              }
+            ],
+            "position": [0.0, 0.0, 0.375],
+            "color": [0.32, 0.3, 0.28],
+            "friction": 0.7,
+            "restitution": 0,
+            "contact_offset": 0.005
+          },
+          {
+            "name": "table_place",
+            "type": "cube",
+            "fixed": true,
+            "size": 1.0,
+            "scale": [
+              1.2,
+              0.8,
+              {
+                "$variable": { "name": "table-height-m", "default_value": 0.75 }
+              }
+            ],
+            "position": [1.2, 0.0, 0.375],
+            "color": [0.32, 0.3, 0.28],
+            "friction": 0.7,
+            "restitution": 0,
+            "contact_offset": 0.005
+          },
+          {
+            "name": "place_pad_red",
+            "type": "cube",
+            "fixed": true,
+            "size": 1.0,
+            "scale": [0.3, 0.3, 0.01],
+            "position": [0.72, -0.18, 0.755],
+            "color": [0.9, 0.1, 0.1],
+            "friction": 0.7,
+            "restitution": 0
+          },
+          {
+            "name": "place_pad_green",
+            "type": "cube",
+            "fixed": true,
+            "size": 1.0,
+            "scale": [0.3, 0.3, 0.01],
+            "position": [1.05, -0.18, 0.755],
+            "color": [0.05, 0.65, 0.1],
+            "friction": 0.7,
+            "restitution": 0
+          },
+          {
+            "name": "place_pad_blue",
+            "type": "cube",
+            "fixed": true,
+            "size": 1.0,
+            "scale": [0.3, 0.3, 0.01],
+            "position": [1.38, -0.18, 0.755],
+            "color": [0.05, 0.1, 0.9],
+            "friction": 0.7,
+            "restitution": 0
+          },
+          {
+            "name": "place_pad_yellow",
+            "type": "cube",
+            "fixed": true,
+            "size": 1.0,
+            "scale": [0.3, 0.3, 0.01],
+            "position": [0.72, 0.18, 0.755],
+            "color": [0.9, 0.75, 0.05],
+            "friction": 0.7,
+            "restitution": 0
+          },
+          {
+            "name": "place_pad_purple",
+            "type": "cube",
+            "fixed": true,
+            "size": 1.0,
+            "scale": [0.3, 0.3, 0.01],
+            "position": [1.05, 0.18, 0.755],
+            "color": [0.55, 0.1, 0.75],
+            "friction": 0.7,
+            "restitution": 0
+          },
+          {
+            "name": "place_pad_orange",
+            "type": "cube",
+            "fixed": true,
+            "size": 1.0,
+            "scale": [0.3, 0.3, 0.01],
+            "position": [1.38, 0.18, 0.755],
+            "color": [1.0, 0.4, 0.05],
+            "friction": 0.7,
+            "restitution": 0
+          },
+          {
+            "name": "block_red_1",
+            "type": "cube",
+            "position": [-1.25, -1.0, 0.0305],
             "size": 0.06,
             "color": {
               "$variable": {
-                "name": "pick-block-color",
+                "name": "block-color-red",
                 "default_value": [0.9, 0.1, 0.1]
               }
             },
@@ -63,13 +165,45 @@
             "contact_offset": 0.005
           },
           {
-            "name": "ignore_cube_green",
+            "name": "block_red_2",
             "type": "cube",
-            "position": [0.78, -0.22, 0.7805],
+            "position": [-1.25, -1.2, 0.0305],
             "size": 0.06,
             "color": {
               "$variable": {
-                "name": "distractor-color-green",
+                "name": "block-color-red",
+                "default_value": [0.9, 0.1, 0.1]
+              }
+            },
+            "mass": 0.05,
+            "friction": 0.7,
+            "restitution": 0,
+            "contact_offset": 0.005
+          },
+          {
+            "name": "block_red_3",
+            "type": "cube",
+            "position": [-1.25, -1.4, 0.0305],
+            "size": 0.06,
+            "color": {
+              "$variable": {
+                "name": "block-color-red",
+                "default_value": [0.9, 0.1, 0.1]
+              }
+            },
+            "mass": 0.05,
+            "friction": 0.7,
+            "restitution": 0,
+            "contact_offset": 0.005
+          },
+          {
+            "name": "block_green_1",
+            "type": "cube",
+            "position": [-0.75, -1.0, 0.0305],
+            "size": 0.06,
+            "color": {
+              "$variable": {
+                "name": "block-color-green",
                 "default_value": [0.05, 0.65, 0.1]
               }
             },
@@ -79,13 +213,45 @@
             "contact_offset": 0.005
           },
           {
-            "name": "ignore_cube_blue",
+            "name": "block_green_2",
             "type": "cube",
-            "position": [0.45, -0.05, 0.7805],
+            "position": [-0.75, -1.2, 0.0305],
             "size": 0.06,
             "color": {
               "$variable": {
-                "name": "distractor-color-blue",
+                "name": "block-color-green",
+                "default_value": [0.05, 0.65, 0.1]
+              }
+            },
+            "mass": 0.05,
+            "friction": 0.7,
+            "restitution": 0,
+            "contact_offset": 0.005
+          },
+          {
+            "name": "block_green_3",
+            "type": "cube",
+            "position": [-0.75, -1.4, 0.0305],
+            "size": 0.06,
+            "color": {
+              "$variable": {
+                "name": "block-color-green",
+                "default_value": [0.05, 0.65, 0.1]
+              }
+            },
+            "mass": 0.05,
+            "friction": 0.7,
+            "restitution": 0,
+            "contact_offset": 0.005
+          },
+          {
+            "name": "block_blue_1",
+            "type": "cube",
+            "position": [-0.25, -1.0, 0.0305],
+            "size": 0.06,
+            "color": {
+              "$variable": {
+                "name": "block-color-blue",
                 "default_value": [0.05, 0.1, 0.9]
               }
             },
@@ -95,13 +261,45 @@
             "contact_offset": 0.005
           },
           {
-            "name": "ignore_cube_yellow",
+            "name": "block_blue_2",
             "type": "cube",
-            "position": [0.62, -0.35, 0.7805],
+            "position": [-0.25, -1.2, 0.0305],
             "size": 0.06,
             "color": {
               "$variable": {
-                "name": "distractor-color-yellow",
+                "name": "block-color-blue",
+                "default_value": [0.05, 0.1, 0.9]
+              }
+            },
+            "mass": 0.05,
+            "friction": 0.7,
+            "restitution": 0,
+            "contact_offset": 0.005
+          },
+          {
+            "name": "block_blue_3",
+            "type": "cube",
+            "position": [-0.25, -1.4, 0.0305],
+            "size": 0.06,
+            "color": {
+              "$variable": {
+                "name": "block-color-blue",
+                "default_value": [0.05, 0.1, 0.9]
+              }
+            },
+            "mass": 0.05,
+            "friction": 0.7,
+            "restitution": 0,
+            "contact_offset": 0.005
+          },
+          {
+            "name": "block_yellow_1",
+            "type": "cube",
+            "position": [0.25, -1.0, 0.0305],
+            "size": 0.06,
+            "color": {
+              "$variable": {
+                "name": "block-color-yellow",
                 "default_value": [0.9, 0.75, 0.05]
               }
             },
@@ -111,13 +309,45 @@
             "contact_offset": 0.005
           },
           {
-            "name": "ignore_cube_purple",
+            "name": "block_yellow_2",
             "type": "cube",
-            "position": [0.45, 0.33, 0.7805],
+            "position": [0.25, -1.2, 0.0305],
             "size": 0.06,
             "color": {
               "$variable": {
-                "name": "distractor-color-purple",
+                "name": "block-color-yellow",
+                "default_value": [0.9, 0.75, 0.05]
+              }
+            },
+            "mass": 0.05,
+            "friction": 0.7,
+            "restitution": 0,
+            "contact_offset": 0.005
+          },
+          {
+            "name": "block_yellow_3",
+            "type": "cube",
+            "position": [0.25, -1.4, 0.0305],
+            "size": 0.06,
+            "color": {
+              "$variable": {
+                "name": "block-color-yellow",
+                "default_value": [0.9, 0.75, 0.05]
+              }
+            },
+            "mass": 0.05,
+            "friction": 0.7,
+            "restitution": 0,
+            "contact_offset": 0.005
+          },
+          {
+            "name": "block_purple_1",
+            "type": "cube",
+            "position": [0.75, -1.0, 0.0305],
+            "size": 0.06,
+            "color": {
+              "$variable": {
+                "name": "block-color-purple",
                 "default_value": [0.55, 0.1, 0.75]
               }
             },
@@ -127,14 +357,14 @@
             "contact_offset": 0.005
           },
           {
-            "name": "ignore_cube_orange",
+            "name": "block_purple_2",
             "type": "cube",
-            "position": [0.25, 0.08, 0.7805],
+            "position": [0.75, -1.2, 0.0305],
             "size": 0.06,
             "color": {
               "$variable": {
-                "name": "distractor-color-orange",
-                "default_value": [1.0, 0.55, 0.05]
+                "name": "block-color-purple",
+                "default_value": [0.55, 0.1, 0.75]
               }
             },
             "mass": 0.05,
@@ -143,24 +373,89 @@
             "contact_offset": 0.005
           },
           {
-            "name": "place_pad",
+            "name": "block_purple_3",
             "type": "cube",
-            "fixed": true,
-            "position": [0.3, 0.25, 0.755],
-            "size": 0.2,
-            "scale": [1, 1, 0.05],
-            "color": [0.85, 0.75, 0.1],
+            "position": [0.75, -1.4, 0.0305],
+            "size": 0.06,
+            "color": {
+              "$variable": {
+                "name": "block-color-purple",
+                "default_value": [0.55, 0.1, 0.75]
+              }
+            },
+            "mass": 0.05,
             "friction": 0.7,
-            "restitution": 0
+            "restitution": 0,
+            "contact_offset": 0.005
+          },
+          {
+            "name": "block_orange_1",
+            "type": "cube",
+            "position": [1.25, -1.0, 0.0305],
+            "size": 0.06,
+            "color": {
+              "$variable": {
+                "name": "block-color-orange",
+                "default_value": [1.0, 0.4, 0.05]
+              }
+            },
+            "mass": 0.05,
+            "friction": 0.7,
+            "restitution": 0,
+            "contact_offset": 0.005
+          },
+          {
+            "name": "block_orange_2",
+            "type": "cube",
+            "position": [1.25, -1.2, 0.0305],
+            "size": 0.06,
+            "color": {
+              "$variable": {
+                "name": "block-color-orange",
+                "default_value": [1.0, 0.4, 0.05]
+              }
+            },
+            "mass": 0.05,
+            "friction": 0.7,
+            "restitution": 0,
+            "contact_offset": 0.005
+          },
+          {
+            "name": "block_orange_3",
+            "type": "cube",
+            "position": [1.25, -1.4, 0.0305],
+            "size": 0.06,
+            "color": {
+              "$variable": {
+                "name": "block-color-orange",
+                "default_value": [1.0, 0.4, 0.05]
+              }
+            },
+            "mass": 0.05,
+            "friction": 0.7,
+            "restitution": 0,
+            "contact_offset": 0.005
           },
           {
             "name": "side_cam_body",
             "type": "cube",
             "fixed": true,
             "size": 1.0,
-            "scale": [0.09, 0.025, 0.025],
-            "position": [0.575, 0.665, 0.9],
+            "scale": [0.025, 0.09, 0.025],
+            "position": [-1.7635, 0, 0.9],
             "color": [0.2, 0.2, 0.2],
+            "friction": 0.7,
+            "restitution": 0,
+            "contact_offset": 0.005
+          },
+          {
+            "name": "side_cam_mount",
+            "type": "cube",
+            "fixed": true,
+            "size": 1.0,
+            "scale": [0.04, 0.04, 0.1375],
+            "position": [-1.7635, 0, 0.81875],
+            "color": [0.32, 0.3, 0.28],
             "friction": 0.7,
             "restitution": 0,
             "contact_offset": 0.005
@@ -181,11 +476,11 @@
       "model": "viam:isaac-sim-devin:arm",
       "frame": {
         "parent": "world",
-        "translation": { "x": 150, "y": -250, "z": 750 }
+        "translation": { "x": 0, "y": 0, "z": 750 }
       },
       "attributes": {
         "world": "sim-world",
-        "asset": "ur5e"
+        "asset": "ur20"
       }
     },
     {
@@ -207,11 +502,11 @@
       "model": "viam:isaac-sim-devin:camera",
       "frame": {
         "parent": "world",
-        "translation": { "x": 2200, "y": 2200, "z": 2000 }
+        "translation": { "x": 3200, "y": 3200, "z": 2600 }
       },
       "attributes": {
         "world": "sim-world",
-        "target": [0.6, 0, 0.2],
+        "target": [0, 0, 0.3],
         "width": 1280,
         "height": 720
       }
@@ -222,15 +517,15 @@
       "model": "viam:isaac-sim-devin:camera",
       "frame": {
         "parent": "world",
-        "translation": { "x": 575, "y": 650, "z": 900 },
+        "translation": { "x": -1750, "y": 0, "z": 900 },
         "orientation": {
           "type": "ov_degrees",
-          "value": { "x": 0, "y": -650, "z": -150, "th": 0 }
+          "value": { "x": 725, "y": 0, "z": -150, "th": 0 }
         },
         "geometry": {
           "type": "box",
-          "x": 90,
-          "y": 25,
+          "x": 25,
+          "y": 90,
           "z": 25
         }
       },
@@ -268,6 +563,15 @@
         "height": 480,
         "fov_deg": 90.5
       }
+    },
+    {
+      "name": "block-sorter-sensor",
+      "api": "rdk:component:sensor",
+      "model": "viam:isaac-sim-devin:sorter-sensor",
+      "attributes": {
+        "conductor": "block-sorter"
+      },
+      "depends_on": ["block-sorter"]
     }
   ],
   "services": [
@@ -288,7 +592,7 @@
       }
     },
     {
-      "name": "block-segmenter",
+      "name": "red-segmenter",
       "api": "rdk:service:vision",
       "model": "viam:vision:detections-to-segments",
       "attributes": {
@@ -298,6 +602,204 @@
         "sigma": 1.25,
         "confidence_threshold_pct": 0.5,
         "infer_minimum_depth": true
+      }
+    },
+    {
+      "name": "green-detector",
+      "api": "rdk:service:vision",
+      "model": "color_detector",
+      "attributes": {
+        "detect_color": {
+          "$variable": {
+            "name": "detect-color-green",
+            "default_value": "#6AE28B"
+          }
+        },
+        "camera_name": "wrist-cam",
+        "hue_tolerance_pct": {
+          "$variable": {
+            "name": "hue-tolerance-pct-green",
+            "default_value": 0.05
+          }
+        },
+        "segment_size_px": 100,
+        "value_cutoff_pct": 0.15
+      }
+    },
+    {
+      "name": "green-segmenter",
+      "api": "rdk:service:vision",
+      "model": "viam:vision:detections-to-segments",
+      "attributes": {
+        "detector_name": "green-detector",
+        "camera_name": "wrist-cam",
+        "mean_k": 5,
+        "sigma": 1.25,
+        "confidence_threshold_pct": 0.5,
+        "infer_minimum_depth": true
+      }
+    },
+    {
+      "name": "blue-detector",
+      "api": "rdk:service:vision",
+      "model": "color_detector",
+      "attributes": {
+        "detect_color": {
+          "$variable": {
+            "name": "detect-color-blue",
+            "default_value": "#869EEE"
+          }
+        },
+        "camera_name": "wrist-cam",
+        "hue_tolerance_pct": {
+          "$variable": {
+            "name": "hue-tolerance-pct-blue",
+            "default_value": 0.05
+          }
+        },
+        "saturation_cutoff_pct": 0.4,
+        "segment_size_px": 100,
+        "value_cutoff_pct": 0.15
+      }
+    },
+    {
+      "name": "blue-segmenter",
+      "api": "rdk:service:vision",
+      "model": "viam:vision:detections-to-segments",
+      "attributes": {
+        "detector_name": "blue-detector",
+        "camera_name": "wrist-cam",
+        "mean_k": 5,
+        "sigma": 1.25,
+        "confidence_threshold_pct": 0.5,
+        "infer_minimum_depth": true
+      }
+    },
+    {
+      "name": "yellow-detector",
+      "api": "rdk:service:vision",
+      "model": "color_detector",
+      "attributes": {
+        "detect_color": {
+          "$variable": {
+            "name": "detect-color-yellow",
+            "default_value": "#EEDE64"
+          }
+        },
+        "camera_name": "wrist-cam",
+        "hue_tolerance_pct": {
+          "$variable": {
+            "name": "hue-tolerance-pct-yellow",
+            "default_value": 0.05
+          }
+        },
+        "segment_size_px": 100,
+        "value_cutoff_pct": 0.15
+      }
+    },
+    {
+      "name": "yellow-segmenter",
+      "api": "rdk:service:vision",
+      "model": "viam:vision:detections-to-segments",
+      "attributes": {
+        "detector_name": "yellow-detector",
+        "camera_name": "wrist-cam",
+        "mean_k": 5,
+        "sigma": 1.25,
+        "confidence_threshold_pct": 0.5,
+        "infer_minimum_depth": true
+      }
+    },
+    {
+      "name": "purple-detector",
+      "api": "rdk:service:vision",
+      "model": "color_detector",
+      "attributes": {
+        "detect_color": {
+          "$variable": {
+            "name": "detect-color-purple",
+            "default_value": "#E399EB"
+          }
+        },
+        "camera_name": "wrist-cam",
+        "hue_tolerance_pct": {
+          "$variable": {
+            "name": "hue-tolerance-pct-purple",
+            "default_value": 0.05
+          }
+        },
+        "segment_size_px": 100,
+        "value_cutoff_pct": 0.15
+      }
+    },
+    {
+      "name": "purple-segmenter",
+      "api": "rdk:service:vision",
+      "model": "viam:vision:detections-to-segments",
+      "attributes": {
+        "detector_name": "purple-detector",
+        "camera_name": "wrist-cam",
+        "mean_k": 5,
+        "sigma": 1.25,
+        "confidence_threshold_pct": 0.5,
+        "infer_minimum_depth": true
+      }
+    },
+    {
+      "name": "orange-detector",
+      "api": "rdk:service:vision",
+      "model": "color_detector",
+      "attributes": {
+        "detect_color": {
+          "$variable": {
+            "name": "detect-color-orange",
+            "default_value": "#F0D76B"
+          }
+        },
+        "camera_name": "wrist-cam",
+        "hue_tolerance_pct": {
+          "$variable": {
+            "name": "hue-tolerance-pct-orange",
+            "default_value": 0.05
+          }
+        },
+        "segment_size_px": 100,
+        "value_cutoff_pct": 0.15
+      }
+    },
+    {
+      "name": "orange-segmenter",
+      "api": "rdk:service:vision",
+      "model": "viam:vision:detections-to-segments",
+      "attributes": {
+        "detector_name": "orange-detector",
+        "camera_name": "wrist-cam",
+        "mean_k": 5,
+        "sigma": 1.25,
+        "confidence_threshold_pct": 0.5,
+        "infer_minimum_depth": true
+      }
+    },
+    {
+      "name": "block-sorter",
+      "api": "rdk:service:generic",
+      "model": "viam:isaac-sim-devin:conductor",
+      "attributes": {
+        "world": "sim-world",
+        "arm": "pick-arm",
+        "gripper": "pick-grip",
+        "camera": "wrist-cam",
+        "side_camera": "side-cam",
+        "motion": "builtin",
+        "detectors": {
+          "red": "red-segmenter",
+          "green": "green-segmenter",
+          "blue": "blue-segmenter",
+          "yellow": "yellow-segmenter",
+          "purple": "purple-segmenter",
+          "orange": "orange-segmenter"
+        },
+        "size_range_mm": [50, 80]
       }
     }
   ]

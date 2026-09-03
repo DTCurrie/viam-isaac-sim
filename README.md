@@ -25,6 +25,8 @@ What it is/does
 | `viam:isaac-sim-devin:camera` | `camera` | Creates (or attaches to) a camera prim and serves RGB, depth (`image/vnd.viam.dep`) and point clouds (`pointcloud/pcd`). |
 | `viam:isaac-sim-devin:base` | `base` | Spawns a differential-drive robot (e.g. jetbot) and drives it. |
 | `viam:isaac-sim-devin:gripper` | `gripper` | Bolts a parallel-jaw gripper (e.g. Robotiq 2F-85) onto an arm's link and drives it open/closed. |
+| `viam:isaac-sim-devin:conductor` | `generic` | Sorts a scattered pool of colored blocks onto per-color pads end to end via DoCommand (`start`/`stop`/`status`), single-shot, N loops, or continuous. |
+| `viam:isaac-sim-devin:sorter-sensor` | `sensor` | Proxies a conductor's `status` for data management, emitting each new loop record at most once. |
 
 Known assets (usable via the `asset` attribute): `ur3e`, `ur5e`, `ur10`,
 `ur10e`, `ur16e`, `ur20`, `franka`, `jetbot`. Anything else can be loaded with
@@ -183,6 +185,15 @@ The world also supports `DoCommand`:
 * `{"command": "ignore_props", "names": [...]}` -> `{"ignored": [...]}` - an
   empty list clears the exclusion. Excludes the named props from
   `GetGeometries` (e.g. the block currently being grasped)
+* `{"command": "scatter_cell", "seed": int, "size_range_mm"?: [lo, hi]
+  (applies to every drawn block; 0 < lo <= hi; omit to keep current
+  sizes), "counts"?: {color: int} (overrides the default 1-3 per-color
+  draw for that color)}` -> `{"seed", "counts": {color: n}, "positions":
+  {name: [x,y,z] mm}, "sizes_mm": {name: [x,y,z] mm}, "parked": [names]}`
+  - draws a fresh sorting problem from the 18-block pool (see "Pooled
+  scatter" below)
+* `{"command": "clear_cell"}` -> `{"parked": [names]}` - re-parks all 18
+  pool blocks
 
 ### Units and conventions
 
@@ -322,6 +333,19 @@ value in `[0, 1]`: `0` = open, `1` = closed. `GetKinematics` returns a
 1-link/0-joint SVA whose link is the 36 × 146 × 153 mm gripper box (flange to fingertips, centre 57.5 mm behind the
 TCP. `GetGeometries` returns that same single box.
 
+**Asset loading (startup time):** Isaac 5.0's 2F-85 layer references its 11
+part meshes from `omniverse://isaac-dev...`, a host that does not resolve
+outside NVIDIA, and each such reference stalls the stage about 12 s while it
+composes - 131 s per module start, past viam-server's 2-minute resource
+timeout, so the gripper only came up on the retry. The module now opens the
+gripper's layer on its own first (that resolves none of its sub-references),
+rewrites those references onto the public assets root, and references the
+rewritten copy, saved under `$VIAM_MODULE_DATA/viam-isaac-sim-assets/`
+(the system temp dir when viam-server sets no data dir). Later starts reuse
+the copy, so the gripper attaches in about a second. The module log line
+`gripper '<name>' asset layer prepared|cached|...` says which path was taken.
+Delete the directory to redo the preparation.
+
 ### Lifecycle (close / reconfigure)
 
 Closing a component (`close()`) releases its handle and post-reset hooks.
@@ -362,7 +386,7 @@ one.
 | `clip_near` | `0.05` | metres, near clip plane |
 | `clip_far` | `10.0` | metres, far clip plane |
 | `image_format` | `"png"` | colour encoding for `GetImages` (`"png"` or `"jpeg"`) |
-| `block_size_mm` | _unset_ | mock backend only: metric edge of the fabricated red block; unset keeps the fixed pixel-offset block |
+| `block_size_mm` | _unset_ | mock backend only: metric edge of the fabricated red block, unset keeps the fixed pixel-offset block |
 | `view` | `"top"` | mock backend only: `"side"` fabricates a profile scene of the `blocks` list rising from the support line at the principal row |
 | `blocks` | _unset_ | mock backend only, side view: list of `{rgb, size_mm, height_mm, column_offset_px, depth_m}` fabricated blocks |
 | `frequency` | _unset_ | capture rate, unset = every rendered frame |
@@ -413,65 +437,83 @@ A wrist camera riding an arm link:
 ## Pick-and-place fragment
 
 The `isaac-sim-pick-and-place` fragment (source in
-`fragments/pick-and-place.json`) is a ready-made work cell: a UR5e
-(`pick-arm`) mounted at the corner of a 0.75 m table, a `pick-grip`
-gripper, a red 6 cm cube (`pick_cube`) plus five distractor cubes
-(`ignore_cube_green`, `ignore_cube_blue`, `ignore_cube_yellow`,
-`ignore_cube_purple`, `ignore_cube_orange`), a `place_pad` to set the block
-down on, a `wrist-cam` riding the arm's flange, a `scene-cam` watching the
-whole workspace, a fixed `side-cam` looking across the table for tallest-block
-measurement, the `builtin` motion service, and the `red-detector` /
-`block-segmenter` vision services that find the block. Add the fragment to
-any machine that meets the requirements above and the world spawns
-everything at boot.
+`fragments/pick-and-place.json`) is a ready-made three-table sorting cell
+(`cell_layout.TABLE_CENTRES_MM`): a UR20 arm (`pick-arm`) on `table_arm`
+at the world origin, `table_source` carrying the scatter zone that pool
+blocks are drawn into, and `table_place` carrying six 300 mm color-coded
+place pads (`place_pad_<color>` for each of `cell_layout.BLOCK_COLORS` -
+`red`, `green`, `blue`, `yellow`, `purple`, `orange` - each with up to
+`cell_layout.POOL_BLOCKS_PER_COLOR` (3) spread slots, no stacking). An
+18-block pool (`block_<color>_1`, `_2`, `_3`, three per color) parks off-cell
+on the floor at boot (`cell_layout.park_positions_mm`) until a `scatter_cell`
+draws some of it onto `table_source`. `pick-grip` is the gripper, and
+`wrist-cam` rides the arm's flange, `scene-cam` watches the whole three-table workspace,
+and a fixed `side-cam` (mounted on the `side_cam_body`/`side_cam_mount`
+props at the source table's far end) looks back toward the arm, aimed at
+the scatter-zone centre.
+The `builtin` motion service and six `<color>-detector`/`<color>-segmenter`
+vision-service pairs (one per block color) do the finding. `block-sorter`
+(the `viam:isaac-sim-devin:conductor` service) drives the whole sort via
+DoCommand, and `block-sorter-sensor` proxies its telemetry for data
+management. Add the fragment to any machine that meets the requirements
+above and the world spawns everything at boot.
 
 Props are configured on the world with the `props` attribute (cubes or USD
 references, fixed or dynamic) - see the fragment for the shape of it.
 
-The fragment ships nine `$variable`s, each with a `default_value` equal to
-the numbers below, so a machine that sets nothing boots the exact cell:
+The fragment ships nineteen `$variable`s, each with a `default_value` equal
+to the numbers below, so a machine that sets nothing boots the exact cell:
 
 | variable | binds | default |
 |---|---|---|
-| `table-height-m` | table prop `scale[2]` | `0.75` |
-| `pick-block-color` | `pick_cube.color` | `[0.9, 0.1, 0.1]` |
-| `distractor-color-green` | `ignore_cube_green.color` | `[0.05, 0.65, 0.1]` |
-| `distractor-color-blue` | `ignore_cube_blue.color` | `[0.05, 0.1, 0.9]` |
-| `distractor-color-yellow` | `ignore_cube_yellow.color` | `[0.9, 0.75, 0.05]` |
-| `distractor-color-purple` | `ignore_cube_purple.color` | `[0.55, 0.1, 0.75]` |
-| `distractor-color-orange` | `ignore_cube_orange.color` | `[1.0, 0.55, 0.05]` |
+| `table-height-m` | all three tables' `scale[2]` | `0.75` |
+| `block-color-red` | `block_red_*.color` | `[0.9, 0.1, 0.1]` |
+| `block-color-green` | `block_green_*.color` | `[0.05, 0.65, 0.1]` |
+| `block-color-blue` | `block_blue_*.color` | `[0.05, 0.1, 0.9]` |
+| `block-color-yellow` | `block_yellow_*.color` | `[0.9, 0.75, 0.05]` |
+| `block-color-purple` | `block_purple_*.color` | `[0.55, 0.1, 0.75]` |
+| `block-color-orange` | `block_orange_*.color` | `[1.0, 0.4, 0.05]` |
 | `detect-color` | `red-detector`'s `detect_color` | `"#EA8D8D"` |
 | `hue-tolerance-pct` | `red-detector`'s `hue_tolerance_pct` | `0.05` |
+| `detect-color-green` | `green-detector`'s `detect_color` | `"#6AE28B"` |
+| `detect-color-blue` | `blue-detector`'s `detect_color` | `"#869EEE"` |
+| `detect-color-yellow` | `yellow-detector`'s `detect_color` | `"#EEDE64"` |
+| `detect-color-purple` | `purple-detector`'s `detect_color` | `"#E399EB"` |
+| `detect-color-orange` | `orange-detector`'s `detect_color` | `"#F0D76B"` |
+| `hue-tolerance-pct-green` | `green-detector`'s `hue_tolerance_pct` | `0.05` |
+| `hue-tolerance-pct-blue` | `blue-detector`'s `hue_tolerance_pct` | `0.05` |
+| `hue-tolerance-pct-yellow` | `yellow-detector`'s `hue_tolerance_pct` | `0.05` |
+| `hue-tolerance-pct-purple` | `purple-detector`'s `hue_tolerance_pct` | `0.05` |
+| `hue-tolerance-pct-orange` | `orange-detector`'s `hue_tolerance_pct` | `0.05` |
 
-`table-height-m` only substitutes the table prop's `scale[2]`: it has no
+`table-height-m` only substitutes each table's `scale[2]`: it has no
 arithmetic, so overriding it desyncs every other number derived from the
-table height - the table's own `position[2]` (`h / 2`), `sim-world`'s
-`frame.geometry` z (`h - 0.01` m, box centred at `(h - 0.01) / 2`), the
-six blocks' and `place_pad`'s z, and `pick-arm`'s frame z (`h` in mm).
-Override the table height only via `fragment_mods` `$set` overrides on
-those other fields too, kept in sync by hand.
+table height across all three tables - each table's own `position[2]`
+(`h / 2`), the six place pads' and eighteen pool blocks' z (all resting on
+or above a table top), `pick-arm`'s frame z (`h` in mm), and `sim-world`'s
+own `frame.geometry` box if one is configured. Override the table height
+only via `fragment_mods` `$set` overrides on those other fields too, kept
+in sync by hand.
 
-The `isaac-sim-pick-and-place` fragment in the registry is the original
-upstream public one. This fork's fragment ships with P5, until then use
-`viam module reload-local` (local module) with the JSON in
-`fragments/pick-and-place.json`.
-
-`examples/pick_red_block.py` drives this cell end to end: it detects the
-red block with `red-detector`/`block-segmenter` on `wrist-cam`, picks it,
-and places it on `place_pad`. Run it against the fragment with:
+`examples/pick_red_block.py` drives one block of this cell end to end: it
+detects the red block with `red-detector`/`red-segmenter` on `wrist-cam`,
+picks it, and places it on `place_pad_red`. Run it against the fragment
+with:
 
 ```sh
 PYTHONPATH=src python examples/pick_red_block.py \
-  --address <machine-address> --api-key <key> --api-key-id <key-id> \
-  --support-z-mm 750
+  --address <machine-address> --api-key <key> --api-key-id <key-id>
 ```
 
-`--support-z-mm 750` tells the script the block rests on the 0.75 m table,
-not the floor. The table is already a planner obstacle - the world serves
-every prop geometry live - so `--table` (the recipe box for scenes that
-serve none) is unnecessary and is dropped automatically when a live
-`table` box is present. Add `--randomize-seed <n>` to scatter the six
-blocks deterministically first (see "Randomizing props" below).
+The script's `--support-z-mm` (default `750`, the three-table cell's table
+top) already tells it the block rests on a table, not the floor. The table
+is already a planner obstacle - the world serves every prop geometry live -
+so `--table` (the recipe box for scenes that serve none) is unnecessary and
+is dropped automatically when a live `table` box is present. Add
+`--randomize-seed <n>` to scatter blocks deterministically first (see
+"Randomizing props" below) - or drive the whole 18-block pool at once with
+the conductor's `scatter_cell`/`start` DoCommand (see "Sorting with the
+conductor" below) instead of this single-block script.
 
 `--block-size-mm` is optional: omit it (the default) and the script measures
 the target's size itself, from the focused detection's point cloud -
@@ -485,7 +527,7 @@ attempting a doomed pick. Pass `--block-size-mm <mm>` to skip measurement
 and use a fixed size end to end, as before.
 
 Combine `--randomize-seed <n>` with `--randomize-size-mm <lo>,<hi>` to also
-redraw each scattered block's size (see "Randomizing props" below); the
+redraw each scattered block's size (see "Randomizing props" below). The
 script warns, without failing, if the measured size falls outside that range.
 
 ### Measuring the tallest block (dynamic carry heights)
@@ -501,17 +543,17 @@ support plane, a size-range-plausible result, enough points near the
 measured top (no lone stray point), and all four footprint quadrants
 covered - and only a measurement that passes all four is used. When the side
 scan fails trust (or `--tallest-camera` disables it), the wrist camera sweeps
-region-corner vantages as a fallback; if that also fails, the
+region-corner vantages as a fallback. If that also fails, the
 `--randomize-size-mm` range's upper bound is used as a conservative ceiling,
 with a logged warning. GPU runs validated the side scan within 0.8 mm of the
 drawn (ground-truth) size and the wrist sweep within 0.1 mm.
 
 When `--randomize-size-mm` is on, the measured tallest height replaces the
 legacy fixed 130 mm keep-out ceiling and 200 mm carry-hop height (both
-60 mm-block constants) with heights derived from the measurement; without
+60 mm-block constants) with heights derived from the measurement. Without
 `--randomize-size-mm`, the script keeps using those fixed constants.
 `--tallest-camera` (default `side-cam`) names the camera component to use as
-the primary sensor; pass an empty string to disable it and go straight to
+the primary sensor. Pass an empty string to disable it and go straight to
 the wrist sweep.
 
 The script prints `MEASURED_TALLEST_JSON={"tallest_mm": 81.06, "source":
@@ -593,26 +635,27 @@ positions inside a region, deterministically: the same `seed` always
 produces the same layout. Positions are kept at least `min_separation` mm
 apart, or the two props' edge-to-edge gap if that is larger for props with
 known sizes (default `min_separation` 150 mm). A worked example scattering
-three of the fragment's six blocks across the table top (1200 x 800 mm, centred at
-(600, 0, 370) mm, so the top face is at z = 740 mm):
+three of the pool's 18 blocks inside the source table's scatter zone
+(`cell_layout.SCATTER_ZONE_X_MM` (-1350, -700), `SCATTER_ZONE_Y_MM`
+(-300, 300) mm, table top at z = 750 mm):
 
 ```json
 {
   "command": "randomize_props",
-  "names": ["pick_cube", "ignore_cube_green", "ignore_cube_blue"],
-  "region": [[0, -400, 740], [1200, 400, 740]],
+  "names": ["block_red_1", "block_green_1", "block_blue_1"],
+  "region": [[-1350, -300, 750], [-700, 300, 750]],
   "seed": 42
 }
 ```
 
--> `{"positions": {"pick_cube": [x, y, 770.5], "ignore_cube_green": [x, y, 770.5],
-"ignore_cube_blue": [x, y, 770.5]}, "sizes_mm": {"pick_cube": [x, y, z], ...}}`
+-> `{"positions": {"block_red_1": [x, y, 780.5], "block_green_1": [x, y, 780.5],
+"block_blue_1": [x, y, 780.5]}, "sizes_mm": {"block_red_1": [x, y, z], ...}}`
 (centre z = face z + half the 60 mm block + a 0.5 mm rest gap) with the same
 `x`/`y` values every time `seed: 42` is passed for this region
 and these names. `sizes_mm` is always present: each named prop's current
 box dims, in millimetres.
 
-Adding `"size_range_mm": [30, 90]` (or `{"pick_cube": [30, 90]}` to target
+Adding `"size_range_mm": [30, 90]` (or `{"block_red_1": [30, 90]}` to target
 specific props) redraws a fresh size for each ranged cube prop before
 placing it - one uniform draw per prop, in millimetres, applied to all
 three axes - from the same seeded stream as the positions, so `seed: 42`
@@ -626,26 +669,174 @@ state, so every prop snaps to its spawn pose and the post-reset hooks fire,
 and then the named props teleport to their sampled positions. A call
 without `size_range_mm` never resets.
 
+### Pooled scatter
+
+`{"command": "scatter_cell", "seed": ...}` draws a fresh sorting problem
+from a fixed pool of 18 blocks (`cell_layout.BLOCK_COLORS` x 3 per color)
+without spawning or deleting anything: a per-color count is drawn first
+(1-3 per color by default, from the same seeded stream as the sizes and
+positions), then that many blocks per color place inside the scatter
+region with the existing separation rules, and every undrawn block parks
+out of the way. The same `seed` always draws the same counts, sizes, and
+positions.
+
+```json
+{"command": "scatter_cell", "seed": 42, "size_range_mm": [50, 70]}
+```
+
+-> `{"seed": 42, "counts": {"red": 2, "green": 1, ...}, "positions":
+{"block_red_1": [x, y, z], ...}, "sizes_mm": {"block_red_1": [x, y, z],
+...}, "parked": ["block_red_3", ...]}`. Pass `"counts": {"red": 0}` to
+force a color out of the draw entirely (it parks in full), or any other
+count in `[0, 3]` to override that color's draw without consuming a
+random number for it. As with `randomize_props`, the response is
+log-only evidence for a caller (e.g. a test harness) that wants to know
+what got drawn - it is never control input for the arm or the motion
+service (DEC-4).
+
+`{"command": "clear_cell"}` re-parks all 18 pool blocks and returns
+`{"parked": [names]}`, the same log-only shape.
+
 ### Arm mount recipe
 
 Mount an arm on the table by frame-placing it at the table's top height,
-inset from the edge:
+centred on the table (the fragment centres `pick-arm` on `table_arm` this
+way):
 
 ```json
 {
   "name": "pick-arm",
   "api": "rdk:component:arm",
   "model": "viam:isaac-sim-devin:arm",
-  "frame": { "parent": "world", "translation": { "x": 150, "y": -250, "z": 750 } },
-  "attributes": { "world": "sim-world", "asset": "ur5e" }
+  "frame": { "parent": "world", "translation": { "x": 0, "y": 0, "z": 750 } },
+  "attributes": { "world": "sim-world", "asset": "ur20" }
 }
 ```
 
 The Isaac articulation root is a fixed joint to the world - no mount joint
-needs authoring. Keep the base at least 70 mm inside the table's edge so its
-collider clears the table. UR assets carry a built-in base-frame correction
-so this frame placement and Viam's kinematics agree with the simulated pose
+needs authoring. A centre mount sits 600 mm from the table's long edges and
+400 mm from its short edges (`cell_layout.TABLE_DIMS_MM`), clear of the
+collider on every side. UR assets carry a built-in base-frame correction so
+this frame placement and Viam's kinematics agree with the simulated pose
 (see "arm attributes" above).
+
+### conductor attributes
+
+| attribute | default | notes |
+|---|---|---|
+| `world` | required | name of the `viam:isaac-sim-devin:world` component |
+| `arm` | required | name of the arm component (boot ordering only - every motion goes through `motion`) |
+| `gripper` | required | name of the gripper component |
+| `camera` | required | name of the wrist camera |
+| `side_camera` | required | name of the fixed side camera |
+| `motion` | required | name of the motion service (`"builtin"` works) |
+| `detectors` | required | `{color: segmenter vision-service name}` for exactly `cell_layout.BLOCK_COLORS` (`red`, `green`, `blue`, `yellow`, `purple`, `orange`) |
+| `size_range_mm` | `[50, 80]` | `[lo, hi]`, and `hi` must be `<=` `cell_layout.MAX_BLOCK_SIZE_MM` (`80`) |
+
+### sorter-sensor attributes
+
+| attribute | default | notes |
+|---|---|---|
+| `conductor` | required | name of the `viam:isaac-sim-devin:conductor` generic service to poll |
+
+### Sorting with the conductor (DoCommand)
+
+The conductor sorts one scatter end to end, with no python script in the
+loop: an optional scatter, one source-zone census to build the work list,
+then nearest-first pick-verify-carry-place of every block onto its color's
+pad.
+
+| command | request | response |
+|---|---|---|
+| start | `{"command": "start", "seed"?: int, "counts"?: {color: int}, "loops"?: int, "continuous"?: bool}` | `{"ok": true, "state": "running"}`, or `{"ok": false, "state": "running"}` unchanged if a run is already in progress |
+| stop | `{"command": "stop"}` | `{"ok": true}` |
+| status | `{"command": "status"}` | `{"state": "idle\|running\|stopping\|complete\|failed", "remaining": [names], "current": name\|null, "outcomes": {name: {"outcome": "placed\|skipped_oversize\|failed", "prim"?: str, "reason"?: str, "attempts"?: int}}, "seed": int\|null, "pass": int, "run": {"loops_requested": int\|0-for-continuous\|null, "continuous": bool, "loop": int, "loops_completed": int, "loops_errored": int, "base_seed": int\|null, "placed": int, "failed": int, "skipped_oversize": int}, "success_rate": float\|null, "loop_records": [LoopRecord.to_dict(), ...]}` |
+
+Neither `"loops"` nor `"continuous"` set is phase-4 single-shot. With
+`"seed"`, it scatters via the world's `scatter_cell` first, and without, it
+sorts the standing scatter, and it is recorded in telemetry as one loop.
+`"loops": N` (`N >= 1`) runs N loops, and `"loops": 0` or `"continuous": true`
+runs until `stop`. Loop mode always resets each loop, including the first,
+with `clear_cell` then `scatter_cell` at a per-loop seed derived from
+`"seed"` (or a time-derived base seed when `"seed"` is absent), and the seed
+advances by one (`run_log.loop_seed`) for each successive loop. A second
+`start` while a run is already in progress is a no-op that leaves the
+running run untouched.
+
+`stop` cancels between motions and between passes (never mid-motion) and
+at loop boundaries. It lands the run in state `idle` with `remaining`
+preserved as it stood at cancellation.
+
+Sorting is multi-pass: one pass is a census, then resolving detections to
+scattered prims, then a clearance-ordered attempt loop (isolated blocks
+first). A pass ends the sort when everything attempted that pass placed or
+was skipped (no failures), when the pass placed nothing at all, or after
+`MAX_PASSES` (5) passes - a hard cap against runaway re-censusing. A failed
+grasp is retried once (`MAX_ATTEMPTS_PER_BLOCK` = 2 attempts total) before
+the block is terminally `failed` for that loop. Oversize blocks (measured
+size over the gripper's 75 mm jaw limit) are recorded as `skipped_oversize`
+and never retried, since oversize never shrinks between passes.
+
+In loop/continuous mode, a loop killed by a transient failure (e.g. a
+dropped gRPC stream to viam-server) is recorded with an `"error"` field and
+skipped - the run continues with the next loop's seed - and only
+`MAX_CONSECUTIVE_LOOP_ERRORS` (3) such loops in a row fail the run.
+Single-shot keeps phase-4 semantics: any exception fails the run.
+
+DEC-4: vision alone decides what to pick and where. `prop_geometries` and
+the `scatter_cell` response are the sim's own ground truth, and the
+conductor consults them only for bookkeeping - building planner obstacles
+and, after the scan, resolving each detection to its real prim. Everything
+the conductor reports in `status` is log-only evidence, never control input
+for the run.
+
+### Telemetry
+
+`status`'s `run` block carries the whole run's rollup: `loops_requested`
+(the requested count, `0` for continuous, `null` for phase-4 single-shot),
+`continuous`, `loop` (the loop currently running or just finished),
+`loops_completed`, `loops_errored`, `base_seed`, and the running totals
+`placed`/`failed`/`skipped_oversize`. `success_rate`
+(`run_log.success_rate`) is `placed / (placed + failed)` (`skipped_oversize`
+excluded from both terms), or `null` before any terminal placed/failed
+outcome exists.
+
+`loop_records` holds the last `LOOP_RECORD_WINDOW` (50) completed loops,
+oldest first (`run_log.RollingLog`), bounding memory in continuous mode.
+Each `LoopRecord` carries:
+
+* `record_id` - monotonic for the module's lifetime, never reused
+* `loop` - 1-based loop number within its run
+* `seed` - the loop's derived seed, or `null`
+* `duration_s` - wall time for the whole loop
+* `passes` - census passes run
+* `placed` / `skipped_oversize` / `failed` - counts derived from `picks`
+* `picks` - the loop's `PickRecord`s
+* `rss_mb` - resident set size of the module process in MiB, sampled when
+  the loop's record is cut, and `null` when the platform offers no reading
+* `error` - present only when the loop died on a transient exception
+  instead of completing (its `picks` are then empty, and it counted toward
+  `loops_errored`, not `loops_completed`)
+
+Each `PickRecord` (one block's terminal outcome within one loop) carries
+`name` (the resolved prim name), `color`, `outcome`
+(`placed`/`skipped_oversize`/`failed`), `attempts` (1..`MAX_ATTEMPTS_PER_BLOCK`),
+`duration_s` (wall time across all attempts of that block), and `reason`
+(present only when set).
+
+The sorter sensor's `get_readings` proxies the conductor's `status`
+verbatim, but what it returns depends on the caller. On a data-management
+capture poll (`extra` carries `fromDataManagement`), it emits only the
+`LoopRecord`s newer than the greatest `record_id` it has already emitted,
+and advances that high-water mark to cover everything just returned. If
+nothing is new, it raises `NoCaptureToStoreError` so the data manager stores
+nothing (an empty readings map is rejected outright). Any other caller (an
+app panel, a script) gets the same shape as a live snapshot - `loops` holds
+whatever the capture cursor has not consumed yet - but the call never
+advances the mark, so an open status panel cannot eat records out from
+under data capture. The mark lives for the module's lifetime and is never
+reset by `reconfigure`. A module restart may re-emit the whole window,
+which downstream dedupes again on `record_id`.
 
 ## Viewing the simulator
 
@@ -750,3 +941,9 @@ and 3.11.
       IK and planning for simulated arms (all motion stays in Viam, not Isaac)
 - [x] depth / point clouds from cameras
 - [x] gripper support
+- [x] three-table sorting cell with a pooled 18-block scatter/park pipeline
+      (`scatter_cell`/`clear_cell`)
+- [x] conductor service: end-to-end pick-verify-carry-place, single-shot,
+      N loops, or continuous, with multi-pass census and retry-once
+- [x] conductor/sorter-sensor telemetry (`loop_records`, `success_rate`,
+      per-loop `rss_mb`) for data management
