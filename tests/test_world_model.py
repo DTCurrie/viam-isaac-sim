@@ -11,7 +11,7 @@ from viam.proto.app.robot import ComponentConfig
 from viam.utils import dict_to_struct
 
 from isaac_module.models.world import IsaacWorld
-from isaac_module.sim_manager import DEFAULT_MIN_SEPARATION_M, SimManager
+from isaac_module.sim_manager import DEFAULT_MIN_SEPARATION_M, RandomizeResult, SimManager
 
 MIN_SEPARATION_MM = DEFAULT_MIN_SEPARATION_M * 1000.0
 
@@ -53,9 +53,19 @@ class _RecordingWorldHandle:
     def set_prop_pose(self, name, position_m, orientation_wxyz=None) -> None:
         self.calls.append(("set_prop_pose", name, position_m, orientation_wxyz))
 
-    def randomize_props(self, names, region, seed, min_separation_m=DEFAULT_MIN_SEPARATION_M):
-        self.calls.append(("randomize_props", names, region, seed, min_separation_m))
-        return {name: (0.0, 0.0, 0.0) for name in names}
+    def randomize_props(
+        self,
+        names,
+        region,
+        seed,
+        min_separation_m=DEFAULT_MIN_SEPARATION_M,
+        size_range_m=None,
+    ):
+        self.calls.append(("randomize_props", names, region, seed, min_separation_m, size_range_m))
+        return RandomizeResult(
+            positions_m={name: (0.0, 0.0, 0.0) for name in names},
+            dims_m={name: (0.05, 0.05, 0.05) for name in names},
+        )
 
 
 def test_every_verb_routes_through_handle(world, monkeypatch):
@@ -227,6 +237,84 @@ def test_randomize_props_deterministic_and_within_region(world):
         bx, by, _ = positions[name_b]
         distance = ((ax - bx) ** 2 + (ay - by) ** 2) ** 0.5
         assert distance >= MIN_SEPARATION_MM - 1e-6
+
+    sizes = first["sizes_mm"]
+    for name in names:
+        assert sizes[name] == pytest.approx([50.0, 50.0, 50.0])  # unranged: default cube size
+
+
+def test_randomize_props_size_range_mm_list_form_reaches_the_handle_in_metres(world):
+    names = ["sz_a", "sz_b"]
+    region = [[0.0, 0.0, 0.0], [1000.0, 1000.0, 0.0]]
+
+    async def scenario():
+        for name in names:
+            await world.do_command({"command": "spawn_prop", "prop": {"name": name}})
+        return await world.do_command(
+            {
+                "command": "randomize_props",
+                "names": names,
+                "region": region,
+                "seed": 1,
+                "size_range_mm": [30.0, 90.0],
+            }
+        )
+
+    result = asyncio.run(scenario())
+    for name in names:
+        x, y, z = result["sizes_mm"][name]
+        assert 30.0 <= x <= 90.0
+        assert x == y == z
+
+
+def test_randomize_props_size_range_mm_map_form_reaches_the_handle_in_metres(world):
+    names = ["sz_c", "sz_d"]
+    region = [[0.0, 0.0, 0.0], [1000.0, 1000.0, 0.0]]
+
+    async def scenario():
+        for name in names:
+            await world.do_command({"command": "spawn_prop", "prop": {"name": name}})
+        return await world.do_command(
+            {
+                "command": "randomize_props",
+                "names": names,
+                "region": region,
+                "seed": 1,
+                "size_range_mm": {"sz_c": [30.0, 90.0]},
+            }
+        )
+
+    result = asyncio.run(scenario())
+    x, y, z = result["sizes_mm"]["sz_c"]
+    assert 30.0 <= x <= 90.0
+    assert x == y == z
+    assert result["sizes_mm"]["sz_d"] == pytest.approx([50.0, 50.0, 50.0])
+
+
+def test_randomize_props_size_range_mm_validation_errors(world):
+    async def randomize(size_range_mm):
+        return await world.do_command(
+            {
+                "command": "randomize_props",
+                "names": ["sz_bad"],
+                "region": [[0.0, 0.0, 0.0], [1000.0, 1000.0, 0.0]],
+                "seed": 1,
+                "size_range_mm": size_range_mm,
+            }
+        )
+
+    asyncio.run(world.do_command({"command": "spawn_prop", "prop": {"name": "sz_bad"}}))
+
+    with pytest.raises(ValueError):
+        asyncio.run(randomize([0.0, 90.0]))  # lo not > 0
+    with pytest.raises(ValueError):
+        asyncio.run(randomize([90.0, 30.0]))  # lo > hi
+    with pytest.raises(ValueError):
+        asyncio.run(randomize([30.0]))  # wrong arity
+    with pytest.raises(ValueError):
+        asyncio.run(randomize(["a", 90.0]))  # non-number entry
+    with pytest.raises(ValueError):
+        asyncio.run(randomize({"not_sz_bad": [30.0, 90.0]}))  # key not in names
 
 
 def test_ignore_props_and_get_geometries(world):
