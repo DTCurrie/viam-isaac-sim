@@ -301,6 +301,25 @@ def test_usd_stage_without_lighting_warns(caplog):
     assert any("stage must provide floor and lights" in record.message for record in caplog.records)
 
 
+def test_oracle_commands_false_hides_ground_truth_but_keeps_operation(sim):
+    world = IsaacWorld.new(_config("sim-world-gated", {"mock": True, "oracle_commands": False}), {})
+    for cmd in ("prop_geometries", "set_prop_pose", "randomize_props", "spawn_prop"):
+        with pytest.raises(ValueError) as exc_info:
+            asyncio.run(world.do_command({"command": cmd}))
+        assert "oracle_commands" in str(exc_info.value)
+        assert "cameras" in str(exc_info.value)
+    # Operating the world is unaffected.
+    assert asyncio.run(world.do_command({"command": "status"}))
+    assert asyncio.run(world.do_command({"command": "reset"})) == {"ok": True}
+    assert asyncio.run(world.do_command({"command": "ignore_props", "names": []})) == {"ignored": []}
+
+
+def test_oracle_commands_default_on_and_validated(world):
+    assert asyncio.run(world.do_command({"command": "prop_geometries"}))
+    with pytest.raises(ValueError):
+        IsaacWorld.validate_config(_config("bad", {"mock": True, "oracle_commands": "no"}))
+
+
 def test_unknown_command_lists_verbs(world):
     with pytest.raises(ValueError) as exc_info:
         asyncio.run(world.do_command({"command": "bogus"}))

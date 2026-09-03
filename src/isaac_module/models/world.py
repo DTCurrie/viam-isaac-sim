@@ -120,6 +120,13 @@ _SUPPORTED_COMMANDS = (
     "ignore_props",
 )
 
+# Commands that reveal or rewrite the scene's ground truth. A world configured
+# with "oracle_commands": false refuses them, so a caller holding the
+# machine's key (an agent under test) has to find objects by looking; the
+# grading oracle then measures placement through the cameras too, or through a
+# separate world that keeps these on.
+_ORACLE_COMMANDS = frozenset({"prop_geometries", "spawn_prop", "set_prop_pose", "randomize_props"})
+
 
 def _prop_label(prop: object, index: int) -> str:
     if isinstance(prop, Mapping) and prop.get("name"):
@@ -342,12 +349,15 @@ class IsaacWorld(Generic, EasyResource):  # type: ignore[misc]  # SDK: API is Fi
             _validate_lighting(attrs["lighting"])
         if "render" in attrs:
             _validate_render(attrs["render"], bool(attrs.get("livestream", True)))
+        if "oracle_commands" in attrs and not isinstance(attrs["oracle_commands"], bool):
+            raise ValueError('"oracle_commands" must be true or false')
         return [], []
 
     def reconfigure(
         self, config: ComponentConfig, dependencies: Mapping[ResourceName, ResourceBase]
     ) -> None:
         attrs: dict[str, Any] = dict(struct_to_dict(config.attributes))
+        self._oracle_commands = bool(attrs.get("oracle_commands", True))
         if attrs.get("usd_stage") and "lighting" not in attrs:
             LOGGER.warning("usd_stage is set without lighting: stage must provide floor and lights")
         cfg = SimConfig(
@@ -419,6 +429,11 @@ class IsaacWorld(Generic, EasyResource):  # type: ignore[misc]  # SDK: API is Fi
     ) -> Mapping[str, ValueTypes]:
         handle = self._handle()
         cmd = str(command.get("command", ""))
+        if cmd in _ORACLE_COMMANDS and not getattr(self, "_oracle_commands", True):
+            raise ValueError(
+                f"{cmd!r} is disabled on this world (oracle_commands is false): scene ground truth "
+                "is not exposed; observe the scene through the cameras"
+            )
         if cmd == "status":
             return handle.status()
         if cmd == "play":
