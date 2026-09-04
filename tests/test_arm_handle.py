@@ -319,11 +319,12 @@ def test_isaac_settle_times_out_while_still_converging():
     assert not sim.world.physics_callback_exists(callback_name)
 
 
-def test_isaac_arm_post_reset_reapplies_solver_gains_and_targets():
+def test_isaac_arm_post_reset_reapplies_solver_gains_and_holds_the_reset_pose():
     handle, art, sim = _make_handle()
     handle._solver_iterations = 64
     handle._gains = ([2.0, 2.0], [3.0, 3.0])
-    handle._targets = [0.4, 0.5]
+    handle._targets = [0.4, 0.5]  # pre-reset targets: NOT re-commanded (see post_reset)
+    art.positions = [0.1, 0.2]  # where the reset put the joints
 
     handle.post_reset()
 
@@ -331,7 +332,8 @@ def test_isaac_arm_post_reset_reapplies_solver_gains_and_targets():
     assert art._controller.set_gains_calls == [([2.0, 2.0], [3.0, 3.0])]
     assert art.applied_actions
     last = art.applied_actions[-1]
-    assert list(last.joint_positions) == [0.4, 0.5]
+    assert list(last.joint_positions) == pytest.approx([0.1, 0.2])
+    assert handle._targets == pytest.approx([0.1, 0.2])
 
 
 def test_isaac_arm_release_removes_settle_callback_and_registry_entry():
@@ -494,3 +496,17 @@ def test_stop_drops_the_in_flight_interpolation_and_holds():
     n = len(art.applied_actions)
     step(0.5)
     assert len(art.applied_actions) == n  # nothing keeps driving toward the old goal
+
+
+
+def test_post_reset_holds_the_reset_pose_not_the_old_targets():
+    """A world.reset() teleports the arm to its default pose and props to
+    their spawn poses. Re-commanding the pre-reset targets drove the arm back
+    through the freshly placed block (2026-09-04); it must hold where it is."""
+    handle, art, sim = _make_handle()
+    handle.set_joint_targets([1.0, 0.5], max_vel_rad_s=100.0)
+    art.positions = [0.0, 0.0]  # the reset put the joints back at their defaults
+    handle.post_reset()
+    assert handle._targets == pytest.approx([0.0, 0.0])
+    assert art.applied_actions[-1].joint_positions.tolist() == pytest.approx([0.0, 0.0])
+    assert handle._interp is None

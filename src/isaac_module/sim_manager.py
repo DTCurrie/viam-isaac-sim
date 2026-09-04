@@ -2982,8 +2982,13 @@ class IsaacArmHandle(ArmHandle):
         """ARM-15/ARM-16: a world.reset() resets the solver iteration count
         and controller gains to the prim's authored defaults, and can
         teleport the articulation to its default pose - re-apply the
-        snapshotted solver count/gains and re-command the last targets so a
-        reset mid-move holds position."""
+        snapshotted solver count/gains and hold the pose the reset put the
+        arm in. Re-commanding the pre-reset targets instead drove the arm
+        from the default pose back to wherever it had been, through props
+        the same reset had just teleported to their spawn poses: with the
+        fingertips pressing on the block at reset time the block was knocked
+        20-60 mm out of place (2026-09-04). A reset returns the whole cell to
+        its start, arm included; the caller moves the arm from there."""
 
         def _redo() -> None:
             set_iterations = getattr(self._art, "set_solver_position_iteration_count", None)
@@ -2992,12 +2997,12 @@ class IsaacArmHandle(ArmHandle):
             if self._gains is not None:
                 kps, kds = self._gains
                 self._art.get_articulation_controller().set_gains(kps=kps, kds=kds)
-            if self._targets is not None:
-                action = self._sim._isaac.ArticulationAction(
-                    joint_positions=np.array(self._targets, dtype=float),
-                    joint_indices=self._joint_indices,
-                )
-                self._art.apply_action(action)
+            self._interp = None
+            current = [
+                float(p) for p in self._art.get_joint_positions(joint_indices=self._joint_indices)
+            ]
+            self._targets = current
+            self._apply_joint_positions(current)
 
         self._sim.run(_redo)
 
@@ -3936,6 +3941,14 @@ class MockGripperHandle(GripperHandle):
 WARMUP_RETRIES = 30
 WARMUP_SLEEP_S = 1.0 / 60.0
 WARMUP_MESSAGE = "no frame available yet - is the simulation playing?"
+# The renderer's first frames after a boot lag the simulation by seconds (RTX
+# shader warm-up): the first one or two wrist-camera reads showed the scene
+# from before the arm had moved, and a block was located a metre off
+# (2026-09-04). A frame whose rendering time trails the simulation clock by
+# more than this is served to nobody; get_frame's retry loop waits for a
+# fresh one.
+STALE_FRAME_S = 0.25
+STALE_MESSAGE = "the latest rendered frame is older than the simulation clock - renderer warming up"
 
 
 class IsaacCameraHandle(CameraHandle):
@@ -3968,6 +3981,9 @@ class IsaacCameraHandle(CameraHandle):
         if cached is not None and cached.sim_time == sim_time:
             return cached
 
+        rendering_time = self._rendering_time()
+        if rendering_time is not None and sim_time - rendering_time > STALE_FRAME_S:
+            raise NoFrameYetError(STALE_MESSAGE)
         rgba = self._cam.get_rgba()
         if rgba is None or rgba.size == 0:
             raise NoFrameYetError(WARMUP_MESSAGE)
@@ -3986,6 +4002,20 @@ class IsaacCameraHandle(CameraHandle):
         frame = Frame(rgb=rgb, depth=depth, sim_time=sim_time)
         self._cached_frame = frame
         return frame
+
+    def _rendering_time(self) -> float | None:
+        """Simulation time of the frame the camera would return now, from
+        Isaac's get_current_frame() ("rendering_time"); None when the API or
+        the key is unavailable, in which case no staleness check is made."""
+        read = getattr(self._cam, "get_current_frame", None)
+        if read is None:
+            return None
+        try:
+            info = read()
+            value = info.get("rendering_time") if isinstance(info, dict) else None
+            return None if value is None else float(value)
+        except Exception:
+            return None
 
     def get_frame(self) -> Frame:
         last_error: NoFrameYetError | None = None
