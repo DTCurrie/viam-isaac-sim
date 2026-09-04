@@ -813,6 +813,7 @@ class SimManager:
             "closed_deg",
             "grab_timeout_sec",
             "holding_tolerance_deg",
+            "holding_effort_min_nm",
             "mock_object_width_m",
             # arm mock test knob
             "mock_stall_fraction",
@@ -1527,6 +1528,8 @@ class SimManager:
         holding_tolerance_rad = math.radians(
             attrs.get("holding_tolerance_deg", DEFAULT_HOLDING_TOLERANCE_DEG)
         )
+        effort_min = attrs.get("holding_effort_min_nm")
+        holding_effort_min = None if effort_min is None else float(effort_min)
         handle = IsaacGripperHandle(
             self,
             arm._art,
@@ -1535,6 +1538,7 @@ class SimManager:
             closed_rad,
             holding_tolerance_rad,
             gripper_prim,
+            holding_effort_min=holding_effort_min,
         )
         handle.parent_prim_path = parent_prim
         # the gripper handle just released the passive drives; the arm's
@@ -3208,8 +3212,19 @@ class GripperHandle:
         raise NotImplementedError
 
     def stop(self) -> None:
-        """Hold the current jaw angle."""
+        """Freeze the jaw. While an object is held the grasp is kept (the
+        commanded target stays, so the squeeze does not relax); otherwise
+        the jaw holds its current angle. viam-server calls Stop on every
+        actuator a session commanded once that session lapses, so a stop
+        that relaxed the drive dropped the object two seconds after any
+        one-shot client (the CLI's ``part run``) exited."""
         raise NotImplementedError
+
+    def finger_effort(self) -> float | None:
+        """Measured drive-joint effort (N m on a revolute drive), or None when
+        the backend cannot read one (the mock; an Isaac build without
+        get_measured_joint_efforts)."""
+        return None
 
     def is_moving(self) -> bool:
         """True while the jaw is travelling; False once it has settled, whether
@@ -3268,6 +3283,7 @@ class IsaacGripperHandle(GripperHandle):
         closed_rad: float,
         holding_tolerance_rad: float,
         prim_path: str,
+        holding_effort_min: float | None = None,
     ) -> None:
         self._sim = sim
         self._art = articulation
@@ -3275,6 +3291,11 @@ class IsaacGripperHandle(GripperHandle):
         self._open_rad = open_rad
         self._closed_rad = closed_rad
         self._holding_tolerance_rad = holding_tolerance_rad
+        # holding_effort_min_nm: when set and the articulation reports measured
+        # joint efforts, is_holding() reads the drive's effort instead of the
+        # stall window (a contact measurement rather than a position guess)
+        self._holding_effort_min = holding_effort_min
+        self._effort_warned = False
         self._prim_path = prim_path
         # set by _create_gripper_isaac: the link base_link is bolted to
         self.parent_prim_path: str | None = None
@@ -3338,22 +3359,22 @@ class IsaacGripperHandle(GripperHandle):
 
         return self._sim.run(_get)
 
+    def _apply_target(self, rad: float) -> None:
+        """Command the drive joint and reset the stall window. Sim thread only."""
+        # finger_joint only: the linkage carries the passive joints
+        action = self._sim._isaac.ArticulationAction(
+            joint_positions=np.array([rad], dtype=float),
+            joint_indices=[self._idx],
+        )
+        self._art.apply_action(action)
+        self._target = rad
+        self._best_gap_rad = None
+        self._no_progress_count = 0
+        self._held_latch = False
+
     def set_jaw(self, rad: float) -> None:
         rad = min(max(rad, self._open_rad), self._closed_rad)
-
-        def _set() -> None:
-            # finger_joint only: the linkage carries the passive joints
-            action = self._sim._isaac.ArticulationAction(
-                joint_positions=np.array([rad], dtype=float),
-                joint_indices=[self._idx],
-            )
-            self._art.apply_action(action)
-            self._target = rad
-            self._best_gap_rad = None
-            self._no_progress_count = 0
-            self._held_latch = False
-
-        self._sim.run(_set)
+        self._sim.run(lambda: self._apply_target(rad))
 
     def open(self) -> None:
         self.set_jaw(self._open_rad)
@@ -3362,7 +3383,13 @@ class IsaacGripperHandle(GripperHandle):
         self.set_jaw(self._closed_rad)
 
     def stop(self) -> None:
-        self.set_jaw(self.get_jaw())
+        def _stop() -> None:
+            if self._is_holding_locked():
+                return  # keep the grasp: the commanded target stays
+            measured = float(self._art.get_joint_positions(joint_indices=[self._idx])[0])
+            self._apply_target(measured)
+
+        self._sim.run(_stop)
 
     def _gap_and_stall(self) -> tuple[float, bool]:
         """(|target - measured|, stalled): the jaw is stalled when the gap has
@@ -3396,12 +3423,39 @@ class IsaacGripperHandle(GripperHandle):
 
         return self._sim.run(_check)
 
-    def is_holding(self) -> bool:
-        def _check() -> bool:
-            gap, stalled = self._gap_and_stall()
-            return (stalled or self._held_latch) and gap > self._holding_tolerance_rad
+    def _finger_effort_locked(self) -> float | None:
+        """|measured drive-joint effort|, or None when unreadable. Sim thread only."""
+        read = getattr(self._art, "get_measured_joint_efforts", None)
+        if read is None:
+            return None
+        try:
+            return abs(float(read(joint_indices=[self._idx])[0]))
+        except Exception:
+            if not self._effort_warned:
+                self._effort_warned = True
+                LOGGER.exception("could not read the gripper drive joint's measured effort")
+            return None
 
-        return self._sim.run(_check)
+    def _is_holding_locked(self) -> bool:
+        """Sim thread only. With holding_effort_min_nm configured and the
+        drive effort readable: the drive is pushing at least that hard while
+        the jaw sits short of fully closed - a contact measurement that does
+        not depend on the commanded target, so it survives stop(). Otherwise
+        the ARM-4 stall predicate."""
+        gap, stalled = self._gap_and_stall()
+        if self._holding_effort_min is not None:
+            effort = self._finger_effort_locked()
+            if effort is not None:
+                measured = float(self._art.get_joint_positions(joint_indices=[self._idx])[0])
+                short_of_closed = self._closed_rad - measured > self._holding_tolerance_rad
+                return short_of_closed and effort >= self._holding_effort_min
+        return (stalled or self._held_latch) and gap > self._holding_tolerance_rad
+
+    def is_holding(self) -> bool:
+        return self._sim.run(self._is_holding_locked)
+
+    def finger_effort(self) -> float | None:
+        return self._sim.run(self._finger_effort_locked)
 
     def dof_names(self) -> list[str]:
         def _names() -> list[str]:
@@ -3585,10 +3639,18 @@ class MockGripperHandle(GripperHandle):
     def stop(self) -> None:
         with self._lock:
             now = time.monotonic()
+            if self._grasp_locked(now):
+                return  # keep the grasp: the commanded target stays
             current = self._jaw_at(now)
             self._start = current
             self._target = current
             self._t0 = now
+
+    def _grasp_locked(self, now: float) -> bool:
+        """The jaw has arrived on an object short of its target (lock held)."""
+        if now < self._arrival_time():
+            return False
+        return abs(self._target - self._effective_target()) > self.holding_tolerance_rad
 
     def is_moving(self) -> bool:
         with self._lock:
