@@ -327,7 +327,11 @@ stall-short-of-closure checks, not a force sensor; with
 `holding_effort_min_nm` set (and an Isaac build that reports measured joint
 efforts) holding means the drive is pushing at least that hard with the jaw
 short of fully closed, and `is_holding_something()` reports the effort as
-`finger_effort_nm` in its metadata. `get_current_inputs()` / `go_to_inputs([v])` use a single
+`finger_effort_nm` in its metadata. Measured on Isaac 5.0 with the 2F-85 and
+the pick cell's 60 mm, 50 g cube (2026-09-04): open and idle 0.04-0.06 N m,
+closed on nothing 0.004-0.008, closed on the cube resting on the table 0.25,
+the same grasp lifted 4.0, unchanged after `stop`. The pick cell sets
+`holding_effort_min_nm` to `0.15`. `get_current_inputs()` / `go_to_inputs([v])` use a single
 value in `[0, 1]`: `0` = open, `1` = closed. `GetKinematics` returns a
 1-link/0-joint SVA whose link is the 36 × 146 × 153 mm gripper box (flange to fingertips, centre 57.5 mm behind the
 TCP. `GetGeometries` returns that same single box.
