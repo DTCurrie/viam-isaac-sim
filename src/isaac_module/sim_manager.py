@@ -1880,6 +1880,10 @@ SETTLE_TOL_RAD = math.radians(0.5)  # commanded-vs-measured gap that counts as a
 # path between two planner waypoints became an arc: on the pick cell the
 # fingertips swept through the block during the approach (2026-09-04).
 SYNC_JOINT_VEL_RAD_S = math.radians(120.0)
+# While a path is in flight the commanded target never runs ahead of the
+# measured joints by more than this; the path pauses until the arm catches
+# up, and a pause that lasts STALL_NO_PROGRESS_STEPS is a stall (contact).
+PATH_LAG_TOL_RAD = math.radians(3.0)
 SETTLE_WINDOW_STEPS = 5  # consecutive physics steps the predicate must hold
 # A blocked arm under contact vibrates above VEL_EPS_RAD_S and never reads
 # still (GPU run 15: 30 s of pushing into a block), so a stall is also
@@ -2554,6 +2558,22 @@ class ArmHandle:
         own limit."""
         raise NotImplementedError
 
+    def follow_joint_path(
+        self, waypoints: list[list[float]], max_vel_rad_s: float | None = None
+    ) -> None:
+        """Execute a planned trajectory as ONE continuous piecewise-linear
+        joint path through ``waypoints`` (the motion service's plan), all
+        joints synchronized within each segment, without settling at
+        intermediate waypoints. The last waypoint becomes the settle target.
+        Settling at every waypoint cost 28 s for a 335 mm linear move whose
+        plan itself took 0.7 s (2026-09-04). Default: the last waypoint only."""
+        if waypoints:
+            self.set_joint_targets(waypoints[-1], max_vel_rad_s)
+
+    def path_progress(self) -> tuple[int, int] | None:
+        """(segments completed, segments total) of the path in flight, or None."""
+        return None
+
     def is_moving(self) -> bool:
         """True while any named joint's |velocity| > VEL_EPS_RAD_S OR any
         |target - measured| > SETTLE_TOL_RAD (ARM-12). A stalled arm that
@@ -2724,24 +2744,51 @@ class IsaacArmHandle(ArmHandle):
         return self._sim.run(_get)
 
     def set_joint_targets(self, positions: list[float], max_vel_rad_s: float | None = None) -> None:
+        self.follow_joint_path([list(positions)], max_vel_rad_s)
+
+    def follow_joint_path(
+        self, waypoints: list[list[float]], max_vel_rad_s: float | None = None
+    ) -> None:
+        if not waypoints:
+            return
+
         def _apply():
             self._apply_velocity_cap(max_vel_rad_s)
-            goal = [float(p) for p in positions]
+            speed = max_vel_rad_s if max_vel_rad_s else self._sync_speed_rad_s()
             current = [
                 float(p) for p in self._art.get_joint_positions(joint_indices=self._joint_indices)
             ]
-            travel = max((abs(g - c) for g, c in zip(goal, current, strict=True)), default=0.0)
-            speed = max_vel_rad_s if max_vel_rad_s else self._sync_speed_rad_s()
-            self._targets = goal
-            if travel <= SETTLE_TOL_RAD or not speed or speed <= 0.0:
+            segments = []
+            start = current
+            for wp in waypoints:
+                goal = [float(v) for v in wp]
+                travel = max((abs(g - s) for g, s in zip(goal, start, strict=True)), default=0.0)
+                if travel > SETTLE_TOL_RAD and speed and speed > 0.0:
+                    segments.append({"start": start, "goal": goal, "duration": travel / speed})
+                start = goal
+            self._targets = start
+            if not segments:
                 self._interp = None
-                self._apply_joint_positions(goal)
+                self._apply_joint_positions(start)
                 return
-            self._interp = {"start": current, "goal": goal, "elapsed": 0.0, "duration": travel / speed}
+            self._interp = {
+                "segments": segments,
+                "index": 0,
+                "elapsed": 0.0,
+                "commanded": current,
+                "lag_steps": 0,
+                "stalled": False,
+            }
             self._ensure_interp_callback()
             self._apply_joint_positions(current)
 
         self._sim.run(_apply)
+
+    def path_progress(self) -> tuple[int, int] | None:
+        interp = self._interp
+        if interp is None:
+            return None
+        return int(interp["index"]), len(interp["segments"])
 
     def _apply_joint_positions(self, positions: list[float]) -> None:
         import numpy as np
@@ -2777,20 +2824,39 @@ class IsaacArmHandle(ArmHandle):
             self._sim.world.add_physics_callback(name, self._on_interp_step)
 
     def _on_interp_step(self, step_size: float) -> None:
-        """Sim thread, every physics step: advance the in-flight move's
-        target along the straight joint-space line so all joints arrive
-        together."""
+        """Sim thread, every physics step: advance the in-flight path's
+        target along its current straight joint-space segment so all joints
+        arrive together; pause while the arm lags the target by more than
+        PATH_LAG_TOL_RAD, and flag a stall when the pause outlasts
+        STALL_NO_PROGRESS_STEPS."""
         interp = self._interp
         if interp is None:
             return
+        measured = self._art.get_joint_positions(joint_indices=self._joint_indices)
+        lag = max(
+            (abs(float(m) - c) for m, c in zip(measured, interp["commanded"], strict=True)),
+            default=0.0,
+        )
+        if lag > PATH_LAG_TOL_RAD:
+            interp["lag_steps"] += 1
+            if interp["lag_steps"] >= STALL_NO_PROGRESS_STEPS:
+                interp["stalled"] = True
+            return  # hold the commanded target until the arm catches up
+        interp["lag_steps"] = 0
+        segment = interp["segments"][interp["index"]]
         interp["elapsed"] += float(step_size)
-        fraction = min(1.0, interp["elapsed"] / interp["duration"])
+        fraction = min(1.0, interp["elapsed"] / segment["duration"])
         positions = [
-            s + (g - s) * fraction for s, g in zip(interp["start"], interp["goal"], strict=True)
+            s + (g - s) * fraction
+            for s, g in zip(segment["start"], segment["goal"], strict=True)
         ]
+        interp["commanded"] = positions
         self._apply_joint_positions(positions)
         if fraction >= 1.0:
-            self._interp = None
+            interp["index"] += 1
+            interp["elapsed"] = 0.0
+            if interp["index"] >= len(interp["segments"]):
+                self._interp = None
 
     def _apply_velocity_cap(self, max_vel_rad_s: float | None) -> None:
         """ARM-13: cap the named joints' max velocity for this move via
@@ -2885,7 +2951,16 @@ class IsaacArmHandle(ArmHandle):
                 outcome.append(SettleOutcome.REACHED)
                 event.set()
                 return
-            if counters["still_off_target"] >= SETTLE_WINDOW_STEPS or (
+            path = self._interp
+            if path is not None:
+                # a path in flight: the error to the FINAL target need not
+                # shrink monotonically, so only the path's own lag flag stalls
+                counters["no_progress"] = 0
+                if path.get("stalled"):
+                    outcome.append(SettleOutcome.STALLED)
+                    event.set()
+                    return
+            elif counters["still_off_target"] >= SETTLE_WINDOW_STEPS or (
                 not is_within and counters["no_progress"] >= STALL_NO_PROGRESS_STEPS
             ):
                 outcome.append(SettleOutcome.STALLED)

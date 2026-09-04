@@ -474,7 +474,9 @@ def test_set_joint_targets_uses_sync_speed_when_the_move_sets_no_cap():
 
     handle, art, sim = _make_handle()
     handle.set_joint_targets([math.radians(60.0), 0.0])
-    assert handle._interp["duration"] == pytest.approx(math.radians(60.0) / SYNC_JOINT_VEL_RAD_S)
+    assert handle._interp["segments"][0]["duration"] == pytest.approx(
+        math.radians(60.0) / SYNC_JOINT_VEL_RAD_S
+    )
 
 
 def test_tiny_moves_apply_directly_without_interpolation():
@@ -510,3 +512,41 @@ def test_post_reset_holds_the_reset_pose_not_the_old_targets():
     assert handle._targets == pytest.approx([0.0, 0.0])
     assert art.applied_actions[-1].joint_positions.tolist() == pytest.approx([0.0, 0.0])
     assert handle._interp is None
+
+
+
+def test_follow_joint_path_runs_through_every_waypoint_without_settling():
+    """A plan executes as one continuous path: each segment is a synchronized
+    straight line, the next starts the step the previous ends, and only the
+    final waypoint is the settle target."""
+    handle, art, sim = _make_handle()
+    handle.follow_joint_path([[1.0, 0.0], [1.0, 1.0], [0.0, 1.0]], max_vel_rad_s=1.0)
+    assert handle._targets == pytest.approx([0.0, 1.0])
+    assert handle.path_progress() == (0, 3)
+    step = _interp_step(sim, art)
+    seen = []
+    for _ in range(12):
+        step(0.25)
+        seen.append(tuple(round(v, 3) for v in art.applied_actions[-1].joint_positions.tolist()))
+    assert (1.0, 0.0) in seen and (1.0, 1.0) in seen and (0.0, 1.0) in seen
+    assert seen.index((1.0, 0.0)) < seen.index((1.0, 1.0)) < seen.index((0.0, 1.0))
+    assert handle._interp is None and handle.path_progress() is None
+
+
+def test_path_pauses_while_the_arm_lags_and_flags_a_stall():
+    """Contact: the drives cannot follow. The commanded target must not run
+    ahead, and a lag that outlasts STALL_NO_PROGRESS_STEPS is a stall."""
+    from isaac_module.sim_manager import STALL_NO_PROGRESS_STEPS
+
+    handle, art, sim = _make_handle()
+    art.apply_action = lambda action: art.applied_actions.append(action)  # joints never move
+    handle.follow_joint_path([[1.0, 0.0]], max_vel_rad_s=1.0)
+    step = _interp_step(sim, art)
+    for _ in range(5):
+        step(0.1)
+    commanded = art.applied_actions[-1].joint_positions.tolist()
+    assert commanded[0] <= 0.1 + 1e-9  # one step at most: the target stopped once the arm fell behind
+    for _ in range(STALL_NO_PROGRESS_STEPS):
+        step(0.1)
+    assert handle._interp["stalled"] is True
+    assert art.applied_actions[-1].joint_positions.tolist() == pytest.approx(commanded)
