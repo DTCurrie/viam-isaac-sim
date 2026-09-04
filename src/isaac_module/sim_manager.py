@@ -1665,6 +1665,7 @@ class SimManager:
 # FINDINGS R-4 / OQ-4: the host the 5.0 2F-85 sub-references point at; it is
 # NXDOMAIN outside NVIDIA, so anything referencing it composes empty.
 UNRESOLVABLE_ASSET_HOST = "isaac-dev"
+MM_PER_M = 1000.0  # debug DoCommands report positions in mm (models/world.py has the same)
 ASSETS_PATH_MARKER = "/Isaac/"  # every asset path is rooted here under both hosts
 
 # R-4: the 2F-85 asset has no `*_pad` links; the fingertip geometry that must
