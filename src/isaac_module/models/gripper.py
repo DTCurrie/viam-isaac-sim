@@ -315,7 +315,10 @@ class IsaacGripper(Gripper, EasyResource):  # type: ignore[misc]  # SDK: API is 
             contacts: list[ValueTypes] = list(await asyncio.to_thread(self._h().contacts))
             return {"contacts": contacts}
         if cmd == "collision_shapes":
-            shapes: list[ValueTypes] = list(await asyncio.to_thread(self._h().collision_shapes))
+            prim = command.get("prim")
+            shapes: list[ValueTypes] = list(
+                await asyncio.to_thread(self._h().collision_shapes, str(prim) if prim else None)
+            )
             return {"collision_shapes": shapes}
         raise ValueError(f"unknown command: {command}")
 

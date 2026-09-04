@@ -3276,8 +3276,9 @@ class GripperHandle:
         impulses and separations. The mock has no physics and returns []."""
         return []
 
-    def collision_shapes(self) -> list[dict[str, Any]]:
-        """Debug: every collider under the gripper prim: path, rigid link,
+    def collision_shapes(self, prim_path: str | None = None) -> list[dict[str, Any]]:
+        """Debug: every collider (and, marked, every visual mesh) under
+        ``prim_path`` (default: the gripper prim): path, rigid link,
         approximation, enabled, contact/rest offsets, and its world AABB in
         mm from the physics-aware link pose. The mock returns []."""
         return []
@@ -3575,7 +3576,10 @@ class IsaacGripperHandle(GripperHandle):
 
         return self._sim.run(_read)
 
-    def collision_shapes(self) -> list[dict[str, Any]]:
+    def collision_shapes(self, prim_path: str | None = None) -> list[dict[str, Any]]:
+        """Every Boundable prim under ``prim_path`` (default: the gripper) that
+        is a collider, plus, for comparison, non-collider meshes marked
+        ``visual: False``; world AABBs from the physics-aware link pose."""
         def _shapes() -> list[dict[str, Any]]:
             from pxr import Gf, Usd, UsdGeom, UsdPhysics
 
@@ -3584,10 +3588,11 @@ class IsaacGripperHandle(GripperHandle):
             except Exception:
                 PhysxSchema = None  # noqa: N806
             time = Usd.TimeCode.Default()
-            root = self._sim._isaac.get_prim_at_path(self._prim_path)
+            root = self._sim._isaac.get_prim_at_path(prim_path or self._prim_path)
             out: list[dict[str, Any]] = []
             for prim in _prim_range(Usd, root):
-                if not prim.HasAPI(UsdPhysics.CollisionAPI):
+                is_collider = prim.HasAPI(UsdPhysics.CollisionAPI)
+                if not is_collider and not prim.IsA(UsdGeom.Gprim):
                     continue
                 link = prim
                 while link.IsValid() and not link.HasAPI(UsdPhysics.RigidBodyAPI):
@@ -3596,7 +3601,12 @@ class IsaacGripperHandle(GripperHandle):
                     "path": str(prim.GetPath()),
                     "type": str(prim.GetTypeName()),
                     "link": str(link.GetPath()) if link.IsValid() else None,
-                    "enabled": bool(UsdPhysics.CollisionAPI(prim).GetCollisionEnabledAttr().Get()),
+                    "collider": is_collider,
+                    "enabled": (
+                        bool(UsdPhysics.CollisionAPI(prim).GetCollisionEnabledAttr().Get())
+                        if is_collider
+                        else False
+                    ),
                     "approximation": (
                         str(UsdPhysics.MeshCollisionAPI(prim).GetApproximationAttr().Get())
                         if prim.HasAPI(UsdPhysics.MeshCollisionAPI)
@@ -3617,12 +3627,13 @@ class IsaacGripperHandle(GripperHandle):
                     if prim.IsA(UsdGeom.Boundable)
                     else None
                 )
-                if link.IsValid() and extent is not None and len(extent) == 2:
+                if extent is not None and len(extent) == 2:
+                    pose_prim = link if link.IsValid() else prim
                     mesh_in_link = (
                         UsdGeom.Xformable(prim).ComputeLocalToWorldTransform(time)
-                        * UsdGeom.Xformable(link).ComputeLocalToWorldTransform(time).GetInverse()
+                        * UsdGeom.Xformable(pose_prim).ComputeLocalToWorldTransform(time).GetInverse()
                     )
-                    pos, quat = self._sim._isaac.SingleXFormPrim(str(link.GetPath())).get_world_pose()
+                    pos, quat = self._sim._isaac.SingleXFormPrim(str(pose_prim.GetPath())).get_world_pose()
                     rotate = Gf.Matrix4d().SetRotate(
                         Gf.Quatd(float(quat[0]), Gf.Vec3d(float(quat[1]), float(quat[2]), float(quat[3])))
                     )
