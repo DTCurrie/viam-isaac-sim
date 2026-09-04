@@ -220,8 +220,13 @@ def _place_camera(cam: Any, attrs: dict[str, Any]) -> None:
     is the source of truth (CAM-10) and is applied in ROS-optical axes so the
     camera's +Z is the frame's forward axis. Absent that, the legacy
     ``local_orientation_rpy_deg`` pose (usd axes, 180 deg about X to flip the
-    usd camera's -Z forward) still applies. Free-standing ``target``/
-    ``orientation_wxyz`` cameras are unchanged."""
+    usd camera's -Z forward) still applies. Free-standing ``orientation_wxyz``
+    is world axes (+X forward) unless ``orientation_axes`` says "ros" - the
+    camera model sets that when the quat came from a Viam frame, whose
+    convention is ROS-optical (+Z forward), so a frame-configured fixed
+    camera aims where the frame system believes it aims (GPU phase-4 run 1:
+    the side camera's world-axes read of a ROS quat measured the backdrop
+    at 7994 mm)."""
     parent = attrs.get("parent_prim")
     if parent:
         local_position = list(to_vec3(attrs.get("local_position"), default=(0.0, 0.0, 0.05)))
@@ -240,7 +245,8 @@ def _place_camera(cam: Any, attrs: dict[str, Any]) -> None:
     elif attrs.get("orientation_wxyz") is not None:
         position = to_vec3(attrs.get("position"))
         world_quat = _as_quat(attrs["orientation_wxyz"])
-        cam.set_world_pose(list(position), list(world_quat), camera_axes="world")
+        camera_axes = str(attrs.get("orientation_axes", "world"))
+        cam.set_world_pose(list(position), list(world_quat), camera_axes=camera_axes)
 
 
 def _configure_camera_optics(
@@ -1891,6 +1897,10 @@ class SettleOutcome(str, Enum):
 
 # randomize_props separation default: FINDINGS W26 block spacing rule
 DEFAULT_MIN_SEPARATION_M = 0.15
+# sized props (dynamic-blocks phase 1): pairwise face gap beyond the two
+# footprints, and how far above the support face a placed prop rests
+PROP_EDGE_CLEARANCE_M = 0.01
+PROP_REST_EPSILON_M = 0.0005
 RANDOMIZE_MAX_ATTEMPTS = 100  # per prop, within one layout attempt
 # a dense-but-feasible request can strand the LAST prop no matter how many
 # single-prop draws it gets (GPU run 8, seed 6) - redraw the whole layout
@@ -1911,6 +1921,15 @@ class PropGeometry(NamedTuple):
     orientation_wxyz: Quat
     color: tuple[float, float, float] | None
     fixed: bool
+
+
+class RandomizeResult(NamedTuple):
+    """What randomize_props changed: each named prop's new centre position
+    and its full box dims after the call (freshly drawn where a size range
+    covered it, its current dims otherwise)."""
+
+    positions_m: dict[str, Vec3]
+    dims_m: dict[str, tuple[float, float, float]]
 
 
 def prop_spawn_orientation(prop: dict[str, Any]) -> Quat:
@@ -1942,6 +1961,60 @@ def prop_box_dims(prop: dict[str, Any]) -> tuple[float, float, float]:
     return (size * float(scale[0]), size * float(scale[1]), size * float(scale[2]))
 
 
+def _prop_footprint_m(dims: tuple[float, float, float]) -> float:
+    """A prop's placement footprint (SCN-16 sized props): the larger of
+    its x/y edges, used for edge-aware separation."""
+    return max(dims[0], dims[1])
+
+
+def _place_props(
+    dims_by_name: dict[str, tuple[float, float, float]],
+    region: tuple[Vec3, Vec3],
+    rng: random.Random,
+    min_separation_m: float,
+) -> dict[str, Vec3]:
+    """The draw loop behind ``sample_prop_positions``, taking an
+    already-seeded ``rng`` so a caller can consume size draws from the
+    same stream first (sized props, dynamic-blocks phase 1)."""
+    (x0, y0, z0), (x1, y1, z1) = region
+    lo_x, hi_x = min(x0, x1), max(x0, x1)
+    lo_y, hi_y = min(y0, y1), max(y0, y1)
+    face_z = (float(z0) + float(z1)) / 2.0
+    for name, dims in dims_by_name.items():
+        half_x, half_y = dims[0] / 2.0, dims[1] / 2.0
+        if lo_x + half_x > hi_x - half_x or lo_y + half_y > hi_y - half_y:
+            raise ValueError(f"randomize_props: region cannot hold {name!r}'s footprint")
+    for _restart in range(RANDOMIZE_LAYOUT_RESTARTS):
+        placed: dict[str, Vec3] = {}
+        footprints: dict[str, float] = {}
+        for name, dims in dims_by_name.items():
+            half_x, half_y = dims[0] / 2.0, dims[1] / 2.0
+            footprint = _prop_footprint_m(dims)
+            for _ in range(RANDOMIZE_MAX_ATTEMPTS):
+                x = rng.uniform(lo_x + half_x, hi_x - half_x)
+                y = rng.uniform(lo_y + half_y, hi_y - half_y)
+                if all(
+                    math.hypot(x - px, y - py)
+                    >= max(
+                        min_separation_m,
+                        (footprint + footprints[pname]) / 2.0 + PROP_EDGE_CLEARANCE_M,
+                    )
+                    for pname, (px, py, _pz) in placed.items()
+                ):
+                    placed[name] = (x, y, face_z + dims[2] / 2.0 + PROP_REST_EPSILON_M)
+                    footprints[name] = footprint
+                    break
+            else:
+                break  # this layout stranded ``name``: redraw everything
+        else:
+            return placed
+    raise ValueError(
+        f"randomize_props: no layout for {sorted(dims_by_name)} after "
+        f"{RANDOMIZE_LAYOUT_RESTARTS} layout attempts; widen the region, "
+        "drop props, or lower min_separation"
+    )
+
+
 def sample_prop_positions(
     dims_by_name: dict[str, tuple[float, float, float]],
     region: tuple[Vec3, Vec3],
@@ -1954,9 +2027,12 @@ def sample_prop_positions(
     rectangle of the top face the props' footprints must stay inside, at
     the face's height z (the two z values are averaged). Each prop lands
     with its footprint (centre +/- dims/2 in x and y) inside the
-    rectangle, its centre at least ``min_separation_m`` from every other
-    placed centre in the x/y plane (FINDINGS W26), and its centre z at
-    face z + dims_z / 2 so it rests on the face.
+    rectangle, its centre at least max(``min_separation_m``, the two
+    props' edge-aware gap) from every other placed centre in the x/y
+    plane (FINDINGS W26; sized props: edge-aware = (footprint_a +
+    footprint_b) / 2 + PROP_EDGE_CLEARANCE_M, footprint = max x/y dim),
+    and its centre z at face z + dims_z / 2 + PROP_REST_EPSILON_M so it
+    rests just above the face.
 
     Same inputs -> the same placements on every call: draws come from one
     ``random.Random(seed)`` stream and props place in ``dims_by_name``
@@ -1966,37 +2042,48 @@ def sample_prop_positions(
     converges. Raises ValueError when the region cannot hold a footprint
     or no layout fits.
     """
-    (x0, y0, z0), (x1, y1, z1) = region
-    lo_x, hi_x = min(x0, x1), max(x0, x1)
-    lo_y, hi_y = min(y0, y1), max(y0, y1)
-    face_z = (float(z0) + float(z1)) / 2.0
-    for name, dims in dims_by_name.items():
-        half_x, half_y = dims[0] / 2.0, dims[1] / 2.0
-        if lo_x + half_x > hi_x - half_x or lo_y + half_y > hi_y - half_y:
-            raise ValueError(f"randomize_props: region cannot hold {name!r}'s footprint")
+    return _place_props(dims_by_name, region, random.Random(seed), min_separation_m)
+
+
+def _validate_size_range_names(
+    names: list[str], size_range_m: dict[str, tuple[float, float]] | None
+) -> None:
+    if not size_range_m:
+        return
+    unknown = set(size_range_m) - set(names)
+    if unknown:
+        raise ValueError(f"randomize_props: size_range_m names not in names: {sorted(unknown)}")
+
+
+def _require_cube_prop(name: str, spec: dict[str, Any]) -> None:
+    if str(spec.get("type", "cube")) != "cube":
+        raise ValueError(f"randomize_props: size_range_m on non-cube prop {name!r}")
+
+
+def _draw_sizes_and_positions(
+    names: list[str],
+    dims_by_name: dict[str, tuple[float, float, float]],
+    region: tuple[Vec3, Vec3],
+    seed: int,
+    min_separation_m: float,
+    size_range_m: dict[str, tuple[float, float]] | None,
+) -> tuple[dict[str, Vec3], dict[str, tuple[float, float, float]]]:
+    """One ``random.Random(seed)`` stream: sizes first (``names`` order,
+    only props with a range), then positions (WorldHandle.randomize_props
+    contract). Returns the placements and every named prop's post-draw
+    dims."""
     rng = random.Random(seed)
-    for _restart in range(RANDOMIZE_LAYOUT_RESTARTS):
-        placed: dict[str, Vec3] = {}
-        for name, dims in dims_by_name.items():
-            half_x, half_y = dims[0] / 2.0, dims[1] / 2.0
-            for _ in range(RANDOMIZE_MAX_ATTEMPTS):
-                x = rng.uniform(lo_x + half_x, hi_x - half_x)
-                y = rng.uniform(lo_y + half_y, hi_y - half_y)
-                if all(
-                    math.hypot(x - px, y - py) >= min_separation_m
-                    for px, py, _pz in placed.values()
-                ):
-                    placed[name] = (x, y, face_z + dims[2] / 2.0)
-                    break
-            else:
-                break  # this layout stranded ``name``: redraw everything
-        else:
-            return placed
-    raise ValueError(
-        f"randomize_props: no layout for {sorted(dims_by_name)} after "
-        f"{RANDOMIZE_LAYOUT_RESTARTS} layout attempts (seed {seed}); widen "
-        "the region, drop props, or lower min_separation"
-    )
+    drawn_dims = dict(dims_by_name)
+    if size_range_m:
+        for name in names:
+            size_range = size_range_m.get(name)
+            if size_range is None:
+                continue
+            lo, hi = size_range
+            drawn_edge = rng.uniform(lo, hi)
+            drawn_dims[name] = (drawn_edge, drawn_edge, drawn_edge)
+    placed = _place_props({name: drawn_dims[name] for name in names}, region, rng, min_separation_m)
+    return placed, drawn_dims
 
 
 class WorldHandle:
@@ -2059,11 +2146,37 @@ class WorldHandle:
         region: tuple[Vec3, Vec3],
         seed: int,
         min_separation_m: float = DEFAULT_MIN_SEPARATION_M,
-    ) -> dict[str, Vec3]:
-        """Place ``names`` (in list order) via sample_prop_positions
-        (same contract, incl. determinism) and teleport each one there
-        with set_prop_pose semantics. Returns the new positions in
-        metres. Unknown name -> ValueError."""
+        size_range_m: dict[str, tuple[float, float]] | None = None,
+    ) -> RandomizeResult:
+        """Place ``names`` (in list order) deterministically and teleport
+        each one there with set_prop_pose semantics, optionally redrawing
+        sizes first.
+
+        ``size_range_m`` maps a prop name to (lo, hi) full edge length in
+        metres: that prop's new size draws as one uniform(lo, hi) scalar
+        applied to all three axes. Keys must name cube props in ``names``
+        (ValueError otherwise). Sizes and positions come from one
+        ``random.Random(seed)`` stream - sizes first, in ``names`` order,
+        then positions - so a seed reproduces both, and a call with no
+        ranges consumes no size draws (existing seeded layouts are
+        unchanged). Rescaling is absolute against the spawn size
+        (scale = drawn / spawn edge), so repeated draws never accumulate,
+        and the new dims persist through reset (reset restores poses,
+        never sizes). prop_geometries serves the post-draw dims afterward.
+
+        A sized call (any range given) replays spawn_prop's full-reset
+        pattern before the teleports: rescaling a live rigid body
+        invalidates PhysX's tensor views, so the world resets (every prop
+        snaps to its spawn pose, post-reset hooks fire) and then the named
+        props teleport to their sampled positions. A call with no ranges
+        never resets.
+
+        Placement uses the post-draw dims: the centres of props a and b
+        stay at least max(min_separation_m, (footprint_a + footprint_b)/2
+        + PROP_EDGE_CLEARANCE_M) apart in x/y, where a prop's footprint is
+        the max of its x/y dims, and each prop rests at
+        face z + dims_z / 2 + PROP_REST_EPSILON_M.
+        Unknown name -> ValueError."""
         raise NotImplementedError
 
     def spawn_prop(self, prop: dict[str, Any]) -> None:
@@ -2173,12 +2286,36 @@ class MockWorldHandle(WorldHandle):
         region: tuple[Vec3, Vec3],
         seed: int,
         min_separation_m: float = DEFAULT_MIN_SEPARATION_M,
-    ) -> dict[str, Vec3]:
-        dims = {name: prop_box_dims(self._entry(name)["spawn"]) for name in names}
-        placed = sample_prop_positions(dims, region, seed, min_separation_m)
-        for name, position in placed.items():
-            self.set_prop_pose(name, position)
-        return placed
+        size_range_m: dict[str, tuple[float, float]] | None = None,
+    ) -> RandomizeResult:
+        _validate_size_range_names(names, size_range_m)
+        entries = {name: self._entry(name) for name in names}
+        if size_range_m:
+            for name in size_range_m:
+                _require_cube_prop(name, entries[name]["spawn"])
+        dims = {name: prop_box_dims(entries[name]["spawn"]) for name in names}
+        placed, drawn_dims = _draw_sizes_and_positions(
+            names, dims, region, seed, min_separation_m, size_range_m
+        )
+        for name in size_range_m or ():
+            drawn_edge = drawn_dims[name][0]
+            entries[name]["spawn"] = {
+                **entries[name]["spawn"],
+                "size": drawn_edge,
+                "scale": (1.0, 1.0, 1.0),
+            }
+        if size_range_m:
+            # parity with IsaacWorldHandle: a sized randomize replays
+            # spawn_prop's full-reset pattern (all props snap to spawn poses,
+            # hooks fire) before the named props teleport to their draws
+            for entry in self._registry.values():
+                entry["position"] = entry["spawn_position"]
+                entry["orientation"] = entry["spawn_orientation"]
+            self._sim._reset_world()
+        for name in names:
+            self.set_prop_pose(name, placed[name])
+        dims_m = {name: prop_box_dims(entries[name]["spawn"]) for name in names}
+        return RandomizeResult(positions_m=placed, dims_m=dims_m)
 
     def spawn_prop(self, prop: dict[str, Any]) -> None:
         self._register(prop)
@@ -2305,12 +2442,58 @@ class IsaacWorldHandle(WorldHandle):
         region: tuple[Vec3, Vec3],
         seed: int,
         min_separation_m: float = DEFAULT_MIN_SEPARATION_M,
-    ) -> dict[str, Vec3]:
-        dims = {name: prop_box_dims(self._prop_spec(name)) for name in names}
-        placed = sample_prop_positions(dims, region, seed, min_separation_m)
+        size_range_m: dict[str, tuple[float, float]] | None = None,
+    ) -> RandomizeResult:
+        _validate_size_range_names(names, size_range_m)
+        specs = {name: self._prop_spec(name) for name in names}
+        if size_range_m:
+            for name in size_range_m:
+                _require_cube_prop(name, specs[name])
+        dims = {name: prop_box_dims(specs[name]) for name in names}
+        placed, drawn_dims = _draw_sizes_and_positions(
+            names, dims, region, seed, min_separation_m, size_range_m
+        )
+        if size_range_m:
+
+            def _rescale_and_rebuild() -> None:
+                # stop BEFORE writing the scale: the stop inside reset restores
+                # the stage's pre-play state, so a scale authored mid-play is
+                # reverted (GPU: drawn 44.7 mm, block stayed 60 mm) - and a
+                # live-play write also invalidates PhysX's tensor view (GPU:
+                # "Failed to get rigid body transforms from backend")
+                self._sim.world.stop()
+                self._rescale_props(specs, drawn_dims, size_range_m)
+                # spawn_prop's pattern: full reset re-cooks the colliders at
+                # the new scale and refires the post-reset hooks (arm gains,
+                # camera re-inits) before any teleport touches a pose
+                self._sim._reset_world()
+
+            self._sim.run(_rescale_and_rebuild)
         for name, position in placed.items():
             self.set_prop_pose(name, position)
-        return placed
+        dims_m = {name: prop_box_dims(specs[name]) for name in names}
+        return RandomizeResult(positions_m=placed, dims_m=dims_m)
+
+    def _rescale_props(
+        self,
+        specs: dict[str, dict[str, Any]],
+        drawn_dims: dict[str, tuple[float, float, float]],
+        size_range_m: dict[str, tuple[float, float]],
+    ) -> None:
+        """Runs on the sim thread: absolute rescale against the spawn
+        size (never the previous draw), so repeated randomize calls don't
+        compound (dynamic-blocks phase 1)."""
+        for name in size_range_m:
+            spec = specs[name]
+            spawn_size = float(spec.get("size", 0.05))
+            scale_factor = drawn_dims[name][0] / spawn_size
+            scale = (scale_factor, scale_factor, scale_factor)
+            scene_object = self._sim.world.scene.get_object(name)
+            if scene_object is not None:
+                set_local_scale = getattr(scene_object, "set_local_scale", None)
+                if set_local_scale is not None:
+                    set_local_scale(np.array(scale))
+            spec["scale"] = scale
 
     def spawn_prop(self, prop: dict[str, Any]) -> None:
         if not prop.get("name"):
