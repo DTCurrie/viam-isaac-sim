@@ -1,6 +1,7 @@
 """Unit tests for IsaacGripper's Viam-facing contract in mock mode."""
 
 import asyncio
+import math
 import json
 
 import pytest
@@ -233,3 +234,66 @@ def test_debug_commands_are_empty_in_the_mock(world):
         assert await gripper.do_command({"command": "collision_shapes"}) == {"collision_shapes": []}
 
     asyncio.run(scenario())
+
+
+
+class _JammingHandle:
+    """Closes onto something without holding the first time (a jammed
+    linkage), holds after a regrip. Records what grab() commanded."""
+
+    def __init__(self, jams: int = 1) -> None:
+        self.jams = jams
+        self.closes = 0
+        self.commands: list[str] = []
+        self._jaw = 0.0
+        self._holding = False
+
+    def jaw_limits(self):
+        return (0.0, 0.8203)
+
+    def get_jaw(self):
+        return self._jaw
+
+    def close(self):
+        self.closes += 1
+        self.commands.append("close")
+        self._jaw = 0.235  # ~13.5 deg: stalled on the block
+        self._holding = self.closes > self.jams
+
+    def set_jaw(self, rad):
+        self.commands.append(f"set_jaw({math.degrees(rad):.0f})")
+        self._jaw = rad
+
+    def open(self):
+        self.commands.append("open")
+        self._jaw = 0.0
+
+    def is_moving(self):
+        return False
+
+    def is_holding(self):
+        return self._holding
+
+    def finger_effort(self):
+        return 2.4 if self._holding else 0.017
+
+
+def test_grab_regrips_when_the_jaw_jams_short_of_closed_without_holding():
+    import math as _math
+
+    gripper = IsaacGripper("gripper-regrip")
+    handle = _JammingHandle(jams=1)
+    gripper._handle = handle
+    gripper._grab_timeout = 5.0
+    assert asyncio.run(gripper.grab()) is True
+    assert handle.closes == 2
+    assert handle.commands == ["close", f"set_jaw({_math.degrees(0.235 - _math.radians(8.0)):.0f})", "close"]
+
+
+def test_grab_gives_up_after_the_regrip_budget():
+    gripper = IsaacGripper("gripper-regrip-fail")
+    handle = _JammingHandle(jams=10)
+    gripper._handle = handle
+    gripper._grab_timeout = 5.0
+    assert asyncio.run(gripper.grab()) is False
+    assert handle.closes == 3  # one close plus GRAB_REGRIPS regrips
