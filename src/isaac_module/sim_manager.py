@@ -1881,9 +1881,12 @@ SETTLE_TOL_RAD = math.radians(0.5)  # commanded-vs-measured gap that counts as a
 # fingertips swept through the block during the approach (2026-09-04).
 SYNC_JOINT_VEL_RAD_S = math.radians(120.0)
 # While a path is in flight the commanded target never runs ahead of the
-# measured joints by more than this; the path pauses until the arm catches
-# up, and a pause that lasts STALL_NO_PROGRESS_STEPS is a stall (contact).
-PATH_LAG_TOL_RAD = math.radians(3.0)
+# measured joints by more than this: the path advances only as fast as the
+# drives track it, so the tool stays on the planner's line (3 deg of lead at
+# this reach was ~30 mm of deviation and nudged the block before a grasp,
+# 2026-09-04). A paused path whose arm makes no progress toward the target
+# for STALL_NO_PROGRESS_STEPS is a stall (contact).
+PATH_LAG_TOL_RAD = SETTLE_TOL_RAD
 SETTLE_WINDOW_STEPS = 5  # consecutive physics steps the predicate must hold
 # A blocked arm under contact vibrates above VEL_EPS_RAD_S and never reads
 # still (GPU run 15: 30 s of pushing into a block), so a stall is also
@@ -2838,11 +2841,18 @@ class IsaacArmHandle(ArmHandle):
             default=0.0,
         )
         if lag > PATH_LAG_TOL_RAD:
-            interp["lag_steps"] += 1
-            if interp["lag_steps"] >= STALL_NO_PROGRESS_STEPS:
-                interp["stalled"] = True
-            return  # hold the commanded target until the arm catches up
+            # hold the commanded target until the arm catches up; a lag that
+            # stops shrinking is a stall (the settle rule's progress test)
+            if lag < interp.get("best_lag", math.inf) - STALL_PROGRESS_EPS_RAD:
+                interp["best_lag"] = lag
+                interp["lag_steps"] = 0
+            else:
+                interp["lag_steps"] += 1
+                if interp["lag_steps"] >= STALL_NO_PROGRESS_STEPS:
+                    interp["stalled"] = True
+            return
         interp["lag_steps"] = 0
+        interp["best_lag"] = math.inf
         segment = interp["segments"][interp["index"]]
         interp["elapsed"] += float(step_size)
         fraction = min(1.0, interp["elapsed"] / segment["duration"])

@@ -546,7 +546,36 @@ def test_path_pauses_while_the_arm_lags_and_flags_a_stall():
         step(0.1)
     commanded = art.applied_actions[-1].joint_positions.tolist()
     assert commanded[0] <= 0.1 + 1e-9  # one step at most: the target stopped once the arm fell behind
-    for _ in range(STALL_NO_PROGRESS_STEPS):
+    # once the arm catches up to within the tolerance, the path advances again
+    art.positions[0] = commanded[0] - 0.005
+    step(0.1)
+    assert art.applied_actions[-1].joint_positions[0] > commanded[0]
+    assert handle._interp["stalled"] is False and handle._interp["lag_steps"] == 0
+    art.positions[0] = 0.0
+    commanded = art.applied_actions[-1].joint_positions.tolist()
+    for _ in range(STALL_NO_PROGRESS_STEPS + 1):  # the first lagging step records the best lag
         step(0.1)
     assert handle._interp["stalled"] is True
     assert art.applied_actions[-1].joint_positions.tolist() == pytest.approx(commanded)
+
+
+
+def test_path_lead_never_exceeds_the_settle_tolerance():
+    """The commanded target may run ahead of the measured joints by at most
+    SETTLE_TOL_RAD, so the tool stays on the planner's line."""
+    from isaac_module.sim_manager import SETTLE_TOL_RAD
+
+    handle, art, sim = _make_handle()
+    art.apply_action = lambda action: art.applied_actions.append(action)  # drives, not teleports
+    handle.follow_joint_path([[1.0, 0.0]], max_vel_rad_s=10.0)
+    step = _interp_step(sim, art)
+    worst = 0.0
+    for _ in range(400):
+        # a drive: every physics step the joint closes 30% of the gap to the last target
+        target = art.applied_actions[-1].joint_positions[0]
+        art.positions[0] += (float(target) - art.positions[0]) * 0.3
+        step(0.01)
+        worst = max(worst, art.applied_actions[-1].joint_positions[0] - art.positions[0])
+    assert worst <= SETTLE_TOL_RAD + 10.0 * 0.01 + 1e-9  # one step of advance past the check
+    assert handle._interp is None, "the path should complete once the drive keeps up"
+    assert art.positions[0] == pytest.approx(1.0, abs=0.02)
