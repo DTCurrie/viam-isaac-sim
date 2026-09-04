@@ -311,6 +311,12 @@ class IsaacGripper(Gripper, EasyResource):  # type: ignore[misc]  # SDK: API is 
             }
         if cmd == "tcp_pose":
             return await asyncio.to_thread(self._tcp_pose)
+        if cmd == "contacts":
+            contacts: list[ValueTypes] = list(await asyncio.to_thread(self._h().contacts))
+            return {"contacts": contacts}
+        if cmd == "collision_shapes":
+            shapes: list[ValueTypes] = list(await asyncio.to_thread(self._h().collision_shapes))
+            return {"collision_shapes": shapes}
         raise ValueError(f"unknown command: {command}")
 
     def _tcp_pose(self) -> dict[str, ValueTypes]:

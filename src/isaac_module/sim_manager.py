@@ -3268,6 +3268,19 @@ class GripperHandle:
         """XC-4: drop callbacks; the prim stays attached to the arm."""
         return None
 
+    def contacts(self) -> list[dict[str, Any]]:
+        """Debug: the contact pairs involving the gripper's links in the
+        latest physics step (PhysX contact reports): both actor paths, which
+        side is the gripper, and the contact points (mm, world), normals,
+        impulses and separations. The mock has no physics and returns []."""
+        return []
+
+    def collision_shapes(self) -> list[dict[str, Any]]:
+        """Debug: every collider under the gripper prim: path, rigid link,
+        approximation, enabled, contact/rest offsets, and its world AABB in
+        mm from the physics-aware link pose. The mock returns []."""
+        return []
+
 
 class IsaacGripperHandle(GripperHandle):
     """Drives the finger_joint DOF of the ARM's articulation: the gripper is
@@ -3297,6 +3310,9 @@ class IsaacGripperHandle(GripperHandle):
         self._holding_effort_min = holding_effort_min
         self._effort_warned = False
         self._prim_path = prim_path
+        # debug contact reports (contacts()): subscribed on first use
+        self._contact_sub: Any = None
+        self._last_contacts: list[dict[str, Any]] = []
         # set by _create_gripper_isaac: the link base_link is bolted to
         self.parent_prim_path: str | None = None
         dof_names = list(articulation.dof_names)
@@ -3481,8 +3497,150 @@ class IsaacGripperHandle(GripperHandle):
     def release(self) -> None:
         """XC-4: the gripper drives a DOF of the arm's articulation and owns
         no scene-registry entry or physics callback of its own (post_reset is
-        an XC-5 hook, not a physics callback) - nothing to release."""
+        an XC-5 hook, not a physics callback); only the debug contact-report
+        subscription, if contacts() was ever called."""
+        self._contact_sub = None
         return None
+
+    # ---- debug: what is the gripper touching, and with what shapes? ----
+
+    def _ensure_contact_reports(self) -> None:
+        """Sim thread. Apply PhysxContactReportAPI to every rigid link under
+        the gripper (PhysX reports a pair when either actor carries the API)
+        and subscribe to the simulation's contact report events, once."""
+        if self._contact_sub is not None:
+            return
+        from omni.physx import get_physx_simulation_interface
+        from pxr import PhysxSchema, Usd, UsdPhysics
+
+        root = self._sim._isaac.get_prim_at_path(self._prim_path)
+        applied = 0
+        for prim in _prim_range(Usd, root):
+            if prim.IsInstanceProxy() or not prim.HasAPI(UsdPhysics.RigidBodyAPI):
+                continue
+            api = PhysxSchema.PhysxContactReportAPI.Apply(prim)
+            api.CreateThresholdAttr().Set(0.0)
+            applied += 1
+        self._contact_sub = get_physx_simulation_interface().subscribe_contact_report_events(
+            self._on_contact_report
+        )
+        LOGGER.info("gripper contact reports enabled on %d links under %s", applied, self._prim_path)
+
+    def _on_contact_report(self, contact_headers: Any, contact_data: Any) -> None:
+        from pxr import PhysicsSchemaTools
+
+        def path_of(handle: Any) -> str:
+            return str(PhysicsSchemaTools.intToSdfPath(handle))
+
+        out: list[dict[str, Any]] = []
+        for header in contact_headers:
+            kind = str(getattr(header, "type", "")).rsplit(".", 1)[-1]
+            if "LOST" in kind:
+                continue
+            actor0, actor1 = path_of(header.actor0), path_of(header.actor1)
+            gripper_is_0 = actor0.startswith(self._prim_path)
+            start = int(header.contact_data_offset)
+            points = []
+            for i in range(start, start + int(header.num_contact_data)):
+                d = contact_data[i]
+                points.append(
+                    {
+                        "position_mm": [float(v) * MM_PER_M for v in d.position],
+                        "normal": [float(v) for v in d.normal],
+                        "impulse": [float(v) for v in d.impulse],
+                        "separation_mm": float(d.separation) * MM_PER_M,
+                    }
+                )
+            out.append(
+                {
+                    "type": kind,
+                    "gripper_link": actor0 if gripper_is_0 else actor1,
+                    "gripper_collider": path_of(header.collider0 if gripper_is_0 else header.collider1),
+                    "other": actor1 if gripper_is_0 else actor0,
+                    "other_collider": path_of(header.collider1 if gripper_is_0 else header.collider0),
+                    "points": points,
+                }
+            )
+        self._last_contacts = out
+
+    def contacts(self) -> list[dict[str, Any]]:
+        def _read() -> list[dict[str, Any]]:
+            try:
+                self._ensure_contact_reports()
+            except Exception as exc:
+                LOGGER.exception("gripper contact reports unavailable")
+                return [{"error": f"contact reports unavailable: {exc}"}]
+            return list(self._last_contacts)
+
+        return self._sim.run(_read)
+
+    def collision_shapes(self) -> list[dict[str, Any]]:
+        def _shapes() -> list[dict[str, Any]]:
+            from pxr import Gf, Usd, UsdGeom, UsdPhysics
+
+            try:
+                from pxr import PhysxSchema
+            except Exception:
+                PhysxSchema = None  # noqa: N806
+            time = Usd.TimeCode.Default()
+            root = self._sim._isaac.get_prim_at_path(self._prim_path)
+            out: list[dict[str, Any]] = []
+            for prim in _prim_range(Usd, root):
+                if not prim.HasAPI(UsdPhysics.CollisionAPI):
+                    continue
+                link = prim
+                while link.IsValid() and not link.HasAPI(UsdPhysics.RigidBodyAPI):
+                    link = link.GetParent()
+                entry: dict[str, Any] = {
+                    "path": str(prim.GetPath()),
+                    "type": str(prim.GetTypeName()),
+                    "link": str(link.GetPath()) if link.IsValid() else None,
+                    "enabled": bool(UsdPhysics.CollisionAPI(prim).GetCollisionEnabledAttr().Get()),
+                    "approximation": (
+                        str(UsdPhysics.MeshCollisionAPI(prim).GetApproximationAttr().Get())
+                        if prim.HasAPI(UsdPhysics.MeshCollisionAPI)
+                        else None
+                    ),
+                    "purpose": (
+                        str(UsdGeom.Imageable(prim).GetPurposeAttr().Get())
+                        if prim.IsA(UsdGeom.Imageable)
+                        else None
+                    ),
+                }
+                if PhysxSchema is not None and prim.HasAPI(PhysxSchema.PhysxCollisionAPI):
+                    physx = PhysxSchema.PhysxCollisionAPI(prim)
+                    entry["contact_offset_mm"] = float(physx.GetContactOffsetAttr().Get() or 0.0) * MM_PER_M
+                    entry["rest_offset_mm"] = float(physx.GetRestOffsetAttr().Get() or 0.0) * MM_PER_M
+                extent = (
+                    UsdGeom.Boundable(prim).GetExtentAttr().Get(time)
+                    if prim.IsA(UsdGeom.Boundable)
+                    else None
+                )
+                if link.IsValid() and extent is not None and len(extent) == 2:
+                    mesh_in_link = (
+                        UsdGeom.Xformable(prim).ComputeLocalToWorldTransform(time)
+                        * UsdGeom.Xformable(link).ComputeLocalToWorldTransform(time).GetInverse()
+                    )
+                    pos, quat = self._sim._isaac.SingleXFormPrim(str(link.GetPath())).get_world_pose()
+                    rotate = Gf.Matrix4d().SetRotate(
+                        Gf.Quatd(float(quat[0]), Gf.Vec3d(float(quat[1]), float(quat[2]), float(quat[3])))
+                    )
+                    translate = Gf.Matrix4d().SetTranslate(
+                        Gf.Vec3d(float(pos[0]), float(pos[1]), float(pos[2]))
+                    )
+                    world = mesh_in_link * rotate * translate
+                    corners = [
+                        world.Transform(Gf.Vec3d(x, y, z))
+                        for x in (extent[0][0], extent[1][0])
+                        for y in (extent[0][1], extent[1][1])
+                        for z in (extent[0][2], extent[1][2])
+                    ]
+                    entry["world_min_mm"] = [min(float(c[i]) for c in corners) * MM_PER_M for i in range(3)]
+                    entry["world_max_mm"] = [max(float(c[i]) for c in corners) * MM_PER_M for i in range(3)]
+                out.append(entry)
+            return out
+
+        return self._sim.run(_shapes)
 
     def link_world_poses(self) -> dict[str, tuple[Vec3, Quat]]:
         def _poses() -> dict[str, tuple[Vec3, Quat]]:
