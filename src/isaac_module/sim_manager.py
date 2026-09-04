@@ -1873,6 +1873,13 @@ def resolve_joint_indices(
 # never settled; 1e-2 rad/s (0.6 deg/s) is still far below any real motion.
 VEL_EPS_RAD_S = 1e-2
 SETTLE_TOL_RAD = math.radians(0.5)  # commanded-vs-measured gap that counts as arrived
+# Joint-space moves are executed as a time-synchronized straight line: every
+# joint's target advances so that all joints arrive together, the longest
+# travel at this speed unless the move caps it lower. Handing PhysX the final
+# targets directly let each joint run at its own speed, and the Cartesian
+# path between two planner waypoints became an arc: on the pick cell the
+# fingertips swept through the block during the approach (2026-09-04).
+SYNC_JOINT_VEL_RAD_S = math.radians(120.0)
 SETTLE_WINDOW_STEPS = 5  # consecutive physics steps the predicate must hold
 # A blocked arm under contact vibrates above VEL_EPS_RAD_S and never reads
 # still (GPU run 15: 30 s of pushing into a block), so a stall is also
@@ -2630,6 +2637,8 @@ class IsaacArmHandle(ArmHandle):
         # short-circuit it (None when no wait is in flight).
         self._active_settle: dict[str, Any] | None = None
         self._active_settle_lock = threading.Lock()
+        # in-flight synchronized interpolation (sim thread only)
+        self._interp: dict[str, Any] | None = None
 
     def refresh_dofs(self) -> None:
         """Re-read dof_names and re-resolve the named-joint indices after the
@@ -2715,18 +2724,73 @@ class IsaacArmHandle(ArmHandle):
         return self._sim.run(_get)
 
     def set_joint_targets(self, positions: list[float], max_vel_rad_s: float | None = None) -> None:
-        import numpy as np
-
         def _apply():
             self._apply_velocity_cap(max_vel_rad_s)
-            action = self._sim._isaac.ArticulationAction(
+            goal = [float(p) for p in positions]
+            current = [
+                float(p) for p in self._art.get_joint_positions(joint_indices=self._joint_indices)
+            ]
+            travel = max((abs(g - c) for g, c in zip(goal, current, strict=True)), default=0.0)
+            speed = max_vel_rad_s if max_vel_rad_s else self._sync_speed_rad_s()
+            self._targets = goal
+            if travel <= SETTLE_TOL_RAD or not speed or speed <= 0.0:
+                self._interp = None
+                self._apply_joint_positions(goal)
+                return
+            self._interp = {"start": current, "goal": goal, "elapsed": 0.0, "duration": travel / speed}
+            self._ensure_interp_callback()
+            self._apply_joint_positions(current)
+
+        self._sim.run(_apply)
+
+    def _apply_joint_positions(self, positions: list[float]) -> None:
+        import numpy as np
+
+        self._art.apply_action(
+            self._sim._isaac.ArticulationAction(
                 joint_positions=np.array(positions, dtype=float),
                 joint_indices=self._joint_indices,
             )
-            self._art.apply_action(action)
-            self._targets = list(positions)
+        )
 
-        self._sim.run(_apply)
+    def _sync_speed_rad_s(self) -> float:
+        """The synchronized speed for the longest-travelling joint: the
+        drive's smallest max joint velocity when it reports one, never more
+        than SYNC_JOINT_VEL_RAD_S."""
+        get_max = getattr(self._art, "get_max_joint_velocities", None)
+        if get_max is not None:
+            try:
+                values = [float(v) for v in get_max(joint_indices=self._joint_indices)]
+                lowest = min(values) if values else 0.0
+                if 0.0 < lowest < SYNC_JOINT_VEL_RAD_S:
+                    return lowest
+            except Exception:
+                LOGGER.exception("could not read the arm's max joint velocities")
+        return SYNC_JOINT_VEL_RAD_S
+
+    def _interp_callback_name(self) -> str:
+        return f"{getattr(self._art, 'name', '')}_interp"
+
+    def _ensure_interp_callback(self) -> None:
+        name = self._interp_callback_name()
+        if not self._sim.world.physics_callback_exists(name):
+            self._sim.world.add_physics_callback(name, self._on_interp_step)
+
+    def _on_interp_step(self, step_size: float) -> None:
+        """Sim thread, every physics step: advance the in-flight move's
+        target along the straight joint-space line so all joints arrive
+        together."""
+        interp = self._interp
+        if interp is None:
+            return
+        interp["elapsed"] += float(step_size)
+        fraction = min(1.0, interp["elapsed"] / interp["duration"])
+        positions = [
+            s + (g - s) * fraction for s, g in zip(interp["start"], interp["goal"], strict=True)
+        ]
+        self._apply_joint_positions(positions)
+        if fraction >= 1.0:
+            self._interp = None
 
     def _apply_velocity_cap(self, max_vel_rad_s: float | None) -> None:
         """ARM-13: cap the named joints' max velocity for this move via
@@ -2869,7 +2933,8 @@ class IsaacArmHandle(ArmHandle):
             self._sim.run(_remove)
 
     def stop(self) -> None:
-        # hold the current position
+        # hold the current position (and drop any in-flight interpolation)
+        self._sim.run(lambda: setattr(self, "_interp", None))
         current = self.get_joint_positions()
         self.set_joint_targets(current)
         # the new target IS the current position, so any in-flight

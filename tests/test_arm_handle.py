@@ -437,3 +437,60 @@ def test_isaac_settle_stalls_on_no_progress_even_while_vibrating():
     thread.join(timeout=2.0)
 
     assert result["outcome"] == SettleOutcome.STALLED
+
+
+
+# ---- time-synchronized joint interpolation (set_joint_targets) ----------------
+
+
+def _interp_step(sim, art):
+    return sim.world._callbacks[f"{art.name}_interp"]
+
+
+def test_set_joint_targets_moves_all_joints_along_a_straight_line_together():
+    """A planner validates the straight joint-space segment between two
+    waypoints. Handing PhysX the final targets let each joint run at its own
+    speed, so the executed path was an arc that swept the fingertips through
+    the block (2026-09-04). Every joint must reach its goal on the same step."""
+    handle, art, sim = _make_handle()
+    handle.set_joint_targets([1.0, 0.1], max_vel_rad_s=1.0)  # 1 s at 1 rad/s for the long joint
+    assert art.applied_actions[-1].joint_positions.tolist() == [0.0, 0.0]  # starts where it is
+    step = _interp_step(sim, art)
+    for k in range(1, 5):
+        step(0.25)
+        assert art.applied_actions[-1].joint_positions.tolist() == pytest.approx([0.25 * k, 0.025 * k])
+    assert handle._interp is None  # arrived: no further targets
+    n = len(art.applied_actions)
+    step(0.25)
+    assert len(art.applied_actions) == n
+
+
+def test_set_joint_targets_uses_sync_speed_when_the_move_sets_no_cap():
+    import math
+
+    from isaac_module.sim_manager import SYNC_JOINT_VEL_RAD_S
+
+    handle, art, sim = _make_handle()
+    handle.set_joint_targets([math.radians(60.0), 0.0])
+    assert handle._interp["duration"] == pytest.approx(math.radians(60.0) / SYNC_JOINT_VEL_RAD_S)
+
+
+def test_tiny_moves_apply_directly_without_interpolation():
+    handle, art, sim = _make_handle()
+    handle.set_joint_targets([0.001, 0.0], max_vel_rad_s=1.0)
+    assert handle._interp is None
+    assert art.applied_actions[-1].joint_positions.tolist() == pytest.approx([0.001, 0.0])
+
+
+def test_stop_drops_the_in_flight_interpolation_and_holds():
+    handle, art, sim = _make_handle()
+    handle.set_joint_targets([1.0, 0.0], max_vel_rad_s=1.0)
+    step = _interp_step(sim, art)
+    step(0.5)
+    assert art.positions[0] == pytest.approx(0.5)
+    handle.stop()
+    assert handle._interp is None
+    assert handle._targets == pytest.approx([0.5, 0.0])
+    n = len(art.applied_actions)
+    step(0.5)
+    assert len(art.applied_actions) == n  # nothing keeps driving toward the old goal
