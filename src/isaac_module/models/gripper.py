@@ -15,6 +15,8 @@ Attributes:
                                     (47 on 5.0, 45 on 4.5 - R-9)
   grab_timeout_sec (float)        - how long grab() waits for a stall or full closure, default 5
   holding_tolerance_deg (float)   - commanded-vs-measured gap that counts as holding, default 2
+  holding_effort_min_nm (float)   - Isaac only: measured drive effort (N m) at which the jaw counts
+                                    as holding; unset = the stall predicate
   mock_object_width_m (float)     - mock only: width of the object between the jaws
                                     (unset = nothing to grab, so grab() returns False)
 
@@ -218,17 +220,18 @@ class IsaacGripper(Gripper, EasyResource):  # type: ignore[misc]  # SDK: API is 
         open_rad, closed_rad = await asyncio.to_thread(handle.jaw_limits)
         jaw_rad = await asyncio.to_thread(handle.get_jaw)
         is_holding = await asyncio.to_thread(handle.is_holding)
+        effort = await asyncio.to_thread(handle.finger_effort)
         span = closed_rad - open_rad
         input_value = (jaw_rad - open_rad) / span if span else 0.0
-        return Gripper.HoldingStatus(
-            is_holding_something=is_holding,
-            meta={
-                "jaw_deg": math.degrees(jaw_rad),
-                "open_deg": math.degrees(open_rad),
-                "closed_deg": math.degrees(closed_rad),
-                "input": min(max(input_value, 0.0), 1.0),
-            },
-        )
+        meta: dict[str, ValueTypes] = {
+            "jaw_deg": math.degrees(jaw_rad),
+            "open_deg": math.degrees(open_rad),
+            "closed_deg": math.degrees(closed_rad),
+            "input": min(max(input_value, 0.0), 1.0),
+        }
+        if effort is not None:
+            meta["finger_effort_nm"] = effort
+        return Gripper.HoldingStatus(is_holding_something=is_holding, meta=meta)
 
     async def stop(self, **kwargs) -> None:
         await asyncio.to_thread(self._h().stop)
@@ -308,6 +311,15 @@ class IsaacGripper(Gripper, EasyResource):  # type: ignore[misc]  # SDK: API is 
             }
         if cmd == "tcp_pose":
             return await asyncio.to_thread(self._tcp_pose)
+        if cmd == "contacts":
+            contacts: list[ValueTypes] = list(await asyncio.to_thread(self._h().contacts))
+            return {"contacts": contacts}
+        if cmd == "collision_shapes":
+            prim = command.get("prim")
+            shapes: list[ValueTypes] = list(
+                await asyncio.to_thread(self._h().collision_shapes, str(prim) if prim else None)
+            )
+            return {"collision_shapes": shapes}
         raise ValueError(f"unknown command: {command}")
 
     def _tcp_pose(self) -> dict[str, ValueTypes]:

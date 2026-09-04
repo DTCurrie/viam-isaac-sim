@@ -813,6 +813,7 @@ class SimManager:
             "closed_deg",
             "grab_timeout_sec",
             "holding_tolerance_deg",
+            "holding_effort_min_nm",
             "mock_object_width_m",
             # arm mock test knob
             "mock_stall_fraction",
@@ -1527,6 +1528,8 @@ class SimManager:
         holding_tolerance_rad = math.radians(
             attrs.get("holding_tolerance_deg", DEFAULT_HOLDING_TOLERANCE_DEG)
         )
+        effort_min = attrs.get("holding_effort_min_nm")
+        holding_effort_min = None if effort_min is None else float(effort_min)
         handle = IsaacGripperHandle(
             self,
             arm._art,
@@ -1535,6 +1538,7 @@ class SimManager:
             closed_rad,
             holding_tolerance_rad,
             gripper_prim,
+            holding_effort_min=holding_effort_min,
         )
         handle.parent_prim_path = parent_prim
         # the gripper handle just released the passive drives; the arm's
@@ -1661,6 +1665,7 @@ class SimManager:
 # FINDINGS R-4 / OQ-4: the host the 5.0 2F-85 sub-references point at; it is
 # NXDOMAIN outside NVIDIA, so anything referencing it composes empty.
 UNRESOLVABLE_ASSET_HOST = "isaac-dev"
+MM_PER_M = 1000.0  # debug DoCommands report positions in mm (models/world.py has the same)
 ASSETS_PATH_MARKER = "/Isaac/"  # every asset path is rooted here under both hosts
 
 # R-4: the 2F-85 asset has no `*_pad` links; the fingertip geometry that must
@@ -1868,6 +1873,17 @@ def resolve_joint_indices(
 # never settled; 1e-2 rad/s (0.6 deg/s) is still far below any real motion.
 VEL_EPS_RAD_S = 1e-2
 SETTLE_TOL_RAD = math.radians(0.5)  # commanded-vs-measured gap that counts as arrived
+# Joint-space moves are executed as a time-synchronized straight line: every
+# joint's target advances so that all joints arrive together, the longest
+# travel at this speed unless the move caps it lower. Handing PhysX the final
+# targets directly let each joint run at its own speed, and the Cartesian
+# path between two planner waypoints became an arc: on the pick cell the
+# fingertips swept through the block during the approach (2026-09-04).
+SYNC_JOINT_VEL_RAD_S = math.radians(120.0)
+# While a path is in flight the commanded target never runs ahead of the
+# measured joints by more than this; the path pauses until the arm catches
+# up, and a pause that lasts STALL_NO_PROGRESS_STEPS is a stall (contact).
+PATH_LAG_TOL_RAD = math.radians(3.0)
 SETTLE_WINDOW_STEPS = 5  # consecutive physics steps the predicate must hold
 # A blocked arm under contact vibrates above VEL_EPS_RAD_S and never reads
 # still (GPU run 15: 30 s of pushing into a block), so a stall is also
@@ -2542,6 +2558,22 @@ class ArmHandle:
         own limit."""
         raise NotImplementedError
 
+    def follow_joint_path(
+        self, waypoints: list[list[float]], max_vel_rad_s: float | None = None
+    ) -> None:
+        """Execute a planned trajectory as ONE continuous piecewise-linear
+        joint path through ``waypoints`` (the motion service's plan), all
+        joints synchronized within each segment, without settling at
+        intermediate waypoints. The last waypoint becomes the settle target.
+        Settling at every waypoint cost 28 s for a 335 mm linear move whose
+        plan itself took 0.7 s (2026-09-04). Default: the last waypoint only."""
+        if waypoints:
+            self.set_joint_targets(waypoints[-1], max_vel_rad_s)
+
+    def path_progress(self) -> tuple[int, int] | None:
+        """(segments completed, segments total) of the path in flight, or None."""
+        return None
+
     def is_moving(self) -> bool:
         """True while any named joint's |velocity| > VEL_EPS_RAD_S OR any
         |target - measured| > SETTLE_TOL_RAD (ARM-12). A stalled arm that
@@ -2625,6 +2657,8 @@ class IsaacArmHandle(ArmHandle):
         # short-circuit it (None when no wait is in flight).
         self._active_settle: dict[str, Any] | None = None
         self._active_settle_lock = threading.Lock()
+        # in-flight synchronized interpolation (sim thread only)
+        self._interp: dict[str, Any] | None = None
 
     def refresh_dofs(self) -> None:
         """Re-read dof_names and re-resolve the named-joint indices after the
@@ -2710,18 +2744,119 @@ class IsaacArmHandle(ArmHandle):
         return self._sim.run(_get)
 
     def set_joint_targets(self, positions: list[float], max_vel_rad_s: float | None = None) -> None:
-        import numpy as np
+        self.follow_joint_path([list(positions)], max_vel_rad_s)
+
+    def follow_joint_path(
+        self, waypoints: list[list[float]], max_vel_rad_s: float | None = None
+    ) -> None:
+        if not waypoints:
+            return
 
         def _apply():
             self._apply_velocity_cap(max_vel_rad_s)
-            action = self._sim._isaac.ArticulationAction(
+            speed = max_vel_rad_s if max_vel_rad_s else self._sync_speed_rad_s()
+            current = [
+                float(p) for p in self._art.get_joint_positions(joint_indices=self._joint_indices)
+            ]
+            segments = []
+            start = current
+            for wp in waypoints:
+                goal = [float(v) for v in wp]
+                travel = max((abs(g - s) for g, s in zip(goal, start, strict=True)), default=0.0)
+                if travel > SETTLE_TOL_RAD and speed and speed > 0.0:
+                    segments.append({"start": start, "goal": goal, "duration": travel / speed})
+                start = goal
+            self._targets = start
+            if not segments:
+                self._interp = None
+                self._apply_joint_positions(start)
+                return
+            self._interp = {
+                "segments": segments,
+                "index": 0,
+                "elapsed": 0.0,
+                "commanded": current,
+                "lag_steps": 0,
+                "stalled": False,
+            }
+            self._ensure_interp_callback()
+            self._apply_joint_positions(current)
+
+        self._sim.run(_apply)
+
+    def path_progress(self) -> tuple[int, int] | None:
+        interp = self._interp
+        if interp is None:
+            return None
+        return int(interp["index"]), len(interp["segments"])
+
+    def _apply_joint_positions(self, positions: list[float]) -> None:
+        import numpy as np
+
+        self._art.apply_action(
+            self._sim._isaac.ArticulationAction(
                 joint_positions=np.array(positions, dtype=float),
                 joint_indices=self._joint_indices,
             )
-            self._art.apply_action(action)
-            self._targets = list(positions)
+        )
 
-        self._sim.run(_apply)
+    def _sync_speed_rad_s(self) -> float:
+        """The synchronized speed for the longest-travelling joint: the
+        drive's smallest max joint velocity when it reports one, never more
+        than SYNC_JOINT_VEL_RAD_S."""
+        get_max = getattr(self._art, "get_max_joint_velocities", None)
+        if get_max is not None:
+            try:
+                values = [float(v) for v in get_max(joint_indices=self._joint_indices)]
+                lowest = min(values) if values else 0.0
+                if 0.0 < lowest < SYNC_JOINT_VEL_RAD_S:
+                    return lowest
+            except Exception:
+                LOGGER.exception("could not read the arm's max joint velocities")
+        return SYNC_JOINT_VEL_RAD_S
+
+    def _interp_callback_name(self) -> str:
+        return f"{getattr(self._art, 'name', '')}_interp"
+
+    def _ensure_interp_callback(self) -> None:
+        name = self._interp_callback_name()
+        if not self._sim.world.physics_callback_exists(name):
+            self._sim.world.add_physics_callback(name, self._on_interp_step)
+
+    def _on_interp_step(self, step_size: float) -> None:
+        """Sim thread, every physics step: advance the in-flight path's
+        target along its current straight joint-space segment so all joints
+        arrive together; pause while the arm lags the target by more than
+        PATH_LAG_TOL_RAD, and flag a stall when the pause outlasts
+        STALL_NO_PROGRESS_STEPS."""
+        interp = self._interp
+        if interp is None:
+            return
+        measured = self._art.get_joint_positions(joint_indices=self._joint_indices)
+        lag = max(
+            (abs(float(m) - c) for m, c in zip(measured, interp["commanded"], strict=True)),
+            default=0.0,
+        )
+        if lag > PATH_LAG_TOL_RAD:
+            interp["lag_steps"] += 1
+            if interp["lag_steps"] >= STALL_NO_PROGRESS_STEPS:
+                interp["stalled"] = True
+            return  # hold the commanded target until the arm catches up
+        interp["lag_steps"] = 0
+        segment = interp["segments"][interp["index"]]
+        interp["elapsed"] += float(step_size)
+        fraction = min(1.0, interp["elapsed"] / segment["duration"])
+        positions = [
+            s + (g - s) * fraction
+            for s, g in zip(segment["start"], segment["goal"], strict=True)
+        ]
+        interp["commanded"] = positions
+        self._apply_joint_positions(positions)
+        if fraction >= 1.0:
+            interp["index"] += 1
+            interp["elapsed"] = 0.0
+            if interp["index"] >= len(interp["segments"]):
+                self._interp = None
 
     def _apply_velocity_cap(self, max_vel_rad_s: float | None) -> None:
         """ARM-13: cap the named joints' max velocity for this move via
@@ -2816,7 +2951,16 @@ class IsaacArmHandle(ArmHandle):
                 outcome.append(SettleOutcome.REACHED)
                 event.set()
                 return
-            if counters["still_off_target"] >= SETTLE_WINDOW_STEPS or (
+            path = self._interp
+            if path is not None:
+                # a path in flight: the error to the FINAL target need not
+                # shrink monotonically, so only the path's own lag flag stalls
+                counters["no_progress"] = 0
+                if path.get("stalled"):
+                    outcome.append(SettleOutcome.STALLED)
+                    event.set()
+                    return
+            elif counters["still_off_target"] >= SETTLE_WINDOW_STEPS or (
                 not is_within and counters["no_progress"] >= STALL_NO_PROGRESS_STEPS
             ):
                 outcome.append(SettleOutcome.STALLED)
@@ -2864,7 +3008,8 @@ class IsaacArmHandle(ArmHandle):
             self._sim.run(_remove)
 
     def stop(self) -> None:
-        # hold the current position
+        # hold the current position (and drop any in-flight interpolation)
+        self._sim.run(lambda: setattr(self, "_interp", None))
         current = self.get_joint_positions()
         self.set_joint_targets(current)
         # the new target IS the current position, so any in-flight
@@ -2912,8 +3057,13 @@ class IsaacArmHandle(ArmHandle):
         """ARM-15/ARM-16: a world.reset() resets the solver iteration count
         and controller gains to the prim's authored defaults, and can
         teleport the articulation to its default pose - re-apply the
-        snapshotted solver count/gains and re-command the last targets so a
-        reset mid-move holds position."""
+        snapshotted solver count/gains and hold the pose the reset put the
+        arm in. Re-commanding the pre-reset targets instead drove the arm
+        from the default pose back to wherever it had been, through props
+        the same reset had just teleported to their spawn poses: with the
+        fingertips pressing on the block at reset time the block was knocked
+        20-60 mm out of place (2026-09-04). A reset returns the whole cell to
+        its start, arm included; the caller moves the arm from there."""
 
         def _redo() -> None:
             set_iterations = getattr(self._art, "set_solver_position_iteration_count", None)
@@ -2922,12 +3072,12 @@ class IsaacArmHandle(ArmHandle):
             if self._gains is not None:
                 kps, kds = self._gains
                 self._art.get_articulation_controller().set_gains(kps=kps, kds=kds)
-            if self._targets is not None:
-                action = self._sim._isaac.ArticulationAction(
-                    joint_positions=np.array(self._targets, dtype=float),
-                    joint_indices=self._joint_indices,
-                )
-                self._art.apply_action(action)
+            self._interp = None
+            current = [
+                float(p) for p in self._art.get_joint_positions(joint_indices=self._joint_indices)
+            ]
+            self._targets = current
+            self._apply_joint_positions(current)
 
         self._sim.run(_redo)
 
@@ -3208,8 +3358,19 @@ class GripperHandle:
         raise NotImplementedError
 
     def stop(self) -> None:
-        """Hold the current jaw angle."""
+        """Freeze the jaw. While an object is held the grasp is kept (the
+        commanded target stays, so the squeeze does not relax); otherwise
+        the jaw holds its current angle. viam-server calls Stop on every
+        actuator a session commanded once that session lapses, so a stop
+        that relaxed the drive dropped the object two seconds after any
+        one-shot client (the CLI's ``part run``) exited."""
         raise NotImplementedError
+
+    def finger_effort(self) -> float | None:
+        """Measured drive-joint effort (N m on a revolute drive), or None when
+        the backend cannot read one (the mock; an Isaac build without
+        get_measured_joint_efforts)."""
+        return None
 
     def is_moving(self) -> bool:
         """True while the jaw is travelling; False once it has settled, whether
@@ -3253,6 +3414,20 @@ class GripperHandle:
         """XC-4: drop callbacks; the prim stays attached to the arm."""
         return None
 
+    def contacts(self) -> list[dict[str, Any]]:
+        """Debug: the contact pairs involving the gripper's links in the
+        latest physics step (PhysX contact reports): both actor paths, which
+        side is the gripper, and the contact points (mm, world), normals,
+        impulses and separations. The mock has no physics and returns []."""
+        return []
+
+    def collision_shapes(self, prim_path: str | None = None) -> list[dict[str, Any]]:
+        """Debug: every collider (and, marked, every visual mesh) under
+        ``prim_path`` (default: the gripper prim): path, rigid link,
+        approximation, enabled, contact/rest offsets, and its world AABB in
+        mm from the physics-aware link pose. The mock returns []."""
+        return []
+
 
 class IsaacGripperHandle(GripperHandle):
     """Drives the finger_joint DOF of the ARM's articulation: the gripper is
@@ -3268,6 +3443,7 @@ class IsaacGripperHandle(GripperHandle):
         closed_rad: float,
         holding_tolerance_rad: float,
         prim_path: str,
+        holding_effort_min: float | None = None,
     ) -> None:
         self._sim = sim
         self._art = articulation
@@ -3275,7 +3451,15 @@ class IsaacGripperHandle(GripperHandle):
         self._open_rad = open_rad
         self._closed_rad = closed_rad
         self._holding_tolerance_rad = holding_tolerance_rad
+        # holding_effort_min_nm: when set and the articulation reports measured
+        # joint efforts, is_holding() reads the drive's effort instead of the
+        # stall window (a contact measurement rather than a position guess)
+        self._holding_effort_min = holding_effort_min
+        self._effort_warned = False
         self._prim_path = prim_path
+        # debug contact reports (contacts()): subscribed on first use
+        self._contact_sub: Any = None
+        self._last_contacts: list[dict[str, Any]] = []
         # set by _create_gripper_isaac: the link base_link is bolted to
         self.parent_prim_path: str | None = None
         dof_names = list(articulation.dof_names)
@@ -3338,22 +3522,22 @@ class IsaacGripperHandle(GripperHandle):
 
         return self._sim.run(_get)
 
+    def _apply_target(self, rad: float) -> None:
+        """Command the drive joint and reset the stall window. Sim thread only."""
+        # finger_joint only: the linkage carries the passive joints
+        action = self._sim._isaac.ArticulationAction(
+            joint_positions=np.array([rad], dtype=float),
+            joint_indices=[self._idx],
+        )
+        self._art.apply_action(action)
+        self._target = rad
+        self._best_gap_rad = None
+        self._no_progress_count = 0
+        self._held_latch = False
+
     def set_jaw(self, rad: float) -> None:
         rad = min(max(rad, self._open_rad), self._closed_rad)
-
-        def _set() -> None:
-            # finger_joint only: the linkage carries the passive joints
-            action = self._sim._isaac.ArticulationAction(
-                joint_positions=np.array([rad], dtype=float),
-                joint_indices=[self._idx],
-            )
-            self._art.apply_action(action)
-            self._target = rad
-            self._best_gap_rad = None
-            self._no_progress_count = 0
-            self._held_latch = False
-
-        self._sim.run(_set)
+        self._sim.run(lambda: self._apply_target(rad))
 
     def open(self) -> None:
         self.set_jaw(self._open_rad)
@@ -3362,7 +3546,13 @@ class IsaacGripperHandle(GripperHandle):
         self.set_jaw(self._closed_rad)
 
     def stop(self) -> None:
-        self.set_jaw(self.get_jaw())
+        def _stop() -> None:
+            if self._is_holding_locked():
+                return  # keep the grasp: the commanded target stays
+            measured = float(self._art.get_joint_positions(joint_indices=[self._idx])[0])
+            self._apply_target(measured)
+
+        self._sim.run(_stop)
 
     def _gap_and_stall(self) -> tuple[float, bool]:
         """(|target - measured|, stalled): the jaw is stalled when the gap has
@@ -3396,12 +3586,39 @@ class IsaacGripperHandle(GripperHandle):
 
         return self._sim.run(_check)
 
-    def is_holding(self) -> bool:
-        def _check() -> bool:
-            gap, stalled = self._gap_and_stall()
-            return (stalled or self._held_latch) and gap > self._holding_tolerance_rad
+    def _finger_effort_locked(self) -> float | None:
+        """|measured drive-joint effort|, or None when unreadable. Sim thread only."""
+        read = getattr(self._art, "get_measured_joint_efforts", None)
+        if read is None:
+            return None
+        try:
+            return abs(float(read(joint_indices=[self._idx])[0]))
+        except Exception:
+            if not self._effort_warned:
+                self._effort_warned = True
+                LOGGER.exception("could not read the gripper drive joint's measured effort")
+            return None
 
-        return self._sim.run(_check)
+    def _is_holding_locked(self) -> bool:
+        """Sim thread only. With holding_effort_min_nm configured and the
+        drive effort readable: the drive is pushing at least that hard while
+        the jaw sits short of fully closed - a contact measurement that does
+        not depend on the commanded target, so it survives stop(). Otherwise
+        the ARM-4 stall predicate."""
+        gap, stalled = self._gap_and_stall()
+        if self._holding_effort_min is not None:
+            effort = self._finger_effort_locked()
+            if effort is not None:
+                measured = float(self._art.get_joint_positions(joint_indices=[self._idx])[0])
+                short_of_closed = self._closed_rad - measured > self._holding_tolerance_rad
+                return short_of_closed and effort >= self._holding_effort_min
+        return (stalled or self._held_latch) and gap > self._holding_tolerance_rad
+
+    def is_holding(self) -> bool:
+        return self._sim.run(self._is_holding_locked)
+
+    def finger_effort(self) -> float | None:
+        return self._sim.run(self._finger_effort_locked)
 
     def dof_names(self) -> list[str]:
         def _names() -> list[str]:
@@ -3427,8 +3644,160 @@ class IsaacGripperHandle(GripperHandle):
     def release(self) -> None:
         """XC-4: the gripper drives a DOF of the arm's articulation and owns
         no scene-registry entry or physics callback of its own (post_reset is
-        an XC-5 hook, not a physics callback) - nothing to release."""
+        an XC-5 hook, not a physics callback); only the debug contact-report
+        subscription, if contacts() was ever called."""
+        self._contact_sub = None
         return None
+
+    # ---- debug: what is the gripper touching, and with what shapes? ----
+
+    def _ensure_contact_reports(self) -> None:
+        """Sim thread. Apply PhysxContactReportAPI to every rigid link under
+        the gripper (PhysX reports a pair when either actor carries the API)
+        and subscribe to the simulation's contact report events, once."""
+        if self._contact_sub is not None:
+            return
+        from omni.physx import get_physx_simulation_interface
+        from pxr import PhysxSchema, Usd, UsdPhysics
+
+        root = self._sim._isaac.get_prim_at_path(self._prim_path)
+        applied = 0
+        for prim in _prim_range(Usd, root):
+            if prim.IsInstanceProxy() or not prim.HasAPI(UsdPhysics.RigidBodyAPI):
+                continue
+            api = PhysxSchema.PhysxContactReportAPI.Apply(prim)
+            api.CreateThresholdAttr().Set(0.0)
+            applied += 1
+        self._contact_sub = get_physx_simulation_interface().subscribe_contact_report_events(
+            self._on_contact_report
+        )
+        LOGGER.info("gripper contact reports enabled on %d links under %s", applied, self._prim_path)
+
+    def _on_contact_report(self, contact_headers: Any, contact_data: Any) -> None:
+        from pxr import PhysicsSchemaTools
+
+        def path_of(handle: Any) -> str:
+            return str(PhysicsSchemaTools.intToSdfPath(handle))
+
+        out: list[dict[str, Any]] = []
+        for header in contact_headers:
+            kind = str(getattr(header, "type", "")).rsplit(".", 1)[-1]
+            if "LOST" in kind:
+                continue
+            actor0, actor1 = path_of(header.actor0), path_of(header.actor1)
+            gripper_is_0 = actor0.startswith(self._prim_path)
+            start = int(header.contact_data_offset)
+            points = []
+            for i in range(start, start + int(header.num_contact_data)):
+                d = contact_data[i]
+                points.append(
+                    {
+                        "position_mm": [float(v) * MM_PER_M for v in d.position],
+                        "normal": [float(v) for v in d.normal],
+                        "impulse": [float(v) for v in d.impulse],
+                        "separation_mm": float(d.separation) * MM_PER_M,
+                    }
+                )
+            out.append(
+                {
+                    "type": kind,
+                    "gripper_link": actor0 if gripper_is_0 else actor1,
+                    "gripper_collider": path_of(header.collider0 if gripper_is_0 else header.collider1),
+                    "other": actor1 if gripper_is_0 else actor0,
+                    "other_collider": path_of(header.collider1 if gripper_is_0 else header.collider0),
+                    "points": points,
+                }
+            )
+        self._last_contacts = out
+
+    def contacts(self) -> list[dict[str, Any]]:
+        def _read() -> list[dict[str, Any]]:
+            try:
+                self._ensure_contact_reports()
+            except Exception as exc:
+                LOGGER.exception("gripper contact reports unavailable")
+                return [{"error": f"contact reports unavailable: {exc}"}]
+            return list(self._last_contacts)
+
+        return self._sim.run(_read)
+
+    def collision_shapes(self, prim_path: str | None = None) -> list[dict[str, Any]]:
+        """Every Boundable prim under ``prim_path`` (default: the gripper) that
+        is a collider, plus, for comparison, non-collider meshes marked
+        ``visual: False``; world AABBs from the physics-aware link pose."""
+        def _shapes() -> list[dict[str, Any]]:
+            from pxr import Gf, Usd, UsdGeom, UsdPhysics
+
+            try:
+                from pxr import PhysxSchema
+            except Exception:
+                PhysxSchema = None  # noqa: N806
+            time = Usd.TimeCode.Default()
+            root = self._sim._isaac.get_prim_at_path(prim_path or self._prim_path)
+            out: list[dict[str, Any]] = []
+            for prim in _prim_range(Usd, root):
+                is_collider = prim.HasAPI(UsdPhysics.CollisionAPI)
+                if not is_collider and not prim.IsA(UsdGeom.Gprim):
+                    continue
+                link = prim
+                while link.IsValid() and not link.HasAPI(UsdPhysics.RigidBodyAPI):
+                    link = link.GetParent()
+                entry: dict[str, Any] = {
+                    "path": str(prim.GetPath()),
+                    "type": str(prim.GetTypeName()),
+                    "link": str(link.GetPath()) if link.IsValid() else None,
+                    "collider": is_collider,
+                    "enabled": (
+                        bool(UsdPhysics.CollisionAPI(prim).GetCollisionEnabledAttr().Get())
+                        if is_collider
+                        else False
+                    ),
+                    "approximation": (
+                        str(UsdPhysics.MeshCollisionAPI(prim).GetApproximationAttr().Get())
+                        if prim.HasAPI(UsdPhysics.MeshCollisionAPI)
+                        else None
+                    ),
+                    "purpose": (
+                        str(UsdGeom.Imageable(prim).GetPurposeAttr().Get())
+                        if prim.IsA(UsdGeom.Imageable)
+                        else None
+                    ),
+                }
+                if PhysxSchema is not None and prim.HasAPI(PhysxSchema.PhysxCollisionAPI):
+                    physx = PhysxSchema.PhysxCollisionAPI(prim)
+                    entry["contact_offset_mm"] = float(physx.GetContactOffsetAttr().Get() or 0.0) * MM_PER_M
+                    entry["rest_offset_mm"] = float(physx.GetRestOffsetAttr().Get() or 0.0) * MM_PER_M
+                extent = (
+                    UsdGeom.Boundable(prim).GetExtentAttr().Get(time)
+                    if prim.IsA(UsdGeom.Boundable)
+                    else None
+                )
+                if extent is not None and len(extent) == 2:
+                    pose_prim = link if link.IsValid() else prim
+                    mesh_in_link = (
+                        UsdGeom.Xformable(prim).ComputeLocalToWorldTransform(time)
+                        * UsdGeom.Xformable(pose_prim).ComputeLocalToWorldTransform(time).GetInverse()
+                    )
+                    pos, quat = self._sim._isaac.SingleXFormPrim(str(pose_prim.GetPath())).get_world_pose()
+                    rotate = Gf.Matrix4d().SetRotate(
+                        Gf.Quatd(float(quat[0]), Gf.Vec3d(float(quat[1]), float(quat[2]), float(quat[3])))
+                    )
+                    translate = Gf.Matrix4d().SetTranslate(
+                        Gf.Vec3d(float(pos[0]), float(pos[1]), float(pos[2]))
+                    )
+                    world = mesh_in_link * rotate * translate
+                    corners = [
+                        world.Transform(Gf.Vec3d(x, y, z))
+                        for x in (extent[0][0], extent[1][0])
+                        for y in (extent[0][1], extent[1][1])
+                        for z in (extent[0][2], extent[1][2])
+                    ]
+                    entry["world_min_mm"] = [min(float(c[i]) for c in corners) * MM_PER_M for i in range(3)]
+                    entry["world_max_mm"] = [max(float(c[i]) for c in corners) * MM_PER_M for i in range(3)]
+                out.append(entry)
+            return out
+
+        return self._sim.run(_shapes)
 
     def link_world_poses(self) -> dict[str, tuple[Vec3, Quat]]:
         def _poses() -> dict[str, tuple[Vec3, Quat]]:
@@ -3585,10 +3954,18 @@ class MockGripperHandle(GripperHandle):
     def stop(self) -> None:
         with self._lock:
             now = time.monotonic()
+            if self._grasp_locked(now):
+                return  # keep the grasp: the commanded target stays
             current = self._jaw_at(now)
             self._start = current
             self._target = current
             self._t0 = now
+
+    def _grasp_locked(self, now: float) -> bool:
+        """The jaw has arrived on an object short of its target (lock held)."""
+        if now < self._arrival_time():
+            return False
+        return abs(self._target - self._effective_target()) > self.holding_tolerance_rad
 
     def is_moving(self) -> bool:
         with self._lock:
@@ -3639,6 +4016,14 @@ class MockGripperHandle(GripperHandle):
 WARMUP_RETRIES = 30
 WARMUP_SLEEP_S = 1.0 / 60.0
 WARMUP_MESSAGE = "no frame available yet - is the simulation playing?"
+# The renderer's first frames after a boot lag the simulation by seconds (RTX
+# shader warm-up): the first one or two wrist-camera reads showed the scene
+# from before the arm had moved, and a block was located a metre off
+# (2026-09-04). A frame whose rendering time trails the simulation clock by
+# more than this is served to nobody; get_frame's retry loop waits for a
+# fresh one.
+STALE_FRAME_S = 0.25
+STALE_MESSAGE = "the latest rendered frame is older than the simulation clock - renderer warming up"
 
 
 class IsaacCameraHandle(CameraHandle):
@@ -3671,6 +4056,9 @@ class IsaacCameraHandle(CameraHandle):
         if cached is not None and cached.sim_time == sim_time:
             return cached
 
+        rendering_time = self._rendering_time()
+        if rendering_time is not None and sim_time - rendering_time > STALE_FRAME_S:
+            raise NoFrameYetError(STALE_MESSAGE)
         rgba = self._cam.get_rgba()
         if rgba is None or rgba.size == 0:
             raise NoFrameYetError(WARMUP_MESSAGE)
@@ -3689,6 +4077,20 @@ class IsaacCameraHandle(CameraHandle):
         frame = Frame(rgb=rgb, depth=depth, sim_time=sim_time)
         self._cached_frame = frame
         return frame
+
+    def _rendering_time(self) -> float | None:
+        """Simulation time of the frame the camera would return now, from
+        Isaac's get_current_frame() ("rendering_time"); None when the API or
+        the key is unavailable, in which case no staleness check is made."""
+        read = getattr(self._cam, "get_current_frame", None)
+        if read is None:
+            return None
+        try:
+            info = read()
+            value = info.get("rendering_time") if isinstance(info, dict) else None
+            return None if value is None else float(value)
+        except Exception:
+            return None
 
     def get_frame(self) -> Frame:
         last_error: NoFrameYetError | None = None

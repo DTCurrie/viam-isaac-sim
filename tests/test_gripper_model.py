@@ -222,3 +222,14 @@ def test_tcp_pose_do_command_measures_the_configured_offset_in_mock(world):
     assert out["jaw_gap_mm"] == pytest.approx(85.0)
     assert out["fingertip_reach_mm"] == pytest.approx(115.0 + 19.0)
     assert set(out) >= {"parent", "left_inner_finger", "right_inner_finger", "fingertips"}
+
+
+def test_debug_commands_are_empty_in_the_mock(world):
+    _make_arm(world, "debug-arm")
+    gripper = _make_gripper(world, "debug-arm", "debug-gripper")
+
+    async def scenario():
+        assert await gripper.do_command({"command": "contacts"}) == {"contacts": []}
+        assert await gripper.do_command({"command": "collision_shapes"}) == {"collision_shapes": []}
+
+    asyncio.run(scenario())

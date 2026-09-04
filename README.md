@@ -121,6 +121,7 @@ translation/orientation become the camera's local pose on the link.
 | `boot_timeout_sec` | `300` | Isaac Sim can take a while on first boot |
 | `kit_log_level` | `"warning"` | kit console verbosity |
 | `props` | `[]` | objects spawned into the scene at boot, see below |
+| `oracle_commands` | `true` | serve the ground-truth `DoCommand`s (`prop_geometries`, `spawn_prop`, `set_prop_pose`, `randomize_props`); `false` refuses them, for a cell whose callers must perceive the scene through the cameras |
 | `lighting` | _unset_ | `{"dome": {"intensity": 1000, "color": [1, 1, 1]}, "sphere_intensity": 30000}` - both keys optional, unset leaves the stage's lights alone. The default stage has a single 100 000-intensity sphere light, so a dome light is useful to even out colour for detection |
 | `render` | _unset_ | render-cost levers applied at boot, best-effort: `{"motion_bvh": bool, "disable_viewport_updates": bool}` - both keys optional, unset leaves the renderer's defaults alone. `disable_viewport_updates: true` requires `livestream: false` (the livestream needs viewport updates) and is refused otherwise |
 
@@ -297,6 +298,7 @@ component this gripper is bolted to).
 | `closed_deg` | `47` on Isaac 5.0, `45` on 4.5 | drive-joint angle when fully closed (the Isaac-release value from `compat.caps()`) |
 | `grab_timeout_sec` | `5` | how long `grab()` waits for a stall or full closure |
 | `holding_tolerance_deg` | `2` | commanded-vs-measured gap that counts as holding |
+| `holding_effort_min_nm` | _unset_ | Isaac only: measured drive-joint effort (N m) at which the jaw counts as holding; unset = the stall check below |
 | `mock_object_width_m` | _unset_ | mock only: width of the object between the jaws (unset = nothing to grab, so `grab()` returns `false`) |
 
 **Frame** - unlike a mounted camera, the gripper's frame does not place its
@@ -314,10 +316,22 @@ link frame's **+Z**, so gripper and wrist-camera `frame.translation` offsets
 off an arm link both go along +Z.
 
 **API mapping** (viam-sdk `Gripper`, all eight abstract methods): `open` /
-`stop` / `is_moving` drive the handle directly. `grab()` closes the jaw,
-waits up to `grab_timeout_sec` for a stall or full closure, and returns
-`is_holding_something()` - both are stall-short-of-closure checks, not a
-force sensor. `get_current_inputs()` / `go_to_inputs([v])` use a single
+`is_moving` drive the handle directly. `stop` freezes the jaw, and while an
+object is held it keeps the grasp (the commanded target stays) rather than
+relaxing the drive: viam-server calls `Stop` on every actuator a session
+commanded once that session lapses, so a one-shot client such as the CLI's
+`part run` would otherwise drop the object two seconds after exiting.
+`grab()` closes the jaw, waits up to `grab_timeout_sec` for a stall or full
+closure, and returns `is_holding_something()`. By default both are
+stall-short-of-closure checks, not a force sensor; with
+`holding_effort_min_nm` set (and an Isaac build that reports measured joint
+efforts) holding means the drive is pushing at least that hard with the jaw
+short of fully closed, and `is_holding_something()` reports the effort as
+`finger_effort_nm` in its metadata. Measured on Isaac 5.0 with the 2F-85 and
+the pick cell's 60 mm, 50 g cube (2026-09-04): open and idle 0.04-0.06 N m,
+closed on nothing 0.004-0.008, closed on the cube resting on the table 0.25,
+the same grasp lifted 4.0, unchanged after `stop`. The pick cell sets
+`holding_effort_min_nm` to `0.15`. `get_current_inputs()` / `go_to_inputs([v])` use a single
 value in `[0, 1]`: `0` = open, `1` = closed. `GetKinematics` returns a
 1-link/0-joint SVA whose link is the 36 × 146 × 153 mm gripper box (flange to fingertips, centre 57.5 mm behind the
 TCP. `GetGeometries` returns that same single box.
@@ -337,7 +351,7 @@ prim.
 **Runtime attributes** re-apply live without a restart: `world`,
 `move_timeout_sec`, `max_linear_mps`, `max_angular_rps`, `arm`,
 `tcp_offset_m`, `open_deg`, `closed_deg`, `grab_timeout_sec`,
-`holding_tolerance_deg`, `mock_object_width_m`.
+`holding_tolerance_deg`, `holding_effort_min_nm`, `mock_object_width_m`.
 
 ### camera attributes
 
