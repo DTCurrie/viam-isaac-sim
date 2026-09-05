@@ -2580,6 +2580,12 @@ class ArmHandle:
         """(segments completed, segments total) of the path in flight, or None."""
         return None
 
+    def path_trace(self) -> list[dict[str, Any]]:
+        """Debug: one entry per physics step of the last path: commanded and
+        measured joint angles (deg), their worst gap, and the end effector's
+        measured world position (mm). The mock returns []."""
+        return []
+
     def is_moving(self) -> bool:
         """True while any named joint's |velocity| > VEL_EPS_RAD_S OR any
         |target - measured| > SETTLE_TOL_RAD (ARM-12). A stalled arm that
@@ -2665,6 +2671,8 @@ class IsaacArmHandle(ArmHandle):
         self._active_settle_lock = threading.Lock()
         # in-flight synchronized interpolation (sim thread only)
         self._interp: dict[str, Any] | None = None
+        # debug: per-physics-step trace of the last path (path_trace())
+        self._trace: list[dict[str, Any]] = []
 
     def refresh_dofs(self) -> None:
         """Re-read dof_names and re-resolve the named-joint indices after the
@@ -2785,6 +2793,7 @@ class IsaacArmHandle(ArmHandle):
                 "lag_steps": 0,
                 "stalled": False,
             }
+            self._trace = []
             self._ensure_interp_callback()
             self._apply_joint_positions(current)
 
@@ -2795,6 +2804,9 @@ class IsaacArmHandle(ArmHandle):
         if interp is None:
             return None
         return int(interp["index"]), len(interp["segments"])
+
+    def path_trace(self) -> list[dict[str, Any]]:
+        return self._sim.run(lambda: list(self._trace))
 
     def _apply_joint_positions(self, positions: list[float]) -> None:
         import numpy as np
@@ -2843,6 +2855,21 @@ class IsaacArmHandle(ArmHandle):
             (abs(float(m) - c) for m, c in zip(measured, interp["commanded"], strict=True)),
             default=0.0,
         )
+        if len(self._trace) < 4000:
+            ee = None
+            if self._ee is not None:
+                try:
+                    pos, _ = self._ee.get_world_pose()
+                    ee = [float(pos[0]) * MM_PER_M, float(pos[1]) * MM_PER_M, float(pos[2]) * MM_PER_M]
+                except Exception:
+                    ee = None
+            self._trace.append({
+                "segment": interp["index"],
+                "commanded_deg": [math.degrees(c) for c in interp["commanded"]],
+                "measured_deg": [math.degrees(float(m)) for m in measured],
+                "lag_deg": math.degrees(lag),
+                "ee_mm": ee,
+            })
         if lag > PATH_LAG_TOL_RAD:
             # hold the commanded target until the arm catches up; a lag that
             # stops shrinking is a stall (the settle rule's progress test)

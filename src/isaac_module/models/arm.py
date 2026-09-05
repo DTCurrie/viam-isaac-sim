@@ -478,6 +478,9 @@ class IsaacArm(Arm, EasyResource):  # type: ignore[misc]  # SDK: API is Final on
                 for entry in state
             ]
             return {"joints": joints}
+        if cmd == "path_trace":
+            trace: list[ValueTypes] = list(await asyncio.to_thread(self._h().path_trace))
+            return {"path_trace": trace}
         if cmd == "prim_world_pose":
             prim_path = command.get("prim_path") or self._default_ee_prim_path()
             if not isinstance(prim_path, str):
