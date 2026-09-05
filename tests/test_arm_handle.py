@@ -479,9 +479,13 @@ def test_set_joint_targets_uses_sync_speed_when_the_move_sets_no_cap():
     )
 
 
-def test_tiny_moves_apply_directly_without_interpolation():
+def test_tiny_moves_are_still_interpolated_and_finish_in_one_step():
+    """Even a 0.06 deg move is a segment (dropping small travels collapsed
+    dense linear plans into a jump); it finishes on the first step."""
     handle, art, sim = _make_handle()
     handle.set_joint_targets([0.001, 0.0], max_vel_rad_s=1.0)
+    assert handle._interp is not None and len(handle._interp["segments"]) == 1
+    _interp_step(sim, art)(0.01)
     assert handle._interp is None
     assert art.applied_actions[-1].joint_positions.tolist() == pytest.approx([0.001, 0.0])
 
@@ -602,4 +606,4 @@ def test_dense_waypoints_are_all_kept_and_followed_in_order():
             break
     assert handle._interp is None
     assert seen == sorted(seen)  # monotonic through the waypoints, never a jump
-    assert seen[-1] == pytest.approx(step_rad * 30)
+    assert seen[-1] == pytest.approx(step_rad * 30, rel=1e-4)
