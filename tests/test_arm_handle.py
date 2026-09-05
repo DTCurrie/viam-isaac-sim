@@ -579,3 +579,27 @@ def test_path_lead_never_exceeds_the_settle_tolerance():
     assert worst <= SETTLE_TOL_RAD + 10.0 * 0.01 + 1e-9  # one step of advance past the check
     assert handle._interp is None, "the path should complete once the drive keeps up"
     assert art.positions[0] == pytest.approx(1.0, abs=0.02)
+
+
+
+def test_dense_waypoints_are_all_kept_and_followed_in_order():
+    """A linear plan's waypoints are ~0.3 deg apart, under the settle
+    tolerance; every one must become a segment so the tool follows the line
+    instead of jumping to the last waypoint (2026-09-05)."""
+    import math
+
+    handle, art, sim = _make_handle()
+    step_rad = math.radians(0.3)
+    waypoints = [[step_rad * (i + 1), -step_rad * (i + 1)] for i in range(30)]
+    handle.follow_joint_path(waypoints, max_vel_rad_s=1.0)
+    assert handle.path_progress() == (0, 30)
+    step = _interp_step(sim, art)
+    seen = []
+    for _ in range(400):
+        step(0.001)
+        seen.append(round(art.applied_actions[-1].joint_positions[0], 6))
+        if handle._interp is None:
+            break
+    assert handle._interp is None
+    assert seen == sorted(seen)  # monotonic through the waypoints, never a jump
+    assert seen[-1] == pytest.approx(step_rad * 30)

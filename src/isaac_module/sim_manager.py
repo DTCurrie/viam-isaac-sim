@@ -2777,7 +2777,13 @@ class IsaacArmHandle(ArmHandle):
             for wp in waypoints:
                 goal = [float(v) for v in wp]
                 travel = max((abs(g - s) for g, s in zip(goal, start, strict=True)), default=0.0)
-                if travel > SETTLE_TOL_RAD and speed and speed > 0.0:
+                # keep EVERY waypoint, however small its travel: a linear plan's
+                # waypoints are closer together than the settle tolerance, and
+                # dropping them collapsed the whole path into one direct jump to
+                # the last waypoint (an unsynchronized arc that swung the tool
+                # ~15 mm off a straight-up retreat and dragged the released
+                # block, 2026-09-05)
+                if travel > 0.0 and speed and speed > 0.0:
                     segments.append({"start": start, "goal": goal, "duration": travel / speed})
                 start = goal
             self._targets = start
