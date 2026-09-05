@@ -229,12 +229,11 @@ class FakeSim:
         return fn()
 
 
-def _make_handle(dof_names=("j0", "j1"), ramp_s: float = 0.0) -> tuple[IsaacArmHandle, FakeArticulation, FakeSim]:
+def _make_handle(dof_names=("j0", "j1")) -> tuple[IsaacArmHandle, FakeArticulation, FakeSim]:
     art = FakeArticulation("fake-arm", list(dof_names))
     sim = FakeSim()
     sim.world.scene.objects[art.name] = art
     handle = IsaacArmHandle(sim, art, None, joint_names=None)
-    handle._ramp_s = ramp_s  # exact-stepping tests run without the speed ramp
     return handle, art, sim
 
 
@@ -580,23 +579,3 @@ def test_path_lead_never_exceeds_the_settle_tolerance():
     assert worst <= SETTLE_TOL_RAD + 10.0 * 0.01 + 1e-9  # one step of advance past the check
     assert handle._interp is None, "the path should complete once the drive keeps up"
     assert art.positions[0] == pytest.approx(1.0, abs=0.02)
-
-
-
-def test_path_speed_ramps_up_at_the_start_and_down_at_the_end():
-    """The first steps of a path advance slower than full speed, and so do the
-    last; the middle runs at full speed."""
-    handle, art, sim = _make_handle(ramp_s=0.3)
-    handle.follow_joint_path([[1.0, 0.0]], max_vel_rad_s=1.0)  # a 1 s path
-    step = _interp_step(sim, art)
-    positions = []
-    for _ in range(2000):  # the ramps make the path longer than its 1 s of full-speed travel
-        step(0.01)
-        positions.append(art.applied_actions[-1].joint_positions[0])
-        if handle._interp is None:
-            break
-    increments = [b - a for a, b in zip(positions, positions[1:])]
-    assert increments[0] < 0.005 < max(increments)  # slow start, full speed (0.01/step) later
-    assert max(increments) == pytest.approx(0.01, abs=1e-6)
-    assert increments[-2] < 0.006  # slow finish
-    assert positions[-1] == pytest.approx(1.0)
