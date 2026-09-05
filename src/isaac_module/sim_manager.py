@@ -1744,31 +1744,6 @@ def _pad_collision_status(
     return status
 
 
-def _speed_profile(path_s: float, ramp_s: float) -> dict[str, float]:
-    """Trapezoidal speed profile over wall time for a path that takes
-    ``path_s`` at full speed: accelerate linearly over ``ramp_s`` (covering
-    ramp_s/2 of path time), cruise, decelerate over ``ramp_s``. A path
-    shorter than one ramp's worth of travel gets a triangular profile with a
-    lower peak, so nothing ever starts or stops abruptly."""
-    if ramp_s <= 0.0 or path_s <= 0.0:
-        return {"peak": 1.0, "ramp": 0.0, "wall_total": path_s}
-    if path_s >= ramp_s:
-        return {"peak": 1.0, "ramp": ramp_s, "wall_total": path_s + ramp_s}
-    peak = math.sqrt(path_s / ramp_s)  # triangular: two ramps of length ramp_s*peak
-    return {"peak": peak, "ramp": ramp_s * peak, "wall_total": 2.0 * ramp_s * peak}
-
-
-def _speed_factor(profile: dict[str, Any], wall: float) -> float:
-    ramp, peak, total = profile["ramp"], profile["peak"], profile["wall_total"]
-    if ramp <= 0.0:
-        return 1.0
-    if wall < ramp:
-        return max(0.05, peak * wall / ramp)
-    if wall > total - ramp:
-        return max(0.05, peak * (total - wall) / ramp)
-    return peak
-
-
 def _prim_range(usd: Any, root_prim: Any) -> Any:
     """Traverse ``root_prim``'s subtree INCLUDING instance proxies: Isaac's
     robot assets mark link meshes instanceable, and a default PrimRange
@@ -2816,8 +2791,9 @@ class IsaacArmHandle(ArmHandle):
                 "commanded": current,
                 "lag_steps": 0,
                 "stalled": False,
-                "wall": 0.0,  # sim time spent advancing, for the trapezoidal speed profile
-                **_speed_profile(sum(seg["duration"] for seg in segments), self._ramp_s),
+                "time": 0.0,  # advanced (path) time, for the speed ramps
+                "total": sum(seg["duration"] for seg in segments),
+                "ramp_s": self._ramp_s,
             }
             self._ensure_interp_callback()
             self._apply_joint_positions(current)
@@ -2891,9 +2867,16 @@ class IsaacArmHandle(ArmHandle):
         interp["lag_steps"] = 0
         interp["best_lag"] = math.inf
         segment = interp["segments"][interp["index"]]
-        factor = _speed_factor(interp, interp["wall"])
-        interp["wall"] += float(step_size)
+        # speed ramps: fraction of full speed by path time from the start and
+        # path time remaining to the end
+        ramp = interp["ramp_s"]
+        factor = 1.0
+        if ramp > 0.0:
+            done = interp["time"]
+            remaining = interp["total"] - done
+            factor = max(0.1, min(1.0, done / ramp, remaining / ramp))
         advance = float(step_size) * factor
+        interp["time"] += advance
         interp["elapsed"] += advance
         fraction = min(1.0, interp["elapsed"] / segment["duration"])
         positions = [
