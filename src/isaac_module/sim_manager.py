@@ -1890,6 +1890,12 @@ SYNC_JOINT_VEL_RAD_S = math.radians(45.0)
 # 2026-09-04). A paused path whose arm makes no progress toward the target
 # for STALL_NO_PROGRESS_STEPS is a stall (contact).
 PATH_LAG_TOL_RAD = SETTLE_TOL_RAD
+# A path went from rest to full speed in one physics step and the arm jerked:
+# at the start of a straight-up retreat the tool swung 13 mm sideways, the open
+# pad hit the just-released block and dragged it 45 mm (2026-09-05). The path's
+# speed now ramps up over PATH_RAMP_S at the start and down over the same time
+# at the end.
+PATH_RAMP_S = 0.3
 SETTLE_WINDOW_STEPS = 5  # consecutive physics steps the predicate must hold
 # A blocked arm under contact vibrates above VEL_EPS_RAD_S and never reads
 # still (GPU run 15: 30 s of pushing into a block), so a stall is also
@@ -2665,6 +2671,7 @@ class IsaacArmHandle(ArmHandle):
         self._active_settle_lock = threading.Lock()
         # in-flight synchronized interpolation (sim thread only)
         self._interp: dict[str, Any] | None = None
+        self._ramp_s: float = PATH_RAMP_S
 
     def refresh_dofs(self) -> None:
         """Re-read dof_names and re-resolve the named-joint indices after the
@@ -2784,6 +2791,9 @@ class IsaacArmHandle(ArmHandle):
                 "commanded": current,
                 "lag_steps": 0,
                 "stalled": False,
+                "time": 0.0,  # advanced (path) time, for the speed ramps
+                "total": sum(seg["duration"] for seg in segments),
+                "ramp_s": self._ramp_s,
             }
             self._ensure_interp_callback()
             self._apply_joint_positions(current)
@@ -2857,7 +2867,17 @@ class IsaacArmHandle(ArmHandle):
         interp["lag_steps"] = 0
         interp["best_lag"] = math.inf
         segment = interp["segments"][interp["index"]]
-        interp["elapsed"] += float(step_size)
+        # speed ramps: fraction of full speed by path time from the start and
+        # path time remaining to the end
+        ramp = interp["ramp_s"]
+        factor = 1.0
+        if ramp > 0.0:
+            done = interp["time"]
+            remaining = interp["total"] - done
+            factor = max(0.1, min(1.0, done / ramp, remaining / ramp))
+        advance = float(step_size) * factor
+        interp["time"] += advance
+        interp["elapsed"] += advance
         fraction = min(1.0, interp["elapsed"] / segment["duration"])
         positions = [
             s + (g - s) * fraction
