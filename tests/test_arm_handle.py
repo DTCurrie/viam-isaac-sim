@@ -600,3 +600,15 @@ def test_path_speed_ramps_up_at_the_start_and_down_at_the_end():
     assert max(increments) == pytest.approx(0.01, abs=1e-6)
     assert increments[-2] < 0.006  # slow finish
     assert positions[-1] == pytest.approx(1.0)
+    assert len(positions) == pytest.approx(130, abs=3)  # 1 s of travel plus one 0.3 s ramp of lost time
+
+
+def test_short_paths_get_a_triangular_profile_and_still_finish():
+    handle, art, sim = _make_handle(ramp_s=0.3)
+    handle.follow_joint_path([[0.05, 0.0]], max_vel_rad_s=1.0)  # 0.05 s of travel
+    step = _interp_step(sim, art)
+    n = 0
+    while handle._interp is not None and n < 1000:
+        step(0.01); n += 1
+    assert art.applied_actions[-1].joint_positions[0] == pytest.approx(0.05)
+    assert n < 40  # ~0.25 s, not seconds
