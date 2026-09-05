@@ -263,6 +263,8 @@ class _JammingHandle:
     def set_jaw(self, rad):
         self.commands.append(f"set_jaw({math.degrees(rad):.0f})")
         self._jaw = rad
+        if getattr(self, "nudge_holds", False) and rad > 0.235:
+            self._holding = True  # a nudge past the jam bites
 
     def open(self):
         self.commands.append("open")
@@ -286,8 +288,25 @@ def test_grab_regrips_when_the_jaw_jams_short_of_closed_without_holding():
     gripper._handle = handle
     gripper._grab_timeout = 5.0
     assert asyncio.run(gripper.grab()) is True
+    # first regrip is a nudge past the jam; it does not bite in this fake, so the
+    # second regrip backs off and closes again, which does
     assert handle.closes == 2
-    assert handle.commands == ["close", f"set_jaw({_math.degrees(0.235 - _math.radians(8.0)):.0f})", "close"]
+    assert handle.commands == [
+        "close",
+        f"set_jaw({_math.degrees(0.235 + _math.radians(5.0)):.0f})",
+        f"set_jaw({_math.degrees(0.235 + _math.radians(5.0) - _math.radians(8.0)):.0f})",  # backs off from the nudged jaw
+        "close",
+    ]
+
+
+def test_grab_nudge_past_the_jam_bites():
+    gripper = IsaacGripper("gripper-nudge")
+    handle = _JammingHandle(jams=10)
+    handle.nudge_holds = True
+    gripper._handle = handle
+    gripper._grab_timeout = 5.0
+    assert asyncio.run(gripper.grab()) is True
+    assert handle.closes == 1 and handle.commands[-1].startswith("set_jaw(18")
 
 
 def test_grab_gives_up_after_the_regrip_budget():
@@ -296,4 +315,4 @@ def test_grab_gives_up_after_the_regrip_budget():
     gripper._handle = handle
     gripper._grab_timeout = 5.0
     assert asyncio.run(gripper.grab()) is False
-    assert handle.closes == 3  # one close plus GRAB_REGRIPS regrips
+    assert handle.closes == 2  # close, nudge, back off + close, nudge

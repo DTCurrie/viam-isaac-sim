@@ -81,8 +81,9 @@ DEFAULT_TCP_OFFSET_M = float(KNOWN_ASSETS[DEFAULT_GRIPPER_ASSET]["tcp_offset_m"]
 DEFAULT_GRAB_TIMEOUT_S = 5.0
 GRAB_POLL_INTERVAL_S = 1.0 / 120.0  # matches MockArmHandle.STEP_S; the sim's "physics step"
 JAW_CLOSED_TOLERANCE_RAD = 1e-3
-GRAB_REGRIPS = 2  # extra close attempts when the jaw stalls short of closed without holding
+GRAB_REGRIPS = 3  # extra attempts when the jaw stalls short of closed without holding: nudge, back off + close, nudge
 GRAB_REGRIP_BACKOFF_RAD = math.radians(8.0)
+GRAB_NUDGE_RAD = math.radians(5.0)
 GRAB_JAM_STILL_S = 0.25  # still and short of closed this long without holding = jammed
 JAW_BOX_MM: tuple[float, float, float] = KNOWN_ASSETS[DEFAULT_GRIPPER_ASSET]["jaw_box_mm"]
 # The box spans flange -> fingertips; in the gripper frame (origin = TCP) its
@@ -212,6 +213,21 @@ class IsaacGripper(Gripper, EasyResource):  # type: ignore[misc]  # SDK: API is 
         for attempt in range(GRAB_REGRIPS + 1):
             if attempt > 0:
                 jaw = await asyncio.to_thread(handle.get_jaw)
+                effort = await asyncio.to_thread(handle.finger_effort)
+                self.logger.info(
+                    "gripper %s: jaw stalled at %.1f deg without holding (effort %s); regrip %d/%d",
+                    self.name, math.degrees(jaw), None if effort is None else round(effort, 3),
+                    attempt, GRAB_REGRIPS,
+                )
+                if attempt % 2 == 1:
+                    # nudge: a target a few degrees past the jam breaks it where a
+                    # full close did not (an agent proved it: 11 deg jammed at no
+                    # effort, commanded 16 deg, stalled at 15.9 deg with 5.8 N m)
+                    await asyncio.to_thread(handle.set_jaw, jaw + GRAB_NUDGE_RAD)
+                    await self._wait_still(handle, deadline)
+                    if await asyncio.to_thread(handle.is_holding):
+                        return True
+                    continue
                 await asyncio.to_thread(handle.set_jaw, jaw - GRAB_REGRIP_BACKOFF_RAD)
                 await self._wait_still(handle, deadline)
             await asyncio.to_thread(handle.close)
