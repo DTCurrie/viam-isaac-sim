@@ -1179,6 +1179,7 @@ class SimManager:
             depth_enabled=bool(attrs.get("depth")),
             image_format=attrs.get("image_format", "png"),
             frequency=attrs.get("frequency"),
+            stream_fps=attrs.get("stream_fps"),
         )
 
     def _initialize_camera(self, name: str, cam: Any) -> None:
@@ -4081,6 +4082,7 @@ class IsaacCameraHandle(CameraHandle):
         depth_enabled: bool,
         image_format: str,
         frequency: float | None,
+        stream_fps: float | None = None,
         now: Callable[[], float] | None = None,
         sleep: Callable[[float], None] = time.sleep,
     ) -> None:
@@ -4089,6 +4091,14 @@ class IsaacCameraHandle(CameraHandle):
         self.depth_enabled = depth_enabled
         self.image_format = image_format
         self.frequency = frequency
+        # Rate reported to rdk for the WebRTC stream. rdk derives the encoder
+        # bitrate and the frame-pump ticker from the camera's reported frame
+        # rate, so a low capture `frequency` starves the encoder (5 Hz -> ~0.7
+        # Mbps at 720p, heavy pixelation). stream_fps lets an overview camera
+        # report a high rate for a sharp stream while the sim keeps rendering at
+        # the cheaper `frequency`. Not a capture rate: no divide-by-render
+        # constraint. (M4, 2026-09-07.)
+        self.stream_fps = stream_fps
         self._now = now or (lambda: float(sim.world.current_time))
         self._sleep = sleep
         self._cached_frame: Frame | None = None
