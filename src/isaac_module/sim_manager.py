@@ -1882,7 +1882,7 @@ SETTLE_TOL_RAD = math.radians(0.5)  # commanded-vs-measured gap that counts as a
 # 120 deg/s let the fingertips graze a block 12 mm away during a linear descent
 # (block nudged 2 mm and a few degrees; grasp closed on nothing, 2026-09-04);
 # 45 deg/s keeps a 335 mm transit under 4 s and the pads clear.
-SYNC_JOINT_VEL_RAD_S = math.radians(45.0)
+SYNC_JOINT_VEL_RAD_S = math.radians(60.0)
 # While a path is in flight the commanded target never runs ahead of the
 # measured joints by more than this: the path advances only as fast as the
 # drives track it, so the tool stays on the planner's line (3 deg of lead at
