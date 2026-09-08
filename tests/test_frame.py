@@ -68,19 +68,19 @@ def test_frame_wins_over_position_attr():
 
 
 def test_validate_frame_parent_world_ok():
-    cfg = _config("a", {"world": "sim-world", "asset": "ur20"}, parent="world")
+    cfg = _config("a", {"world": "isaac-world", "asset": "ur20"}, parent="world")
     deps, _ = IsaacArm.validate_config(cfg)
-    assert list(deps) == ["sim-world"]
+    assert list(deps) == ["isaac-world"]
 
 
 def test_validate_frame_parent_unset_ok():
-    cfg = _config("a", {"world": "sim-world", "asset": "ur20"})
+    cfg = _config("a", {"world": "isaac-world", "asset": "ur20"})
     deps, _ = IsaacArm.validate_config(cfg)
-    assert list(deps) == ["sim-world"]
+    assert list(deps) == ["isaac-world"]
 
 
 def test_validate_frame_parent_other_rejected():
-    cfg = _config("a", {"world": "sim-world", "asset": "ur20"}, parent="table")
+    cfg = _config("a", {"world": "isaac-world", "asset": "ur20"}, parent="table")
     with pytest.raises(ValueError, match="frame.parent"):
         IsaacArm.validate_config(cfg)
 
@@ -88,11 +88,11 @@ def test_validate_frame_parent_other_rejected():
 def test_validate_frame_parent_other_with_parent_prim_ok():
     cfg = _config(
         "a",
-        {"world": "sim-world", "parent_prim": "/World/pick_arm"},
+        {"world": "isaac-world", "parent_prim": "/World/pick_arm"},
         parent="pick-arm",
     )
     deps, _ = IsaacCamera.validate_config(cfg)
-    assert list(deps) == ["sim-world", "pick-arm"]
+    assert list(deps) == ["isaac-world", "pick-arm"]
 
 
 def test_apply_frame_with_parent_prim_writes_local_position():
@@ -130,27 +130,27 @@ def test_apply_frame_without_parent_prim_still_writes_position():
 def test_validate_parent_prim_with_component_frame_parent_ok():
     cfg = _config(
         "a",
-        {"world": "sim-world", "parent_prim": "/World/pick_arm/wrist_3_link"},
+        {"world": "isaac-world", "parent_prim": "/World/pick_arm/wrist_3_link"},
         parent="pick-arm",
     )
     deps, _ = IsaacCamera.validate_config(cfg)
-    assert list(deps) == ["sim-world", "pick-arm"]
+    assert list(deps) == ["isaac-world", "pick-arm"]
 
 
 def test_validate_parent_prim_with_link_frame_parent_ok():
     cfg = _config(
         "a",
-        {"world": "sim-world", "parent_prim": "/World/pick_arm/wrist_3_link"},
+        {"world": "isaac-world", "parent_prim": "/World/pick_arm/wrist_3_link"},
         parent="pick-arm:ee_link",
     )
     deps, _ = IsaacCamera.validate_config(cfg)
-    assert list(deps) == ["sim-world", "pick-arm"]
+    assert list(deps) == ["isaac-world", "pick-arm"]
 
 
 def test_validate_parent_prim_wrong_owner_rejected():
     cfg = _config(
         "a",
-        {"world": "sim-world", "parent_prim": "/World/pick_arm/wrist_3_link"},
+        {"world": "isaac-world", "parent_prim": "/World/pick_arm/wrist_3_link"},
         parent="other-arm",
     )
     with pytest.raises(ValueError, match="other-arm") as exc:
@@ -161,7 +161,7 @@ def test_validate_parent_prim_wrong_owner_rejected():
 def test_validate_parent_prim_with_world_parent_rejected():
     cfg = _config(
         "a",
-        {"world": "sim-world", "parent_prim": "/World/pick_arm"},
+        {"world": "isaac-world", "parent_prim": "/World/pick_arm"},
         parent="world",
     )
     with pytest.raises(ValueError):
@@ -169,7 +169,7 @@ def test_validate_parent_prim_with_world_parent_rejected():
 
 
 def test_validate_parent_prim_without_frame_rejected():
-    cfg = _config("a", {"world": "sim-world", "parent_prim": "/World/pick_arm"})
+    cfg = _config("a", {"world": "isaac-world", "parent_prim": "/World/pick_arm"})
     with pytest.raises(ValueError, match="frame.parent"):
         IsaacCamera.validate_config(cfg)
 
@@ -177,8 +177,26 @@ def test_validate_parent_prim_without_frame_rejected():
 def test_validate_parent_prim_not_under_world_ok():
     cfg = _config(
         "a",
-        {"world": "sim-world", "parent_prim": "/pick_arm/link"},
+        {"world": "isaac-world", "parent_prim": "/pick_arm/link"},
         parent="pick-arm",
     )
     deps, _ = IsaacCamera.validate_config(cfg)
-    assert list(deps) == ["sim-world", "pick-arm"]
+    assert list(deps) == ["isaac-world", "pick-arm"]
+
+
+def test_pose_attribute_beside_a_frame_is_rejected():
+    """A translation-less frame zeroes the spawn pose, so a position attribute
+    beside it must fail validation instead of spawning at the origin."""
+    config = ComponentConfig(
+        name="scene-cam", attributes=dict_to_struct({"position": [1.2, 1.2, 0.9]})
+    )
+    config.frame.parent = "world"
+    with pytest.raises(ValueError, match="position would be ignored because a frame is set"):
+        IsaacCamera.validate_config(config)
+
+
+def test_target_beside_a_frame_is_still_allowed():
+    config = ComponentConfig(name="scene-cam", attributes=dict_to_struct({"target": [0, 0, 0.5]}))
+    config.frame.parent = "world"
+    config.frame.translation.x = 1200
+    IsaacCamera.validate_config(config)

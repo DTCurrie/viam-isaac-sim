@@ -32,13 +32,26 @@ Known assets (usable via the `asset` attribute): `ur3e`, `ur5e`, `ur10`,
 `ur10e`, `ur16e`, `ur20`, `franka`, `jetbot`. Anything else can be loaded with
 `usd_path`, or attach to prims already in your stage with `prim_path`.
 
+## Simulation contract
+
+Simulation is hardware. Each sim model in this module implements the Viam API a real
+driver serves and stands in for that driver's model in a sim machine's config, until
+the real driver can run against a simulator itself. A swap changes `model` and
+`attributes` only. The world is named by simulator type, so a config says
+which simulator a resource runs against. `world` defaults to `isaac-world` on every
+model in this module. `simulates.json` at the repo root declares which real model
+strings this module stands in for, the attribute template for each, and which real
+attributes carry over. The full contract, including how a real machine's config
+becomes the config of a sim machine, is described in
+[`docs/SIMULATION.md`](docs/SIMULATION.md).
+
 ## Example machine config
 
 ```json
 {
   "components": [
     {
-      "name": "sim-world",
+      "name": "isaac-world",
       "api": "rdk:component:generic",
       "model": "viam:isaac-sim-devin:world",
       "attributes": {
@@ -52,7 +65,7 @@ Known assets (usable via the `asset` attribute): `ur3e`, `ur5e`, `ur10`,
       "model": "viam:isaac-sim-devin:arm",
       "frame": { "parent": "world" },
       "attributes": {
-        "world": "sim-world",
+        "world": "isaac-world",
         "asset": "ur20"
       }
     },
@@ -65,7 +78,7 @@ Known assets (usable via the `asset` attribute): `ur3e`, `ur5e`, `ur10`,
         "translation": { "x": 2000, "y": 2000, "z": 2000 }
       },
       "attributes": {
-        "world": "sim-world",
+        "world": "isaac-world",
         "target": [0, 0, 0.5],
         "width": 1280,
         "height": 720
@@ -80,7 +93,7 @@ Known assets (usable via the `asset` attribute): `ur3e`, `ur5e`, `ur10`,
         "translation": { "x": 1000, "y": 0, "z": 100 }
       },
       "attributes": {
-        "world": "sim-world",
+        "world": "isaac-world",
         "asset": "jetbot"
       }
     }
@@ -123,7 +136,7 @@ translation/orientation become the camera's local pose on the link.
 | `boot_timeout_sec` | `300` | Isaac Sim can take a while on first boot |
 | `kit_log_level` | `"warning"` | kit console verbosity |
 | `props` | `[]` | objects spawned into the scene at boot, see below |
-| `lighting` | _unset_ | `{"dome": {"intensity": 1000, "color": [1, 1, 1]}, "sphere_intensity": 30000}` - both keys optional, unset leaves the stage's lights alone. The default stage has a single 100 000-intensity sphere light, so a dome light is useful to even out colour for detection |
+| `lighting` | _unset_ | `{"dome": {"intensity": 1000, "color": [1, 1, 1]}, "sphere_intensity": 30000}` - both keys optional, unset leaves the stage's lights alone. The default stage has a single 100 000-intensity sphere light, so a dome light is useful to even out colour for detection Applied at boot only. A change takes effect after a part restart. |
 | `render` | _unset_ | render-cost levers applied at boot, best-effort: `{"motion_bvh": bool, "disable_viewport_updates": bool}` - both keys optional, unset leaves the renderer's defaults alone. `disable_viewport_updates: true` requires `livestream: false` (the livestream needs viewport updates) and is refused otherwise |
 
 Each entry in `props` is an object: `name` (string, snake_cased for the prim
@@ -194,6 +207,24 @@ The world also supports `DoCommand`:
   scatter" below)
 * `{"command": "clear_cell"}` -> `{"parked": [names]}` - re-parks all 18
   pool blocks
+* `{"command": "joint_state", "name": "<arm component>"}` -> `{"joints":
+  [{"name", "named", "position_deg", "velocity_deg_s", "target_deg"}]}` -
+  the named arm's per-joint state
+* `{"command": "dof_names", "name": "<arm or gripper component>", "all"?:
+  bool}` -> `{"dof_names": [...]}` - the named component's DOF names.
+  `"all": true` (arms only) returns every DOF of the articulation, including
+  anything attached under it, e.g. a gripper
+* `{"command": "prim_pose", "name": "<arm component>", "prim_path"?: "..."}`
+  -> `{"prim_path", "position_mm", "quaternion_wxyz", "orientation_vector"}`
+  - the world pose of a prim under the named arm, defaulting to that arm's
+  end-effector prim
+* `{"command": "tcp_pose", "name": "<gripper component>"}` -> measured link
+  poses plus a diagnostic comparing the configured `tcp_offset_m` against
+  the geometry the sim actually measures - calibration tooling for placing
+  a gripper's TCP
+* `{"command": "jaw_deg", "name": "<gripper component>"}` -> `{"jaw_deg",
+  "open_deg", "closed_deg"}` - the named gripper's current, open, and closed
+  jaw angles
 
 ### Units and conventions
 
@@ -230,7 +261,7 @@ block of `size` 0.05 sits with its centre at `z_top + 0.025`.
 
 | attribute | default | notes |
 |---|---|---|
-| `world` | _required_ | name of the world component |
+| `world` | `isaac-world` | name of the world component, defaults to this module's world name |
 | `asset` | _one of asset/usd_path/prim_path required_ | known asset, e.g. `"ur20"` |
 | `usd_path` | _one of asset/usd_path/prim_path required_ | arbitrary USD file or omniverse:// URL |
 | `prim_path` | _one of asset/usd_path/prim_path required_ | attach to an articulation already in the stage |
@@ -246,11 +277,14 @@ matches how a real arm driver reports its end position, and lets Viam's
 frame system (via the component's `frame` config) compose it into world
 frame itself.
 
-`MoveToJointPositions` / `GetJointPositions` work today. IK and motion
-planning are deliberately left to Viam (the motion service), not Isaac - the
-module's job is just to expose the simulated arm. `MoveToPosition` is
-**unimplemented by decision** and returns `UNIMPLEMENTED` - use the motion
-service instead.
+`MoveToJointPositions` / `GetJointPositions` work today. `MoveToPosition`
+solves inverse kinematics against the served kinematics file (SVA or URDF,
+the same bytes `GetKinematics` returns) from the arm's current joints, so
+the nearest solution wins. It then drives the joint path, and settle, stall
+and timeout behave exactly as a joint move does. A target already within
+1 mm and 0.06 degrees of the current pose is not moved to, matching the real
+UR driver. There is no collision awareness, the same as a real driver's
+direct move. Collision-free planning stays the motion service's job.
 
 `GetGeometries` returns `[]` by decision: rdk derives arm link geometry from
 `GetKinematics` (the SVA already carries the link capsules) and never calls
@@ -280,24 +314,28 @@ multi-waypoint trajectory, an intermediate waypoint that times out only
 warns and continues (it uses a loose tolerance and short deadline so the arm
 flows through it). An intermediate waypoint that stalls still raises
 `ABORTED` (an obstacle blocking the path won't clear itself). The final
-waypoint settles tight against the full move deadline.
+waypoint settles tight against the full move deadline. For `MoveToPosition`,
+a pose no joint solution reaches raises `INVALID_ARGUMENT`, and a solution
+that lands outside the SVA's declared joint limits raises `INVALID_ARGUMENT`
+as above. An arm with no kinematics file configured (no `kinematics_url` and
+no known asset kinematics) raises `FAILED_PRECONDITION`.
 
 **`MoveOptions`**: `max_vel_degs_per_sec_joints` (per-joint velocity limits,
 the min across joints) wins over the scalar `max_vel_degs_per_sec` when set.
 The acceleration fields and `max_tcp_speed` are logged once and not honoured.
 
-**DoCommand** `{"command": "all_dof_names"}` returns every DOF of the
-articulation (arm joints plus anything attached under it, e.g. a gripper).
-`{"command": "dof_names"}` stays just the arm's named joints.
+**DoCommand** answers no sim-only verb. The world component's `DoCommand`
+carries the arm's joint state, DOF names, and prim pose diagnostics, keyed
+by this arm's component name (see "world attributes" below).
 
 ### gripper attributes
 
-`world` (required), `arm` (required, name of the `viam:isaac-sim-devin:arm`
+`world` (default `isaac-world`), `arm` (required, name of the `viam:isaac-sim-devin:arm`
 component this gripper is bolted to).
 
 | attribute | default | notes |
 |---|---|---|
-| `world` | _required_ | name of the world component |
+| `world` | `isaac-world` | name of the world component, defaults to this module's world name |
 | `arm` | _required_ | name of the arm it is bolted to |
 | `asset` | `"robotiq_2f_85"` | known gripper asset |
 | `parent_prim` | `<arm prim>/wrist_3_link` | link it is bolted to |
@@ -324,11 +362,12 @@ arm, and the translation is the TCP offset along the arm's tool axis, e.g.:
 link frame's **+Z**, so gripper and wrist-camera `frame.translation` offsets
 off an arm link both go along +Z.
 
-**API mapping** (viam-sdk `Gripper`, all eight abstract methods): `open` /
-`stop` / `is_moving` drive the handle directly. `grab()` closes the jaw,
-waits up to `grab_timeout_sec` for a stall or full closure, and returns
-`is_holding_something()` - both are stall-short-of-closure checks, not a
-force sensor. `get_current_inputs()` / `go_to_inputs([v])` use a single
+**API mapping** (viam-sdk `Gripper`, all eight abstract methods): `stop` /
+`is_moving` drive the handle directly. `open()` commands the jaw open and
+blocks until it settles or the grab deadline passes, the same as `grab()`.
+`grab()` closes the jaw, waits up to `grab_timeout_sec` for a stall or full
+closure, and returns `is_holding_something()` - both are stall-short-of-closure
+checks, not a force sensor. `get_current_inputs()` / `go_to_inputs([v])` use a single
 value in `[0, 1]`: `0` = open, `1` = closed. `GetKinematics` returns a
 1-link/0-joint SVA whose link is the 36 × 146 × 153 mm gripper box (flange to fingertips, centre 57.5 mm behind the
 TCP. `GetGeometries` returns that same single box.
@@ -365,13 +404,13 @@ prim.
 
 ### camera attributes
 
-`world` (required), and either `prim_path` of an existing camera in your stage
+`world` (default `isaac-world`), and either `prim_path` of an existing camera in your stage
 or `position` plus `target` (aim-at point) or `orientation_rpy_deg` to create
 one.
 
 | attribute | default | notes |
 |---|---|---|
-| `world` | _required_ | name of the world component |
+| `world` | `isaac-world` | name of the world component, defaults to this module's world name |
 | `prim_path` | _unset_ | attach to an existing camera prim instead of spawning one |
 | `position` | _unset_ | `[x,y,z]` meters, fallback when no `frame` is set |
 | `target` | _unset_ | aim-at point, overrides orientation to point at it |
@@ -399,7 +438,8 @@ NamedImage("depth", image/vnd.viam.dep)]`, colour first, honouring
 `filter_source_names` (unknown names are dropped, so fewer images come back).
 `GetPointCloud` (depth cameras only) returns binary `pointcloud/pcd`, in
 metres, in the camera-optical frame (+X right, +Y down, +Z forward). Invalid
-points are dropped. `GetProperties` reports `supports_pcd` (true iff `depth`
+points are dropped. An encoded cloud over 32 MiB raises, the same
+message-size guard the RealSense module applies. `GetProperties` reports `supports_pcd` (true iff `depth`
 is set), real pinhole intrinsics (`fx = fy = W/(2·tan(hfov/2))`, e.g. 420.3 px
 at 848x480 @ 90.5°), `mime_types`, and `frame_rate`. `DoCommand
 {"command": "sample_color", "region": [x0, y0, x1, y1]}` returns
@@ -421,7 +461,7 @@ A wrist camera riding an arm link:
     "orientation": { "type": "ov_degrees", "value": { "x": 0, "y": 0, "z": 1, "th": 0 } }
   },
   "attributes": {
-    "world": "sim-world",
+    "world": "isaac-world",
     "parent_prim": "/World/pick_arm/wrist_3_link",
     "depth": true
   }
@@ -430,14 +470,19 @@ A wrist camera riding an arm link:
 
 ### base attributes
 
-`world` (required), `asset` (e.g. `jetbot`, which brings wheel defaults) or
+`world` (default `isaac-world`), `asset` (e.g. `jetbot`, which brings wheel defaults) or
 `usd_path`/`prim_path` plus `wheel_joints: [left, right]`, `wheel_radius`,
 `wheel_base`. `max_linear_mps` / `max_angular_rps` scale `SetPower`.
+
+`MoveStraight` with a velocity nearly zero stops the base and returns, the
+same no-op-stop semantics as rdk's wheeled base. `Spin` with an angle
+nearly zero raises, and `Spin` with a velocity nearly zero stops the base
+and returns, again matching the wheeled base.
 
 ## Pick-and-place fragment
 
 The `isaac-sim-pick-and-place` fragment (source in
-`fragments/pick-and-place.json`) is a ready-made three-table sorting cell
+`fragments/isaac-sim-block-sorting.json`) is a ready-made three-table sorting cell
 (`cell_layout.TABLE_CENTRES_MM`): a UR20 arm (`pick-arm`) on `table_arm`
 at the world origin, `table_source` carrying the scatter zone that pool
 blocks are drawn into, and `table_place` carrying six 300 mm color-coded
@@ -490,7 +535,7 @@ to the numbers below, so a machine that sets nothing boots the exact cell:
 arithmetic, so overriding it desyncs every other number derived from the
 table height across all three tables - each table's own `position[2]`
 (`h / 2`), the six place pads' and eighteen pool blocks' z (all resting on
-or above a table top), `pick-arm`'s frame z (`h` in mm), and `sim-world`'s
+or above a table top), `pick-arm`'s frame z (`h` in mm), and `isaac-world`'s
 own `frame.geometry` box if one is configured. Override the table height
 only via `fragment_mods` `$set` overrides on those other fields too, kept
 in sync by hand.
@@ -582,12 +627,12 @@ conventions" above for how `size`/`scale`/`position` work):
 `props` are visual/physical geometry in the sim. Whether the motion service
 plans around them depends on which of three routes you take:
 
-1. **Nothing extra - `sim-world`'s own `GetGeometries`.** The world
+1. **Nothing extra - `isaac-world`'s own `GetGeometries`.** The world
    component serves every prop's current box live via `GetGeometries` (world
    frame, millimetres, `label` = the prop's `name`), skipping any prop whose
    box is all zero (an unknown-size `"usd"` prop with no `box_dims` set - see
    "world attributes" above). A motion service that plans with the frame
-   system picks these up with no client code - active only when `sim-world`
+   system picks these up with no client code - active only when `isaac-world`
    itself has a `frame` (`{"parent": "world"}`, as the fragment configures).
    When the module added its own ground plane (no `usd_stage`), the served
    geometries also include a 10 x 10 m `floor` box whose top face is at
@@ -602,7 +647,7 @@ plans around them depends on which of three routes you take:
    name(s) and any all-zero box. `table_obstacle` in the same file is the
    worked example for the fragment's 1.2 x 0.8 m table top, centred at (600,
    0, 370) mm.
-3. **A static `frame.geometry` on `sim-world`.** For fixed furniture that
+3. **A static `frame.geometry` on `isaac-world`.** For fixed furniture that
    never moves, add its box as `frame.geometry` on the world component
    itself, in millimetres and centred on the frame origin. This route stays
    valid alongside the other two. Here the table box is 1200 x 800 x 740 mm
@@ -611,7 +656,7 @@ plans around them depends on which of three routes you take:
 
 ```json
 {
-  "name": "sim-world",
+  "name": "isaac-world",
   "api": "rdk:component:generic",
   "model": "viam:isaac-sim-devin:world",
   "frame": {
@@ -709,7 +754,7 @@ way):
   "api": "rdk:component:arm",
   "model": "viam:isaac-sim-devin:arm",
   "frame": { "parent": "world", "translation": { "x": 0, "y": 0, "z": 750 } },
-  "attributes": { "world": "sim-world", "asset": "ur20" }
+  "attributes": { "world": "isaac-world", "asset": "ur20" }
 }
 ```
 
@@ -724,7 +769,7 @@ this frame placement and Viam's kinematics agree with the simulated pose
 
 | attribute | default | notes |
 |---|---|---|
-| `world` | required | name of the `viam:isaac-sim-devin:world` component |
+| `world` | `isaac-world` | name of the world component, defaults to this module's world name (`viam:isaac-sim-devin:world`) |
 | `arm` | required | name of the arm component (boot ordering only - every motion goes through `motion`) |
 | `gripper` | required | name of the gripper component |
 | `camera` | required | name of the wrist camera |

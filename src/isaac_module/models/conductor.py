@@ -4,9 +4,9 @@ then nearest-first pick-verify-carry-place of every block onto its color's
 pad, with no python script in the loop.
 
 Attributes:
-  world (string, required)       - name of the viam:isaac-sim-devin:world component
+  world (string, default "isaac-world") - name of the viam:isaac-sim-devin:world component
   arm (string, required)         - name of the arm component (boot ordering only;
-                                    every motion goes through "motion", DEC-13)
+                                    every motion goes through "motion")
   gripper (string, required)     - name of the gripper component
   camera (string, required)      - name of the wrist camera
   side_camera (string, required) - name of the fixed side camera
@@ -20,8 +20,8 @@ Attributes:
 
 DoCommand:
   {"command": "start", "seed"?: int, "counts"?: {color: int}, "loops"?: int,
-    "continuous"?: bool} -> neither "loops" nor "continuous" is phase-4
-    single-shot (with "seed", scatters via the world's scatter_cell first;
+    "continuous"?: bool} -> neither "loops" nor "continuous" runs a single
+    sort (with "seed", scatters via the world's scatter_cell first;
     without, sorts the standing scatter), recorded in telemetry as one loop.
     "loops": N >= 1 runs N loops; "loops": 0 or "continuous": true runs
     until "stop". Loop mode always resets each loop (including the first)
@@ -43,12 +43,12 @@ DoCommand:
     transient failure (e.g. a dropped gRPC stream to viam-server) is
     recorded with an "error" field and skipped - the run continues with
     the next loop's seed, and only MAX_CONSECUTIVE_LOOP_ERRORS (3) such
-    loops in a row fail the run. Single-shot keeps phase-4 semantics: any
-    exception fails the run.
+    loops in a row fail the run. A single-shot run fails immediately on any
+    exception.
 
-Sorting is multi-pass (phase-4e): a dense scatter can leave a crowded block
-genuinely unpickable until a neighbour clears (GPU evidence - the gripper's
-descent corridor clips a still-present neighbour at typical spacing), so one
+Sorting is multi-pass: a dense scatter can leave a crowded block
+genuinely unpickable until a neighbour clears, since the gripper's
+descent corridor clips a still-present neighbour at typical spacing, so one
 pass = census -> resolve prims -> a clearance-ordered attempt loop (isolated
 blocks first, per ``sort_plan.clearance_ordered``), skipping any prim already
 placed or skipped-oversize in an earlier pass (oversize never shrinks, so it
@@ -67,7 +67,7 @@ first census, and once (best-effort, its own failure never changes the run's
 outcome) after the final pass, whether the run completed, stopped, or
 failed.
 
-DEC-4: vision alone decides what to pick and where (pose/size come only from
+Vision alone decides what to pick and where (pose/size come only from
 detections, never sim truth). The world's ``prop_geometries`` is consulted
 twice, both times for bookkeeping only: building planner obstacles, and (after
 the scan) resolving each detection to the real scattered prim nearest its
@@ -121,7 +121,7 @@ from pickcell.poses import (
     _pointing_down,
 )
 
-from .. import FAMILY, NAMESPACE, cell_layout
+from .. import DEFAULT_WORLD_NAME, FAMILY, NAMESPACE, cell_layout
 from ..run_log import (
     MAX_ATTEMPTS_PER_BLOCK,
     MAX_CONSECUTIVE_LOOP_ERRORS,
@@ -184,18 +184,17 @@ _POOL_PRIM_COLORS: dict[str, str] = {
     for index in range(1, cell_layout.POOL_BLOCKS_PER_COLOR + 1)
 }
 
-# GPU findings (phase-4 Notes): the arm covers up to 26% of a single census
-# frame and can occlude whole blocks; the arm also renders blue-gray and can
-# produce phantom segments at arm height. A kept census item's top face must
-# sit just above the table (clear of glints) and well below the arm's resting
-# height - a real block never measures taller than MAX_BLOCK_SIZE_MM.
+# The arm can cover up to 26% of a single census frame, occluding whole blocks, and it
+# renders blue-gray, which can produce phantom segments at arm height. A kept census item's
+# top face must sit just above the table (clear of glints) and well below the arm's resting
+# height, since a real block never measures taller than MAX_BLOCK_SIZE_MM.
 _CENSUS_MIN_TOP_Z_MM = cell_layout.TABLE_TOP_Z_MM + 20.0
 _CENSUS_MAX_TOP_Z_MM = cell_layout.TABLE_TOP_Z_MM + cell_layout.MAX_BLOCK_SIZE_MM + 15.0
 
-# arm silhouette occlusion (Notes): three census look poses instead of one -
-# the scatter-zone centre plus centre +/- this offset - so a block hidden
-# from one vantage is visible from another (the arm parks differently per
-# approach). The offset stays inside the safe-reach guard: planar radius from
+# Three census look poses instead of one - the scatter-zone centre plus centre
+# +/- this offset - so a block hidden from one vantage is visible from another
+# (the arm parks differently per approach). The offset stays inside the safe-reach
+# guard: planar radius from
 # the arm base is hypot(1275, 150) =~ 1284 mm, under MAX_PLANAR_REACH_MM
 # (1400 mm = cell_layout.REACH_SAFETY_FRACTION of UR20_REACH_MM).
 _CENSUS_LOOK_OFFSET_MM: tuple[float, float] = (250.0, 150.0)
@@ -232,7 +231,7 @@ def _census_look_points_mm() -> tuple[tuple[float, float], ...]:
 
 def _within_census_z_band(top_z_mm: float) -> bool:
     """Whether a detected top-face z is in the band real blocks occupy - too
-    low is a table glint, too high is the arm (vision-only, DEC-4)."""
+    low is a table glint, too high is the arm (vision-only)."""
     return _CENSUS_MIN_TOP_Z_MM <= top_z_mm <= _CENSUS_MAX_TOP_Z_MM
 
 
@@ -312,9 +311,9 @@ def _validate_size_range_mm(resource_name: str, value: object) -> tuple[float, f
 
 class _CameraFrameTransform:
     """Adapts the motion service's ``get_pose`` into the ``robot.transform_pose``
-    shape ``pickcell.detector.RealDetector`` expects. DEC-13 (every motion
-    through the motion service) plus the conductor never importing
-    ``viam.robot.client`` rules out the usual self-connected RobotClient this
+    shape ``pickcell.detector.RealDetector`` expects. Every motion goes through
+    the motion service, and the conductor never imports
+    ``viam.robot.client``, which rules out the usual self-connected RobotClient this
     library otherwise assumes; ``get_pose`` on the already-required motion
     dependency gives the same camera-to-world pose the frame system would."""
 
@@ -360,10 +359,9 @@ class IsaacConductor(Generic, EasyResource):  # type: ignore[misc]  # SDK: API i
         self._pass: int = 0
         self._seed: int | None = None
         self._size_range_mm: tuple[float, float] = DEFAULT_SIZE_RANGE_MM
-        # loop/telemetry state (phase 5): the rolling log and record-id
-        # counter live for the module's lifetime and are never reset by
-        # "start" (Notes ruling); the "_run_*" fields are run-cumulative and
-        # reset on every "start"
+        # The rolling log and record-id counter live for the module's lifetime
+        # and are never reset by "start"; the "_run_*" fields are run-cumulative and
+        # reset on every "start".
         self._rolling_log = RollingLog()
         self._record_id_counter: int = 0
         self._run_loops_requested: int | None = None
@@ -389,7 +387,8 @@ class IsaacConductor(Generic, EasyResource):  # type: ignore[misc]  # SDK: API i
         attrs: dict[str, Any] = dict(struct_to_dict(config.attributes))
         dependencies: list[str] = []
         for key in _DEPENDENCY_ATTRS:
-            value = attrs.get(key)
+            default = DEFAULT_WORLD_NAME if key == "world" else None
+            value = attrs.get(key, default)
             if not value or not isinstance(value, str):
                 raise ValueError(f'{config.name}: set the "{key}" attribute to a resource name')
             dependencies.append(value)
@@ -420,6 +419,7 @@ class IsaacConductor(Generic, EasyResource):  # type: ignore[misc]  # SDK: API i
         self, config: ComponentConfig, dependencies: Mapping[ResourceName, ResourceBase]
     ) -> None:
         attrs: dict[str, Any] = dict(struct_to_dict(config.attributes))
+        attrs.setdefault("world", DEFAULT_WORLD_NAME)
         by_name: dict[str, ResourceBase] = {
             rn.name: resource for rn, resource in dependencies.items()
         }
@@ -448,8 +448,6 @@ class IsaacConductor(Generic, EasyResource):  # type: ignore[misc]  # SDK: API i
         size_range = attrs.get("size_range_mm", list(DEFAULT_SIZE_RANGE_MM))
         self._size_range_mm = _validate_size_range_mm(config.name, size_range)
         self._camera_transform = _CameraFrameTransform(self._motion)
-
-    # -- background-task lifecycle -----------------------------------------
 
     async def do_command(
         self,
@@ -496,7 +494,7 @@ class IsaacConductor(Generic, EasyResource):  # type: ignore[misc]  # SDK: API i
             continuous = continuous_value is True or loops_int == 0
             loops_requested: int | None = 0 if continuous else loops_int
             # scatter_cell requires a seed; unattended continuous/loop runs
-            # should need no arguments (Notes ruling), so an absent seed
+            # should need no arguments, so an absent seed
             # falls back to a time-derived base, reported in status.run
             base_seed: int | None = seed if seed is not None else int(time.time()) % 1_000_000
         else:
@@ -565,8 +563,6 @@ class IsaacConductor(Generic, EasyResource):  # type: ignore[misc]  # SDK: API i
         if self._task is not None:
             await self._task
 
-    # -- the sort run itself --------------------------------------------
-
     async def _run(
         self,
         seed: int | None,
@@ -575,10 +571,10 @@ class IsaacConductor(Generic, EasyResource):  # type: ignore[misc]  # SDK: API i
         continuous: bool,
         base_seed: int | None,
     ) -> None:
-        # loops_requested is None for phase-4 single-shot semantics (exactly
+        # loops_requested is None for single-shot runs (exactly
         # one loop, no clear/scatter unless a seed was given); otherwise loop
         # mode always resets with clear_cell + scatter_cell, every loop
-        # including the first (Notes ruling)
+        # including the first.
         loop_mode = loops_requested is not None
         try:
             await self._park()
@@ -691,8 +687,8 @@ class IsaacConductor(Generic, EasyResource):  # type: ignore[misc]  # SDK: API i
         await self._world.do_command(scatter_command)
 
     async def _run_one_loop(self) -> list[PickRecord]:
-        """The phase-4 census -> clearance-ordered attempt loop, run once for
-        the current loop's standing scatter. Failure policy (phase 5): a
+        """The census -> clearance-ordered attempt loop, run once for
+        the current loop's standing scatter. Failure policy: a
         pipeline failure is retried on a later pass while its resolved
         prim's attempt count is under ``MAX_ATTEMPTS_PER_BLOCK``; at the cap
         it is terminal for this loop. Returns the ``PickRecord``s for every
@@ -957,7 +953,7 @@ class IsaacConductor(Generic, EasyResource):  # type: ignore[misc]  # SDK: API i
 
     def _build_detector(self, color: str) -> Detector:
         return RealDetector(
-            cast(Any, self._camera_transform),  # DEC-13: motion-service pose, not a RobotClient
+            cast(Any, self._camera_transform),  # motion-service pose, not a RobotClient
             self._vision_by_color[color],
             self._camera_name,
             None,

@@ -179,7 +179,7 @@ def _parse_args() -> Args:
     parser.add_argument("--api-key")
     parser.add_argument("--api-key-id")
     parser.add_argument("--camera", default="wrist-cam")
-    parser.add_argument("--world", default="sim-world")
+    parser.add_argument("--world", default="isaac-world")
     parser.add_argument("--segmenter")
     parser.add_argument("--block-xyz-m", default="0.60,0.10,0.7755")
     parser.add_argument("--sample-region")

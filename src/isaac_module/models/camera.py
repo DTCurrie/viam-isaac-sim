@@ -1,7 +1,7 @@
 """viam:isaac-sim-devin:camera - a simulated RGB(-D) camera.
 
 Attributes:
-  world (string, required)        - name of the viam:isaac-sim-devin:world component
+  world (string, default "isaac-world") - name of the viam:isaac-sim-devin:world component
   prim_path (string)              - existing camera prim to attach to, or
                                     where to create one (default /World/<name>)
   width / height (int)            - resolution, default 848x480
@@ -28,15 +28,15 @@ Attributes:
   local_orientation_rpy_deg       - orientation relative to parent_prim;
                                     default [180,0,0] = look out the +Z
                                     (tool) axis
-  annotator_device (string)       - GPU-resident annotator data path
-                                    (CAM-12), e.g. "cuda"; 5.0 only - ignored
+  annotator_device (string)       - GPU-resident annotator data path,
+                                    e.g. "cuda"; 5.0 only - ignored
                                     with a log line on 4.5
 
 DoCommand:
   {"command": "sample_color", "region": [x0, y0, x1, y1]} - mean RGB over the
   given pixel region of the most recent frame -> {"srgb_hex", "mean_rgb"}.
 
-close() releases the handle and its post-reset hook (XC-4); the prim stays
+close() releases the handle and its post-reset hook. The prim stays
 in the stage. A reconfigure that changes a spawn attribute (prim_path,
 position, parent_prim, or the frame it derives from) after the camera is
 already attached raises ValueError - restart the module to apply it.
@@ -87,6 +87,10 @@ from ..sim_manager import (
 )
 from .utils import apply_frame_to_attrs, get_attrs, validate_sim_component
 
+# realsense's own message-size guard on the encoded point cloud
+# (`realsense.hpp:34-35`, `realsense.hpp:783`)
+MAX_POINT_CLOUD_BYTES = 33554432
+
 _SAMPLE_COLOR_REGION_LEN = 4
 _SUPPORTED_COMMANDS = ("sample_color",)
 
@@ -134,7 +138,7 @@ class IsaacCamera(Camera, EasyResource):  # type: ignore[misc]  # SDK: API is Fi
         self._handle = SimManager.get().create_camera(self.name, attrs)
 
     async def close(self) -> None:
-        """XC-4: release the handle (hooks, callbacks); the prim stays attached."""
+        """Release the handle (hooks, callbacks). The prim stays attached."""
         SimManager.get().release_handle(self.name)
         self._handle = None
 
@@ -152,7 +156,7 @@ class IsaacCamera(Camera, EasyResource):  # type: ignore[misc]  # SDK: API is Fi
         **kwargs: Any,
     ) -> tuple[list[NamedImage], ResponseMetadata]:
         handle = self._h()
-        # OQ-16 / GPU checklist item 4: how viam-server delivers the filter
+        # Log filter_source_names as viam-server sends it, for debugging which values arrive.
         LOGGER.info("camera %s get_images filter_source_names=%r", self.name, filter_source_names)
         frame = await asyncio.to_thread(_call, handle.get_frame)
 
@@ -189,6 +193,11 @@ class IsaacCamera(Camera, EasyResource):  # type: ignore[misc]  # SDK: API is Fi
 
         xyz, rgb = await asyncio.to_thread(_call, _grab)
         pcd = xyz_rgb_to_pcd(xyz, rgb)
+        if len(pcd) > MAX_POINT_CLOUD_BYTES:
+            raise ValueError(
+                f"point cloud size {len(pcd)} exceeds gRPC message size limit of "
+                f"{MAX_POINT_CLOUD_BYTES}"
+            )
         return pcd, PCD_MIME
 
     async def get_geometries(self, **kwargs: Any) -> list[Any]:
@@ -261,7 +270,7 @@ _T = TypeVar("_T")
 
 
 def _call(fn: Callable[[], _T]) -> _T:
-    """Run a handle call, mapping sim-layer errors to their gRPC status (CAM-18)."""
+    """Run a handle call, mapping sim-layer errors to their gRPC status."""
     try:
         return fn()
     except NoFrameYetError as e:

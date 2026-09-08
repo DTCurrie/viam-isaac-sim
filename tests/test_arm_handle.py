@@ -36,7 +36,7 @@ def _config(name: str, attrs: dict) -> ComponentConfig:
 
 def test_mock_ur_arm_dof_names_and_padding(world):
     arm = IsaacArm.new(
-        _config("padded-arm", {"world": "sim-world", "asset": "ur5e", "mock_dof": 12}), {}
+        _config("padded-arm", {"world": "isaac-world", "asset": "ur5e", "mock_dof": 12}), {}
     )
     handle = arm._handle
     names = handle.dof_names()
@@ -52,7 +52,7 @@ def test_mock_ur_arm_dof_names_and_padding(world):
 
 def test_mock_ur_arm_moves_selected_joints_only_padding_stays_zero(world):
     arm = IsaacArm.new(
-        _config("padded-move-arm", {"world": "sim-world", "asset": "ur5e", "mock_dof": 12}),
+        _config("padded-move-arm", {"world": "isaac-world", "asset": "ur5e", "mock_dof": 12}),
         {},
     )
     handle = arm._handle
@@ -77,7 +77,7 @@ def test_mock_ur_arm_moves_selected_joints_only_padding_stays_zero(world):
 
 def test_mock_franka_arm_has_no_declared_joint_names(world):
     arm = IsaacArm.new(
-        _config("franka-arm", {"world": "sim-world", "asset": "franka", "mock_dof": 7}), {}
+        _config("franka-arm", {"world": "isaac-world", "asset": "franka", "mock_dof": 7}), {}
     )
     handle = arm._handle
     assert len(handle.dof_names()) == 7
@@ -91,7 +91,7 @@ def test_mock_franka_arm_has_no_declared_joint_names(world):
 
 def test_mock_ur_arm_rejects_length_mismatch(world):
     arm = IsaacArm.new(
-        _config("mismatch-arm", {"world": "sim-world", "asset": "ur5e", "mock_dof": 12}), {}
+        _config("mismatch-arm", {"world": "isaac-world", "asset": "ur5e", "mock_dof": 12}), {}
     )
     handle = arm._handle
     with pytest.raises(ValueError, match="6") as excinfo:

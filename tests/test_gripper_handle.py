@@ -24,12 +24,12 @@ def _wait_until(predicate, polls: int = SETTLE_POLLS, poll_s: float = SETTLE_POL
 
 def test_create_gripper_unknown_arm_raises(sim):
     with pytest.raises(ValueError, match="not attached to the sim"):
-        sim.create_gripper("gripper-bad-arm", {"world": "sim-world", "arm": "no-such-arm"})
+        sim.create_gripper("gripper-bad-arm", {"world": "isaac-world", "arm": "no-such-arm"})
 
 
 def test_close_with_no_object_reaches_closed_rad(sim):
-    sim.create_arm("gripper-arm-a", {"world": "sim-world", "asset": "ur5e"})
-    gripper = sim.create_gripper("gripper-a", {"world": "sim-world", "arm": "gripper-arm-a"})
+    sim.create_arm("gripper-arm-a", {"world": "isaac-world", "asset": "ur5e"})
+    gripper = sim.create_gripper("gripper-a", {"world": "isaac-world", "arm": "gripper-arm-a"})
 
     gripper.close()
     assert _wait_until(lambda: not gripper.is_moving())
@@ -40,10 +40,10 @@ def test_close_with_no_object_reaches_closed_rad(sim):
 
 
 def test_close_on_object_stalls_at_contact_angle_and_holds(sim):
-    sim.create_arm("gripper-arm-b", {"world": "sim-world", "asset": "ur5e"})
+    sim.create_arm("gripper-arm-b", {"world": "isaac-world", "asset": "ur5e"})
     gripper = sim.create_gripper(
         "gripper-b",
-        {"world": "sim-world", "arm": "gripper-arm-b", "mock_object_width_m": 0.05},
+        {"world": "isaac-world", "arm": "gripper-arm-b", "mock_object_width_m": 0.05},
     )
 
     open_rad = math.radians(0.0)
@@ -64,8 +64,8 @@ def test_close_on_object_stalls_at_contact_angle_and_holds(sim):
 
 
 def test_stop_mid_travel_freezes_jaw(sim):
-    sim.create_arm("gripper-arm-c", {"world": "sim-world", "asset": "ur5e"})
-    gripper = sim.create_gripper("gripper-c", {"world": "sim-world", "arm": "gripper-arm-c"})
+    sim.create_arm("gripper-arm-c", {"world": "isaac-world", "asset": "ur5e"})
+    gripper = sim.create_gripper("gripper-c", {"world": "isaac-world", "arm": "gripper-arm-c"})
 
     gripper.close()
     time.sleep(0.1)
@@ -77,17 +77,17 @@ def test_stop_mid_travel_freezes_jaw(sim):
 
 
 def test_jaw_limits_default_and_attrs(sim):
-    sim.create_arm("gripper-arm-d", {"world": "sim-world", "asset": "ur5e"})
+    sim.create_arm("gripper-arm-d", {"world": "isaac-world", "asset": "ur5e"})
     default_gripper = sim.create_gripper(
-        "gripper-d", {"world": "sim-world", "arm": "gripper-arm-d"}
+        "gripper-d", {"world": "isaac-world", "arm": "gripper-arm-d"}
     )
     assert default_gripper.jaw_limits() == pytest.approx((0.0, math.radians(47.0)))
 
-    sim.create_arm("gripper-arm-e", {"world": "sim-world", "asset": "ur5e"})
+    sim.create_arm("gripper-arm-e", {"world": "isaac-world", "asset": "ur5e"})
     custom_gripper = sim.create_gripper(
         "gripper-e",
         {
-            "world": "sim-world",
+            "world": "isaac-world",
             "arm": "gripper-arm-e",
             "open_deg": 5.0,
             "closed_deg": 50.0,
@@ -105,14 +105,14 @@ def test_jaw_limits_default_and_attrs(sim):
 
 
 def test_dof_names_is_the_drive_joint(sim):
-    sim.create_arm("gripper-arm-f", {"world": "sim-world", "asset": "ur5e"})
-    gripper = sim.create_gripper("gripper-f", {"world": "sim-world", "arm": "gripper-arm-f"})
+    sim.create_arm("gripper-arm-f", {"world": "isaac-world", "asset": "ur5e"})
+    gripper = sim.create_gripper("gripper-f", {"world": "isaac-world", "arm": "gripper-arm-f"})
     assert gripper.dof_names() == ["finger_joint"]
 
 
 def test_create_gripper_is_cached_per_name(sim):
-    sim.create_arm("gripper-arm-g", {"world": "sim-world", "asset": "ur5e"})
-    attrs = {"world": "sim-world", "arm": "gripper-arm-g"}
+    sim.create_arm("gripper-arm-g", {"world": "isaac-world", "asset": "ur5e"})
+    attrs = {"world": "isaac-world", "arm": "gripper-arm-g"}
     first = sim.create_gripper("gripper-g", attrs)
     second = sim.create_gripper("gripper-g", dict(attrs))
     assert first is second

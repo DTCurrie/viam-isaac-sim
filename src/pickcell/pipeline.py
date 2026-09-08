@@ -491,7 +491,7 @@ class PickPipeline:
         print(f"{PLACED_BLOCK_MARKER}{json.dumps(report, default=str, sort_keys=True)}")
 
     async def _set_ignored(self, names: Sequence[str]) -> None:
-        """DEC-21 route (c): with sim-world's live GetGeometries in the frame
+        """DEC-21 route (c): with isaac-world's live GetGeometries in the frame
         system, the target block must not obstruct its own pick - ignore it
         for the run, restore afterwards."""
         if self.world is None or self.target_prop_name is None:

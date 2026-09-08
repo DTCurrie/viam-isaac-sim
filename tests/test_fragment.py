@@ -21,7 +21,9 @@ from isaac_module.models.gripper import IsaacGripper
 from isaac_module.models.sorter_sensor import SorterSensor
 from isaac_module.models.world import IsaacWorld
 
-FRAGMENT_PATH = Path(__file__).resolve().parent.parent / "fragments" / "pick-and-place.json"
+FRAGMENT_PATH = (
+    Path(__file__).resolve().parent.parent / "fragments" / "isaac-sim-block-sorting.json"
+)
 MODELS = {
     "world": IsaacWorld,
     "arm": IsaacArm,
@@ -140,7 +142,7 @@ def _component_config(component: dict) -> ComponentConfig:
 
 
 def _world_props() -> dict[str, dict]:
-    world = next(c for c in _resolved_fragment()["components"] if c["name"] == "sim-world")
+    world = next(c for c in _resolved_fragment()["components"] if c["name"] == "isaac-world")
     return {p["name"]: p for p in world["attributes"]["props"]}
 
 
@@ -158,7 +160,7 @@ def _expected_prop_names() -> set[str]:
 def test_fragment_is_valid_json_with_the_expected_components():
     names = [c["name"] for c in _fragment()["components"]]
     assert names == [
-        "sim-world",
+        "isaac-world",
         "pick-arm",
         "pick-grip",
         "scene-cam",
@@ -175,13 +177,15 @@ def test_every_component_uses_the_api_form_not_the_legacy_namespace_type_pair():
         assert API_PATTERN.match(component["api"])
 
 
-def test_every_non_world_component_names_sim_world_in_its_attributes():
+def test_every_non_world_component_names_sim_world_or_omits_it():
     # block-sorter-sensor polls the conductor, not the sim, so it carries no
-    # `world` attribute of its own.
+    # `world` attribute of its own. Every other component's `world` attribute
+    # defaults to "isaac-world", so omitting it is as valid as naming it.
     for component in _fragment()["components"]:
-        if component["name"] in ("sim-world", "block-sorter-sensor"):
+        if component["name"] in ("isaac-world", "block-sorter-sensor"):
             continue
-        assert component["attributes"]["world"] == "sim-world"
+        attributes = component["attributes"]
+        assert "world" not in attributes or attributes["world"] == "isaac-world"
 
 
 @pytest.mark.parametrize("component", _resolved_fragment()["components"], ids=lambda c: c["name"])
@@ -195,12 +199,12 @@ def test_every_fragment_component_validates_against_its_model(component):
     # components riding the arm (the gripper, the wrist camera's parent_prim)
     # must depend on it so viam-server builds the arm's prim first
     if component["name"] in ("pick-grip", "wrist-cam"):
-        assert list(dependencies) == ["sim-world", "pick-arm"]
+        assert list(dependencies) == ["isaac-world", "pick-arm"]
     # the sorter sensor never touches the sim: it polls the conductor service
     elif component["name"] == "block-sorter-sensor":
         assert list(dependencies) == ["block-sorter"]
-    elif component["name"] != "sim-world":
-        assert list(dependencies) == ["sim-world"]
+    elif component["name"] != "isaac-world":
+        assert list(dependencies) == ["isaac-world"]
 
 
 def test_gripper_frame_matches_its_tcp_offset():
@@ -235,7 +239,7 @@ def test_block_physics_matches_the_named_pick_cell_constant_for_every_block():
 
 
 def test_world_step_rates_match_the_pick_cell_constants():
-    world = next(c for c in _fragment()["components"] if c["name"] == "sim-world")
+    world = next(c for c in _fragment()["components"] if c["name"] == "isaac-world")
     attrs = world["attributes"]
     assert attrs["physics_dt"] == pytest.approx(physics.PICK_CELL_PHYSICS_DT)
     assert attrs["rendering_dt"] == pytest.approx(physics.PICK_CELL_RENDERING_DT)
@@ -363,25 +367,25 @@ def test_scene_camera_frames_all_three_tables():
 
 
 def test_sim_world_is_in_the_frame_system():
-    """DEC-21 route (c): the motion service only pulls sim-world's live
+    """DEC-21 route (c): the motion service only pulls isaac-world's live
     GetGeometries (props + floor) into planning when the component has a
     frame (GPU run 7: without it, app-side moves plan with no obstacles)."""
-    world = next(c for c in _fragment()["components"] if c["name"] == "sim-world")
+    world = next(c for c in _fragment()["components"] if c["name"] == "isaac-world")
     assert world.get("frame", {}).get("parent") == "world"
 
 
 def test_sim_world_frame_has_no_translation():
-    """Live GetGeometries are expressed in sim-world's own frame (DEC-21 route
+    """Live GetGeometries are expressed in isaac-world's own frame (DEC-21 route
     (c)); a frame translation would offset every served geometry."""
-    world = next(c for c in _fragment()["components"] if c["name"] == "sim-world")
+    world = next(c for c in _fragment()["components"] if c["name"] == "isaac-world")
     assert "translation" not in world["frame"]
 
 
 def test_sim_world_geometry_matches_the_flush_three_table_slab_minus_ten_millimetres():
-    """W4: the planner box rides inside sim-world's frame.geometry, sized to
+    """W4: the planner box rides inside isaac-world's frame.geometry, sized to
     the flush three-table span with its top 10 mm below the real surface
     (R-24), centred so the box top sits at that height."""
-    world = next(c for c in _resolved_fragment()["components"] if c["name"] == "sim-world")
+    world = next(c for c in _resolved_fragment()["components"] if c["name"] == "isaac-world")
     table_source = cell_layout.TABLE_CENTRES_MM["table_source"][0]
     table_place = cell_layout.TABLE_CENTRES_MM["table_place"][0]
     span_x_mm = (table_place + cell_layout.TABLE_DIMS_MM[0] / 2) - (
@@ -455,13 +459,13 @@ def test_every_pooled_block_is_parked_at_its_seam_position():
 
 def test_the_pick_cell_roster_is_present():
     fragment = _fragment()
-    world = next(c for c in fragment["components"] if c["name"] == "sim-world")
+    world = next(c for c in fragment["components"] if c["name"] == "isaac-world")
     props = {p["name"] for p in world["attributes"]["props"]}
     assert props == _expected_prop_names()
 
     component_names = {c["name"] for c in fragment["components"]}
     assert component_names == {
-        "sim-world",
+        "isaac-world",
         "pick-arm",
         "pick-grip",
         "wrist-cam",
@@ -520,7 +524,7 @@ def test_the_conductor_service_entry_matches_the_phase_4_contract():
     assert conductor["model"] == "viam:isaac-sim-devin:conductor"
 
     attrs = conductor["attributes"]
-    assert attrs["world"] == "sim-world"
+    assert attrs["world"] == "isaac-world"
     assert attrs["arm"] == "pick-arm"
     assert attrs["gripper"] == "pick-grip"
     assert attrs["camera"] == "wrist-cam"
@@ -579,7 +583,7 @@ NOMINAL_HUE_FAMILIES_DEG: dict[str, tuple[float, float]] = {
 
 @pytest.mark.parametrize("color", cell_layout.BLOCK_COLORS)
 def test_each_block_colors_nominal_default_hue_stays_in_its_family(color):
-    world = next(c for c in _resolved_fragment()["components"] if c["name"] == "sim-world")
+    world = next(c for c in _resolved_fragment()["components"] if c["name"] == "isaac-world")
     props = {p["name"]: p for p in world["attributes"]["props"]}
     hue = _hue_degrees(props[cell_layout.pool_block_name(color, 1)]["color"])
     low, high = NOMINAL_HUE_FAMILIES_DEG[color]

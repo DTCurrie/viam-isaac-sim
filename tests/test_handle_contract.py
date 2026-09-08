@@ -85,10 +85,10 @@ def arm_and_gripper(backend):
     backend_name, sim = backend
     arm_name = _unique(f"contract-arm-{backend_name}")
     gripper_name = _unique(f"contract-gripper-{backend_name}")
-    arm = sim.create_arm(arm_name, {"world": "sim-world", "asset": "ur5e", "position": [0, 0, 0]})
+    arm = sim.create_arm(arm_name, {"world": "isaac-world", "asset": "ur5e", "position": [0, 0, 0]})
     gripper = sim.create_gripper(
         gripper_name,
-        {"world": "sim-world", "arm": arm_name, "mock_object_width_m": 0.05},
+        {"world": "isaac-world", "arm": arm_name, "mock_object_width_m": 0.05},
     )
     return backend_name, arm, gripper
 
@@ -189,12 +189,12 @@ def test_mock_pick_rehearsal(world):
     gripper_name = _unique("rehearsal-gripper")
 
     arm = IsaacArm.new(
-        _config(arm_name, {"world": "sim-world", "asset": "ur5e", "position": [0, 0, 0]}), {}
+        _config(arm_name, {"world": "isaac-world", "asset": "ur5e", "position": [0, 0, 0]}), {}
     )
     gripper = IsaacGripper.new(
         _config(
             gripper_name,
-            {"world": "sim-world", "arm": arm_name, "mock_object_width_m": 0.05},
+            {"world": "isaac-world", "arm": arm_name, "mock_object_width_m": 0.05},
         ),
         {},
     )
@@ -245,10 +245,10 @@ def test_arm_dof_count_with_gripper_attached(isaac_sim):
     arm_name = _unique("gpu-smoke-arm")
     gripper_name = _unique("gpu-smoke-gripper")
     arm = isaac_sim.create_arm(
-        arm_name, {"world": "sim-world", "asset": "ur5e", "position": [0, 0, 0]}
+        arm_name, {"world": "isaac-world", "asset": "ur5e", "position": [0, 0, 0]}
     )
     isaac_sim.create_gripper(
-        gripper_name, {"world": "sim-world", "arm": arm_name, "mock_object_width_m": 0.05}
+        gripper_name, {"world": "isaac-world", "arm": arm_name, "mock_object_width_m": 0.05}
     )
 
     all_names = arm.all_dof_names()

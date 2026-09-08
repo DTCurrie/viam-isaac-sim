@@ -1,0 +1,41 @@
+{
+  "modules": [
+    {
+      "type": "registry",
+      "name": "viam_isaac-sim-devin",
+      "module_id": "viam:isaac-sim-devin",
+      "version": "0.4.1"
+    }
+  ],
+  "components": [
+    {
+      "name": "isaac-world",
+      "api": "rdk:component:generic",
+      "model": "viam:isaac-sim-devin:world",
+      "frame": {
+        "parent": "world"
+      },
+      "attributes": {
+        "headless": true,
+        "livestream": true,
+        "lighting": {
+          "dome": {
+            "intensity": 1000,
+            "color": [
+              1,
+              1,
+              1
+            ]
+          },
+          "sphere_intensity": 30000
+        },
+        "livestream_public_ip": {
+          "$variable": {
+            "name": "livestream-public-ip",
+            "default_value": ""
+          }
+        }
+      }
+    }
+  ]
+}

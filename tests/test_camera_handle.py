@@ -363,7 +363,7 @@ def test_post_reset_falls_back_to_initialize_when_absent():
 
 
 def test_create_camera_registers_post_reset_hook(sim):
-    handle = sim.create_camera("hook-cam", {"world": "sim-world"})
+    handle = sim.create_camera("hook-cam", {"world": "isaac-world"})
 
     fired: list[None] = []
     handle.post_reset = lambda: fired.append(None)
@@ -376,8 +376,8 @@ def test_create_camera_called_twice_registers_hook_only_once(sim):
     """viam-server re-runs reconfigure -> create_camera on every config
     change; _cached_handle returns the same handle both times, so the
     post-reset hook must only be registered on first construction."""
-    sim.create_camera("dup-cam", {"world": "sim-world"})
-    handle = sim.create_camera("dup-cam", {"world": "sim-world"})
+    sim.create_camera("dup-cam", {"world": "isaac-world"})
+    handle = sim.create_camera("dup-cam", {"world": "isaac-world"})
 
     call_count = 0
 

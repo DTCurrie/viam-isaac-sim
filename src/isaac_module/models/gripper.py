@@ -1,25 +1,26 @@
 """viam:isaac-sim-devin:gripper - a simulated parallel-jaw gripper riding an arm.
 
 Attributes:
-  world (string, required)        - name of the viam:isaac-sim-devin:world component
+  world (string, default "isaac-world") - name of the viam:isaac-sim-devin:world component
   arm (string, required)          - name of the viam:isaac-sim-devin:arm it is bolted to
   asset (string)                  - known gripper asset, default "robotiq_2f_85"
   parent_prim (string)            - link it is bolted to, default <arm prim>/wrist_3_link
   local_position ([x,y,z] m)      - mount pose of the gripper's base_link on parent_prim
   local_orientation_rpy_deg       - (defaults: identity - the 2F-85 base sits on the flange)
   tcp_offset_m (float)            - flange -> tool centre point along tool +Z, default 0.134
-                                    = the fingertip pad centre measured on the GPU (OQ-7; the
-                                    pads span 115-153 mm, W15's paper value 115 was their near edge)
+                                    = the fingertip pad centre measured on the GPU. The
+                                    pads span 115-153 mm and the published 115 mm spec
+                                    value is their near edge.
   open_deg / closed_deg (float)   - drive-joint angles for open / fully closed; defaults 0
                                     and the Isaac-release value from compat.caps()
-                                    (47 on 5.0, 45 on 4.5 - R-9)
+                                    (47 on 5.0, 45 on 4.5)
   grab_timeout_sec (float)        - how long grab() waits for a stall or full closure, default 5
   holding_tolerance_deg (float)   - commanded-vs-measured gap that counts as holding, default 2
   mock_object_width_m (float)     - mock only: width of the object between the jaws
                                     (unset = nothing to grab, so grab() returns False)
 
 Frame - the gripper's frame is its TCP, so the motion service plans the TCP
-(not the flange) onto the block (W15; DEC-12):
+(not the flange) onto the block:
 
     "frame": {"parent": "<arm>", "translation": {"x": 0, "y": 0, "z": <tcp_offset_m * 1000>}}
 
@@ -28,18 +29,18 @@ parent_prim at local_position / local_orientation_rpy_deg, and the frame's
 translation is the TCP the planner uses. validate_config requires
 frame.parent == arm.
 
-API mapping (viam-sdk 0.80.0 Gripper, all eight abstract methods - ARM-5):
+API mapping (viam-sdk 0.80.0 Gripper, all eight abstract methods):
   open / stop / is_moving          -> the handle
   grab() -> bool                   -> close, wait <= grab_timeout_sec for stall-or-closed,
                                       return is_holding()
   is_holding_something()           -> HoldingStatus(is_holding, meta={jaw angles, degrees})
-  get_current_inputs() / go_to_inputs([v])  -> one value in [0, 1]: 0 = open, 1 = closed (DEC-12)
+  get_current_inputs() / go_to_inputs([v])  -> one value in [0, 1]: 0 = open, 1 = closed
   get_kinematics()                 -> 1-link / 0-joint SVA whose link is the 36 x 146 x 153 mm
                                       gripper box spanning flange to fingertips, centred 57.5 mm
-                                      behind the TCP (ARM-6; R-6: a gripper whose Kinematics
+                                      behind the TCP (a gripper whose Kinematics
                                       fails is silently dropped from the frame system)
   get_geometries()                 -> that same single box (rdk keeps only [0])
-  close()                          -> SimManager.release_handle (XC-4)
+  close()                          -> SimManager.release_handle
 """
 
 from __future__ import annotations
@@ -69,9 +70,8 @@ from viam.resource.easy_resource import EasyResource
 from viam.resource.types import Model, ModelFamily
 from viam.utils import ValueTypes
 
-from .. import FAMILY, NAMESPACE
+from .. import DEFAULT_WORLD_NAME, FAMILY, NAMESPACE
 from ..sim_manager import KNOWN_ASSETS, GripperHandle, SimManager, _prim_name
-from ..spatial import quat_rotate
 from .utils import get_attrs
 
 DEFAULT_GRIPPER_ASSET = "robotiq_2f_85"
@@ -97,7 +97,7 @@ def _gripper_sva(
 ) -> dict[str, Any]:
     """The gripper's kinematics: one link, no joints, whose geometry is the
     box_mm RectangularPrism spanning flange to fingertips - centred
-    box_centre_z_mm along the tool axis from the TCP, the frame origin (ARM-6)."""
+    box_centre_z_mm along the tool axis from the TCP, the frame origin."""
     box_x_mm, box_y_mm, box_z_mm = box_mm
     return {
         "name": link_id,
@@ -148,10 +148,11 @@ class IsaacGripper(Gripper, EasyResource):  # type: ignore[misc]  # SDK: API is 
         arm (the frame is the TCP in the arm's tool frame). Returns both as
         dependencies so viam-server builds the arm before the gripper."""
         attrs = get_attrs(config)
-        world = attrs.get("world")
+        world = attrs.get("world", DEFAULT_WORLD_NAME)
         if not world or not isinstance(world, str):
             raise ValueError(
-                f'{config.name}: set the "world" attribute to the name of your '
+                f'{config.name}: "world" defaults to "{DEFAULT_WORLD_NAME}" and, when set, '
+                "must be a non-empty string naming your "
                 f"{NAMESPACE}:{FAMILY}:world component"
             )
         arm = attrs.get("arm")
@@ -180,7 +181,7 @@ class IsaacGripper(Gripper, EasyResource):  # type: ignore[misc]  # SDK: API is 
         self._handle = SimManager.get().create_gripper(self.name, attrs)
 
     async def close(self) -> None:
-        """XC-4: release the handle (hooks, callbacks); the prim stays attached."""
+        """Release the handle (hooks, callbacks). The prim stays attached."""
         SimManager.get().release_handle(self.name)
         self._handle = None
 
@@ -189,10 +190,13 @@ class IsaacGripper(Gripper, EasyResource):  # type: ignore[misc]  # SDK: API is 
             raise RuntimeError(f"gripper {self.name} is not attached to the sim")
         return self._handle
 
-    # -- the eight abstract methods (viam.md Q5) --------------------------
-
     async def open(self, **kwargs) -> None:
-        await asyncio.to_thread(self._h().open)
+        handle = self._h()
+        await asyncio.to_thread(handle.open)
+
+        deadline = time.monotonic() + self._grab_timeout
+        while time.monotonic() < deadline and await asyncio.to_thread(handle.is_moving):
+            await asyncio.sleep(GRAB_POLL_INTERVAL_S)
 
     async def grab(self, **kwargs) -> bool:
         handle = self._h()
@@ -275,8 +279,6 @@ class IsaacGripper(Gripper, EasyResource):  # type: ignore[misc]  # SDK: API is 
         while time.monotonic() < deadline and await asyncio.to_thread(handle.is_moving):
             await asyncio.sleep(GRAB_POLL_INTERVAL_S)
 
-    # -- non-abstract, overridden on purpose -------------------------------
-
     async def get_geometries(self, **kwargs) -> list[Geometry]:
         return [
             Geometry(
@@ -295,84 +297,7 @@ class IsaacGripper(Gripper, EasyResource):  # type: ignore[misc]  # SDK: API is 
         timeout: float | None = None,
         **kwargs,
     ) -> Mapping[str, ValueTypes]:
-        cmd = command.get("command")
-        if cmd == "dof_names":
-            names: list[ValueTypes] = list(self._h().dof_names())
-            return {"dof_names": names}
-        if cmd == "jaw_deg":
-            open_rad, closed_rad = self._h().jaw_limits()
-            return {
-                "jaw_deg": math.degrees(self._h().get_jaw()),
-                "open_deg": math.degrees(open_rad),
-                "closed_deg": math.degrees(closed_rad),
-            }
-        if cmd == "tcp_pose":
-            return await asyncio.to_thread(self._tcp_pose)
+        # No sim-only verbs live here: the world's DoCommand answers
+        # dof_names/jaw_deg/tcp_pose so a real driver's do_command never
+        # grows a verb it can't answer.
         raise ValueError(f"unknown command: {command}")
-
-    def _tcp_pose(self) -> dict[str, ValueTypes]:
-        """GPU checklist item 4 / OQ-7: the fingertip midpoint's offset from
-        the mount link along the tool +Z, in mm, next to the configured
-        tcp_offset_m - so the TCP is corrected in one place if they differ."""
-        poses = self._h().link_world_poses()
-        out: dict[str, ValueTypes] = {"jaw_deg": math.degrees(self._h().get_jaw())}
-        out |= {
-            key: {
-                "position_mm": [v * 1000.0 for v in pos],
-                "quaternion_wxyz": list(quat),
-            }
-            for key, (pos, quat) in poses.items()
-        }
-        parent = poses.get("parent")
-        if parent is None:
-            out["error"] = "mount link pose unavailable"
-            return out
-        tool_axis = quat_rotate(parent[1], (0.0, 0.0, 1.0))
-
-        def along_tool(point: tuple[float, ...]) -> float:
-            return sum((q - p) * a for q, p, a in zip(point, parent[0], tool_axis, strict=True))
-
-        left = poses.get("left_inner_finger")
-        right = poses.get("right_inner_finger")
-        if left is not None and right is not None:
-            origin_mid = tuple((a + b) / 2.0 for a, b in zip(left[0], right[0], strict=True))
-            # informational: this asset authors link frames at the base
-            out["inner_finger_origin_offset_mm"] = along_tool(origin_mid) * 1000.0
-
-        bounds = self._h().fingertip_world_bounds()
-        out["fingertips"] = {
-            side: {
-                "min_mm": [v * 1000.0 for v in low],
-                "max_mm": [v * 1000.0 for v in high],
-                "center_mm": [(a + b) * 500.0 for a, b in zip(low, high, strict=True)],
-            }
-            for side, (low, high) in bounds.items()
-        }
-        if "left" not in bounds or "right" not in bounds:
-            out["error"] = "fingertip pad meshes not found under the gripper"
-            return out
-        centers = [
-            tuple((a + b) / 2.0 for a, b in zip(low, high, strict=True))
-            for low, high in (bounds["left"], bounds["right"])
-        ]
-        pad_mid = tuple((a + b) / 2.0 for a, b in zip(centers[0], centers[1], strict=True))
-        corners = [
-            corner
-            for low, high in bounds.values()
-            for corner in (
-                (x, y, z)
-                for x in (low[0], high[0])
-                for y in (low[1], high[1])
-                for z in (low[2], high[2])
-            )
-        ]
-        measured = along_tool(pad_mid)
-        out["pad_center_midpoint_mm"] = [v * 1000.0 for v in pad_mid]
-        out["fingertip_reach_mm"] = max(along_tool(c) for c in corners) * 1000.0
-        out["jaw_gap_mm"] = (
-            math.dist(centers[0], centers[1]) * 1000.0
-        )  # pad-centre to pad-centre, across the jaw
-        out["measured_tcp_offset_mm"] = measured * 1000.0
-        out["configured_tcp_offset_mm"] = self._tcp_offset_m * 1000.0
-        out["delta_mm"] = (measured - self._tcp_offset_m) * 1000.0
-        return out

@@ -22,7 +22,7 @@ Usage (in-process mock, no GPU, no running machine)::
 
 Real mode assumes the machine config carries the vision pipeline (color
 detector -> detections-to-segments) and motion service from
-``fragments/pick-and-place.json``, plus a gripper riding the arm's flange
+``fragments/isaac-sim-block-sorting.json``, plus a gripper riding the arm's flange
 (DEC-20 target block name is ``pick_cube``, not upstream's ``block_red``)::
 
     {
@@ -31,7 +31,7 @@ detector -> detections-to-segments) and motion service from
       "type": "gripper",
       "model": "viam:isaac-sim-devin:gripper",
       "frame": {"parent": "pick-arm", "translation": {"x": 0, "y": 0, "z": 115}},
-      "attributes": {"world": "sim-world", "arm": "pick-arm"}
+      "attributes": {"world": "isaac-world", "arm": "pick-arm"}
     },
     {
       "name": "builtin",
@@ -80,8 +80,15 @@ from typing import Any
 from viam.components.arm import Arm, JointPositions
 from viam.components.generic import Generic
 from viam.components.gripper import Gripper
-from viam.proto.common import Pose, PoseInFrame, RectangularPrism, Transform, Vector3
-from viam.proto.common import Geometry, WorldState
+from viam.proto.common import (
+    Geometry,
+    Pose,
+    PoseInFrame,
+    RectangularPrism,
+    Transform,
+    Vector3,
+    WorldState,
+)
 from viam.robot.client import RobotClient
 from viam.services.motion import MotionClient
 from viam.services.vision import VisionClient
@@ -290,16 +297,22 @@ RESET_SETTLE_S = 2.0
 # ----------------------------------------------------------------------
 
 
-async def _grab_diagnostics(arm: Arm, gripper: Gripper, block_name: str) -> dict[str, Any]:
-    """After a failed grab: jaw angle + pad poses (gripper `tcp_pose`), the
+async def _grab_diagnostics(
+    arm: Arm, gripper: Gripper, world: Any, block_name: str
+) -> dict[str, Any]:
+    """After a failed grab: jaw angle + pad poses (world `tcp_pose`), the
     holding predicate's meta, and where the block actually is."""
     report: dict[str, Any] = {}
     try:
-        report["arm_joint_state"] = dict(await arm.do_command({"command": "joint_state"}))
+        report["arm_joint_state"] = dict(
+            await world.do_command({"command": "joint_state", "name": arm.name})
+        )
     except Exception as exc:  # noqa: BLE001 - diagnostics never mask the failure
         report["arm_joint_state_error"] = repr(exc)
     try:
-        report["tcp_pose"] = dict(await gripper.do_command({"command": "tcp_pose"}))
+        report["tcp_pose"] = dict(
+            await world.do_command({"command": "tcp_pose", "name": gripper.name})
+        )
     except Exception as exc:  # noqa: BLE001 - diagnostics never mask the grab failure
         report["tcp_pose_error"] = repr(exc)
     try:
@@ -313,7 +326,9 @@ async def _grab_diagnostics(arm: Arm, gripper: Gripper, block_name: str) -> dict
     try:
         prim_path = f"/World/{block_name.replace('-', '_')}"
         report["block_prim_pose"] = dict(
-            await arm.do_command({"command": "prim_world_pose", "prim_path": prim_path})
+            await world.do_command(
+                {"command": "prim_pose", "name": arm.name, "prim_path": prim_path}
+            )
         )
     except Exception as exc:  # noqa: BLE001
         report["block_prim_pose_error"] = repr(exc)
@@ -365,10 +380,10 @@ async def _probe_depth(robot: RobotClient, args: argparse.Namespace, look_pose: 
 
 
 async def _tcp_correction(
-    robot: RobotClient, gripper: Gripper, gripper_name: str
+    robot: RobotClient, world: Any, gripper_name: str
 ) -> tuple[float, float, float]:
     """(believed - physical) TCP position in mm: where the frame system says
-    the gripper frame is, minus where the pads actually are (module
+    the gripper frame is, minus where the pads actually are (world
     `tcp_pose`). Positive z = the physical gripper hangs lower than believed."""
     identity = Pose(x=0.0, y=0.0, z=0.0, o_x=0.0, o_y=0.0, o_z=1.0, theta=0.0)
     believed = (
@@ -376,7 +391,9 @@ async def _tcp_correction(
             PoseInFrame(reference_frame=gripper_name, pose=identity), "world"
         )
     ).pose
-    physical = (await gripper.do_command({"command": "tcp_pose"}))["pad_center_midpoint_mm"]
+    physical = (await world.do_command({"command": "tcp_pose", "name": gripper_name}))[
+        "pad_center_midpoint_mm"
+    ]
     return (
         believed.x - float(physical[0]),
         believed.y - float(physical[1]),
@@ -436,17 +453,19 @@ async def _run_real(args: argparse.Namespace) -> Transform:
             side_scanner=side_scanner,
             wrist_scanner=wrist_scanner,
             place_prop_name=None if args.no_place else args.place_pad,
-            diagnose=lambda: _grab_diagnostics(arm, gripper, args.block),
+            diagnose=lambda: _grab_diagnostics(arm, gripper, world, args.block),
             tcp_correction=(
                 None
                 if args.no_tcp_correction
-                else (lambda: _tcp_correction(robot, gripper, args.gripper))
+                else (lambda: _tcp_correction(robot, world, args.gripper))
             ),
             hold_s=args.hold_s,
             mid_hold_reset=(
                 (
                     lambda: _reset_mid_hold_report(
-                        world, gripper, lambda: _grab_diagnostics(arm, gripper, args.block)
+                        world,
+                        gripper,
+                        lambda: _grab_diagnostics(arm, gripper, world, args.block),
                     )
                 )
                 if args.reset_mid_hold
@@ -750,7 +769,7 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     parser.add_argument(
         "--no-place", action="store_true", help="release at the lift pose instead of placing"
     )
-    parser.add_argument("--world", default="sim-world", help="the isaac-sim world component name")
+    parser.add_argument("--world", default="isaac-world", help="the isaac-sim world component name")
     parser.add_argument(
         "--hold-s",
         type=float,

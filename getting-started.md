@@ -18,6 +18,30 @@ These instructions were tested with:
 1. Grab your credentials: back in the web UI, go to the status dropdown on the top menu bar. It's likely in the blue 'awaiting setup' state. Open it, hit the 'Machine cloud credentials' button, then paste the credentials into a `viam.json` file in your `~/viam-isaac` folder.
 1. Boot viam: in your terminal, run `ISAAC_SIM_PATH=/isaac-sim ./viam-server -config viam.json`. As it comes up, in the web UI, you should see the status dropdown turn to a green 'Online' state.
 
+## Sim world only
+
+If you don't want the block-sorting cell, the `isaac-sim-world-devin` fragment gives you an empty Isaac stage with a livestream and nothing cell-specific. It's the smallest machine this module runs on.
+
+In the 'configure' tab of the web UI, hit the '+' button, tap 'A', then find the `isaac-sim-world-devin` fragment by name and install it. Click 'Save' in the top right, then switch to the 'logs' tab and wait for the `isaac-world` component to come online.
+
+Switch to the 'control' tab and open the `isaac-world` component's livestream. You should see an empty stage with no tables and no arm.
+
+Now add one arm by hand in the 'configure' tab's JSON editor:
+
+```json
+{
+  "name": "arm",
+  "api": "rdk:component:arm",
+  "model": "viam:isaac-sim-devin:arm",
+  "frame": { "parent": "world" },
+  "attributes": { "asset": "ur5e" }
+}
+```
+
+The `world` attribute is omitted here because it defaults to `isaac-world`.
+
+Save, then drive the arm from the control tab. Its card can move a single joint, `GetJointPositions` returns six values, and a motion service `Move` to a pose near the current end position completes. That's the whole driver pattern, with none of the cell config the walkthrough below builds up.
+
 ## Start Isaac in Viam
 
 In the 'configure' tab of the web UI, hit the '+' button or tap 'A', then tap 'B' for blocks, then find the `isaac-sim-pick-and-place` fragment from the `viam-dev` org (it pulls in the private `viam:isaac-sim-devin` registry module — the machine must be in `viam-dev` to see it) and install it. Click 'Save' in the top right.
@@ -38,7 +62,7 @@ Now switch to the 'control' tab to interact with the cameras and arm. The cell h
 
 You should see three tables in a row. On the right sits the empty source table. In the centre sits the table with the `ur20` arm and its gripper. On the left sits the place table, with six colored pads laid out on it. In the arm's own frame, the source table sits on the arm's negative-x side and the place table on its positive-x side, so you can still orient from a different camera. The eighteen pool blocks aren't on any table yet. They're parked off-cell, on the floor behind the tables, one column per color and one row per pool index, and they stay parked until the first loop scatters them onto the source table. If the tables or arm are missing, something failed during boot. Check the logs tab before continuing.
 
-If something goes wrong, the place to debug is the logs tab. To cut down on noise, find the components list on the left-side menu bar and click the `viam_isaac-sim-devin` module (or whatever you named the local module) to filter down the output.
+If something goes wrong, the place to debug is the logs tab. To cut down on noise, find the components list on the left-side menu bar and click the `viam_isaac-sim` module (or whatever you named the local module) to filter down the output.
 
 ## Put the cell in pick-and-place mode
 

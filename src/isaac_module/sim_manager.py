@@ -855,11 +855,23 @@ class SimManager:
         self._handles[name] = (dict(attrs), handle)
         return handle
 
+    def handle_entry(self, name: str) -> tuple[dict[str, Any], Any]:
+        """The (spawn attrs, handle) pair registered under a component name.
+
+        The world's per-component diagnostic verbs reach a component's sim
+        state through this, so the arm, gripper and camera models never grow
+        a verb a real driver could not have. Raises ValueError for a name no
+        live component holds."""
+        entry = self._handles.get(name)
+        if entry is None:
+            raise ValueError(f"no sim component named {name!r}; known: {sorted(self._handles)}")
+        return entry
+
     def release_handle(self, name: str) -> None:
-        """XC-4: called from a model's close(). Forgets the cached handle,
-        drops the post-reset hooks registered under ``name`` and calls
-        handle.release(). The prim stays in the stage (Kit cannot un-spawn),
-        so a later create_* for the same name re-attaches to it. Idempotent."""
+        """Called from a model's close(). Forgets the cached handle, drops the
+        post-reset hooks registered under ``name`` and calls handle.release().
+        The prim stays in the stage (Kit cannot un-spawn), so a later create_*
+        for the same name re-attaches to it. Idempotent."""
         entry = self._handles.pop(name, None)
         self.unregister_post_reset(name)
         if entry is None:

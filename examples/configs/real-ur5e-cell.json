@@ -1,0 +1,59 @@
+{
+  "components": [
+    {
+      "name": "pick-arm",
+      "api": "rdk:component:arm",
+      "model": "viam:universal-robots:ur5e",
+      "frame": {
+        "parent": "world",
+        "translation": { "x": 0, "y": 0, "z": 750 }
+      },
+      "attributes": {
+        "host": "10.1.10.84",
+        "speed_degs_per_sec": 60,
+        "acceleration_degs_per_sec2": 60
+      }
+    },
+    {
+      "name": "pick-grip",
+      "api": "rdk:component:gripper",
+      "model": "viam:robotiq:2f-grippers",
+      "frame": {
+        "parent": "pick-arm",
+        "translation": { "x": 0, "y": 0, "z": 134 }
+      },
+      "attributes": {
+        "host": "10.1.10.84"
+      }
+    },
+    {
+      "name": "wrist-cam",
+      "api": "rdk:component:camera",
+      "model": "viam:camera:realsense",
+      "frame": {
+        "parent": "pick-arm",
+        "translation": { "x": 0, "y": 30, "z": 40 }
+      },
+      "attributes": {
+        "sensors": ["color", "depth"],
+        "width_px": 640,
+        "height_px": 480,
+        "serial_number": ""
+      }
+    }
+  ],
+  "services": [
+    {
+      "name": "red-detector",
+      "api": "rdk:service:vision",
+      "model": "rdk:builtin:color_detector",
+      "attributes": {
+        "detect_color": "#EA8D8D",
+        "camera_name": "wrist-cam",
+        "hue_tolerance_pct": 0.05,
+        "segment_size_px": 100,
+        "value_cutoff_pct": 0.15
+      }
+    }
+  ]
+}

@@ -7,12 +7,21 @@ import itertools
 import logging
 
 import pytest
+from viam.components.arm import JointPositions
 from viam.proto.app.robot import ComponentConfig
 from viam.utils import dict_to_struct
 
 from isaac_module import cell_layout
+from isaac_module.errors import PrimNotFoundError
+from isaac_module.models.arm import IsaacArm
+from isaac_module.models.gripper import IsaacGripper
 from isaac_module.models.world import IsaacWorld
-from isaac_module.sim_manager import DEFAULT_MIN_SEPARATION_M, RandomizeResult, SimManager
+from isaac_module.sim_manager import (
+    DEFAULT_MIN_SEPARATION_M,
+    UR_JOINT_NAMES,
+    RandomizeResult,
+    SimManager,
+)
 
 MIN_SEPARATION_MM = DEFAULT_MIN_SEPARATION_M * 1000.0
 
@@ -488,10 +497,130 @@ def test_scatter_cell_counts_override_zero_parks_the_whole_color(pool_world):
 
 
 def test_usd_stage_without_lighting_warns(caplog):
-    config = _config("sim-world-warn", {"mock": True, "usd_stage": "foo.usd"})
+    config = _config("isaac-world-warn", {"mock": True, "usd_stage": "foo.usd"})
     with caplog.at_level(logging.WARNING):
         IsaacWorld.new(config, {})
     assert any("stage must provide floor and lights" in record.message for record in caplog.records)
+
+
+def test_do_command_dof_names(world):
+    IsaacArm.new(
+        _config("world-arm-dof-names", {"world": "isaac-world", "asset": "ur20", "mock_dof": 12}),
+        {},
+    )
+    result = asyncio.run(world.do_command({"command": "dof_names", "name": "world-arm-dof-names"}))
+    names = result["dof_names"]
+    assert len(names) == 12
+    assert list(names[:6]) == list(UR_JOINT_NAMES)
+
+
+def test_do_command_all_dof_names(world):
+    IsaacArm.new(
+        _config(
+            "world-arm-all-dof-names", {"world": "isaac-world", "asset": "ur20", "mock_dof": 12}
+        ),
+        {},
+    )
+    result = asyncio.run(
+        world.do_command({"command": "dof_names", "name": "world-arm-all-dof-names", "all": True})
+    )
+    names = result["dof_names"]
+    assert len(names) == 12
+    assert list(names[:6]) == list(UR_JOINT_NAMES)
+
+
+def test_do_command_prim_pose_default_prim(world):
+    IsaacArm.new(
+        _config("world-arm-prim-pose", {"world": "isaac-world", "asset": "ur5e", "mock_dof": 6}),
+        {},
+    )
+
+    async def scenario():
+        return await world.do_command({"command": "prim_pose", "name": "world-arm-prim-pose"})
+
+    result = asyncio.run(scenario())
+    # NOTE: the brief expected [-300, 0, 300] (root rotated by the ur5e
+    # correction); MockArmHandle._ee_world_pose actually composes the
+    # fixed local EE onto Viam's un-rotated base frame (it cancels the
+    # correction out via viam_base_frame), so this is invariant to
+    # base_frame_correction and always [300, 0, 300] here.
+    assert result["position_mm"] == pytest.approx([300.0, 0.0, 300.0], abs=1e-3)
+    assert len(result["quaternion_wxyz"]) == 4
+
+
+def test_do_command_prim_pose_unknown_prim_raises(world):
+    IsaacArm.new(
+        _config(
+            "world-arm-prim-pose-unknown",
+            {"world": "isaac-world", "asset": "ur5e", "mock_dof": 6},
+        ),
+        {},
+    )
+
+    async def scenario():
+        await world.do_command(
+            {
+                "command": "prim_pose",
+                "name": "world-arm-prim-pose-unknown",
+                "prim_path": "/World/nope",
+            }
+        )
+
+    with pytest.raises(PrimNotFoundError):
+        asyncio.run(scenario())
+
+
+def test_joint_state_do_command_reports_targets_next_to_positions(world):
+    arm = IsaacArm.new(
+        _config("world-arm-joint-state", {"world": "isaac-world", "asset": "ur20", "mock_dof": 6}),
+        {},
+    )
+
+    async def scenario():
+        await arm.move_to_joint_positions(JointPositions(values=[10, -20, 30, 0, 5, -5]))
+        return await world.do_command({"command": "joint_state", "name": "world-arm-joint-state"})
+
+    out = asyncio.run(scenario())
+    joints = out["joints"]
+    assert [j["name"] for j in joints] == list(UR_JOINT_NAMES)
+    assert all(j["named"] for j in joints)
+    assert [j["target_deg"] for j in joints] == pytest.approx([10, -20, 30, 0, 5, -5])
+    assert [j["position_deg"] for j in joints] == pytest.approx([10, -20, 30, 0, 5, -5], abs=0.5)
+
+
+def test_tcp_pose_do_command_measures_the_configured_offset_in_mock(world):
+    """GPU checklist item 4: the fingertip midpoint sits tcp_offset_m along the
+    mount link's +Z, so measured == configured and delta is 0 in the mock."""
+    arm = IsaacArm.new(_config("world-tcp-arm", {"world": "isaac-world", "asset": "ur5e"}), {})
+    IsaacGripper.new(
+        _config("world-tcp-grip", {"world": "isaac-world", "arm": arm.name, "tcp_offset_m": 0.115}),
+        {},
+    )
+    out = asyncio.run(world.do_command({"command": "tcp_pose", "name": "world-tcp-grip"}))
+    assert out["configured_tcp_offset_mm"] == pytest.approx(115.0)
+    assert out["measured_tcp_offset_mm"] == pytest.approx(115.0)
+    assert out["delta_mm"] == pytest.approx(0.0)
+    assert out["pad_center_midpoint_mm"] == pytest.approx([0.0, 0.0, 115.0])
+    assert out["jaw_gap_mm"] == pytest.approx(85.0)
+    assert out["fingertip_reach_mm"] == pytest.approx(115.0 + 19.0)
+    assert set(out) >= {"parent", "left_inner_finger", "right_inner_finger", "fingertips"}
+
+
+def test_do_command_unknown_name_raises(world):
+    with pytest.raises(ValueError, match="no sim component named"):
+        asyncio.run(world.do_command({"command": "joint_state", "name": "does-not-exist"}))
+
+
+def test_do_command_wrong_kind_name_raises(world):
+    arm = IsaacArm.new(
+        _config("world-wrong-kind-arm", {"world": "isaac-world", "asset": "ur5e", "mock_dof": 6}),
+        {},
+    )
+    IsaacGripper.new(
+        _config("world-wrong-kind-grip", {"world": "isaac-world", "arm": arm.name}), {}
+    )
+    with pytest.raises(ValueError, match="not an arm"):
+        asyncio.run(world.do_command({"command": "joint_state", "name": "world-wrong-kind-grip"}))
 
 
 def test_unknown_command_lists_verbs(world):

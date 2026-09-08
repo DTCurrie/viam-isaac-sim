@@ -41,15 +41,6 @@ if [ -x "$VENV/bin/python" ] && "$VENV/bin/python" -c "import isaacsim" >/dev/nu
     exit 0
 fi
 
-SUDO=""
-if [ "$(id -u)" != "0" ]; then
-    if sudo -n true 2>/dev/null; then
-        SUDO="sudo -n"
-    else
-        log "WARNING: not root and no passwordless sudo; skipping apt steps"
-    fi
-fi
-
 # ---------------------------------------------------------------------------
 # pick isaac sim version by ubuntu release (it dictates the python version)
 # ---------------------------------------------------------------------------
@@ -67,13 +58,32 @@ case "$UBUNTU" in
         NEED_DEADSNAKES=1
         ;;
     *)
-        log "WARNING: untested distro ($PRETTY_NAME); trying python3.11 + isaac 5.0.0"
+        log "WARNING: untested distro (${PRETTY_NAME:-unknown}); trying python3.11 + isaac 5.0.0"
         PYBIN=python3.11
         ISAAC_VERSION=5.0.0
         NEED_DEADSNAKES=1
         ;;
 esac
 log "ubuntu $UBUNTU -> isaac sim $ISAAC_VERSION on $PYBIN"
+
+if [ -n "${FIRST_RUN_DRY_RUN:-}" ]; then
+    log "dry run: would install apt packages (vulkan/GL libs, python, curl)"
+    log "dry run: would install the validated NVIDIA driver 580 branch if none is present"
+    log "dry run: would create a $PYBIN venv at $VENV"
+    log "dry run: would pip install isaacsim==$ISAAC_VERSION from https://pypi.nvidia.com"
+    log "dry run: would install module python dependencies into $VENV"
+    log "dry run: would write the isaac python marker to $MARKER"
+    exit 0
+fi
+
+SUDO=""
+if [ "$(id -u)" != "0" ]; then
+    if sudo -n true 2>/dev/null; then
+        SUDO="sudo -n"
+    else
+        log "WARNING: not root and no passwordless sudo; skipping apt steps"
+    fi
+fi
 
 # ---------------------------------------------------------------------------
 # apt: system libs, python, gpu driver

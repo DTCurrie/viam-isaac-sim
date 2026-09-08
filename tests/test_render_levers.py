@@ -15,7 +15,7 @@ from isaac_module.sim_manager import SimConfig, SimManager
 
 
 def _world_config(attrs: dict) -> ComponentConfig:
-    return ComponentConfig(name="sim-world", attributes=dict_to_struct(attrs))
+    return ComponentConfig(name="isaac-world", attributes=dict_to_struct(attrs))
 
 
 # ----------------------------------------------------------------------

@@ -5,11 +5,17 @@
       "name": "viam_isaac-sim-devin",
       "module_id": "viam:isaac-sim-devin",
       "version": "latest-with-prerelease"
+    },
+    {
+      "type": "registry",
+      "name": "viam_detections-to-segments",
+      "module_id": "viam:detections-to-segments",
+      "version": "1.3.1"
     }
   ],
   "components": [
     {
-      "name": "sim-world",
+      "name": "isaac-world",
       "api": "rdk:component:generic",
       "model": "viam:isaac-sim-devin:world",
       "frame": {
@@ -479,7 +485,7 @@
         "translation": { "x": 0, "y": 0, "z": 750 }
       },
       "attributes": {
-        "world": "sim-world",
+        "world": "isaac-world",
         "asset": "ur20"
       }
     },
@@ -492,7 +498,7 @@
         "translation": { "x": 0, "y": 0, "z": 134 }
       },
       "attributes": {
-        "world": "sim-world",
+        "world": "isaac-world",
         "arm": "pick-arm"
       }
     },
@@ -505,7 +511,7 @@
         "translation": { "x": 3200, "y": 3200, "z": 2600 }
       },
       "attributes": {
-        "world": "sim-world",
+        "world": "isaac-world",
         "target": [0, 0, 0.3],
         "width": 1280,
         "height": 720
@@ -530,7 +536,7 @@
         }
       },
       "attributes": {
-        "world": "sim-world",
+        "world": "isaac-world",
         "depth": true,
         "width": 848,
         "height": 480,
@@ -556,7 +562,7 @@
         }
       },
       "attributes": {
-        "world": "sim-world",
+        "world": "isaac-world",
         "parent_prim": "/World/pick_arm/wrist_3_link",
         "depth": true,
         "width": 848,
@@ -785,7 +791,7 @@
       "api": "rdk:service:generic",
       "model": "viam:isaac-sim-devin:conductor",
       "attributes": {
-        "world": "sim-world",
+        "world": "isaac-world",
         "arm": "pick-arm",
         "gripper": "pick-grip",
         "camera": "wrist-cam",

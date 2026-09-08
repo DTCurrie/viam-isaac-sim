@@ -1,7 +1,7 @@
 """viam:isaac-sim-devin:arm - a simulated arm.
 
 Attributes:
-  world (string, required)   - name of the viam:isaac-sim-devin:world component
+  world (string, default "isaac-world") - name of the viam:isaac-sim-devin:world component
   asset (string)             - known robot, e.g. "ur20", "ur10", "franka"
   usd_path (string)          - explicit USD to spawn instead of a known asset
   prim_path (string)         - where to place it (default /World/<name>), or
@@ -20,7 +20,7 @@ Attributes:
 Note: GetEndPosition reports the end effector pose in the arm base frame
 (not world frame) as of this release.
 
-Move completion (ARM-12/ARM-13, FINDINGS R-7/R-8): moves settle via
+Move completion: moves settle via
 ArmHandle.wait_for_settle - no wall-clock polling - and raise one of:
   JointTargetOutOfLimitsError (ValueError, INVALID_ARGUMENT)  - a target is
     outside the SVA's declared joint limits, or the joint count doesn't
@@ -30,14 +30,16 @@ ArmHandle.wait_for_settle - no wall-clock polling - and raise one of:
   ArmMoveTimeoutError (TimeoutError, DEADLINE_EXCEEDED) - the move deadline
     (move_timeout_sec, capped by the SDK's timeout= kwarg) passed while the
     arm was still converging.
+MoveToPosition solves against the served kinematics and drives the joint
+path, so the frame system, the motion service and the sim agree by
+construction.
 move_through_joint_positions honours MoveOptions.max_vel_degs_per_sec_joints
 (the min across joints) when set, else max_vel_degs_per_sec; the
 acceleration fields and max_tcp_speed are logged once and not honoured.
-DoCommand "all_dof_names" returns every DOF of the articulation (arm joints
-plus anything attached under it, e.g. a gripper); "dof_names" stays just the
-arm's named joints.
+DoCommand answers no sim-only verbs; the world component's DoCommand
+(joint_state/dof_names/prim_pose) reads this arm's sim state instead.
 
-close() releases the handle and its post-reset hooks (XC-4); the prim stays
+close() releases the handle and its post-reset hooks. The prim stays
 in the stage. A reconfigure that changes a spawn attribute (asset, usd_path,
 prim_path, position, or the frame it derives from) after the arm is already
 attached raises ValueError - restart the module to apply it.
@@ -56,7 +58,7 @@ from typing import Any, ClassVar
 from grpclib import Status
 from typing_extensions import Self
 from viam.components.arm import Arm, JointPositions, KinematicsFileFormat, Pose
-from viam.errors import MethodNotImplementedError, ViamGRPCError
+from viam.errors import ViamGRPCError
 from viam.proto.app.robot import ComponentConfig
 from viam.proto.common import Geometry, ResourceName
 from viam.proto.component.arm import MoveOptions
@@ -66,29 +68,34 @@ from viam.resource.types import Model, ModelFamily
 from viam.utils import ValueTypes
 
 from .. import FAMILY, NAMESPACE
+from ..kinematics import Chain, JointLimitError, UnreachablePoseError
 from ..sim_manager import (
     KNOWN_ASSETS,
     SETTLE_TOL_RAD,
     ArmHandle,
     SettleOutcome,
     SimManager,
-    _prim_name,
 )
-from ..spatial import quat_to_ov
+from ..spatial import ov_to_quat, quat_to_ov
 from .utils import apply_frame_to_attrs, get_attrs, validate_sim_component
 
 _TOLERANCE_RAD = SETTLE_TOL_RAD
 _WAYPOINT_TOLERANCE_RAD = math.radians(2.0)
 _WAYPOINT_DEADLINE_S = 10.0
-# observed settle drift past a limit is ~3e-5 deg (GPU phase-1, wrist_2 at
+# observed settle drift past a limit is ~3e-5 deg (wrist_2 at
 # -360.00003); 0.01 covers it by orders of magnitude while a genuinely wrong
 # target still raises
 _JOINT_LIMIT_TOLERANCE_DEG = 0.01
+_MM_PER_M = 1000.0
+# the real driver skips a MoveToPosition when already within these
+# thresholds of the target (docs/PARITY.md, Arm move_to_position row)
+_POSITION_SKIP_TOL_M = 1e-3
+_ANGULAR_SKIP_TOL_RAD = math.radians(0.06)
 
 
 class JointTargetOutOfLimitsError(ViamGRPCError, ValueError):
     """A commanded joint target is outside the SVA's declared limits, or the
-    number of joint values doesn't match the arm's DOF count (ARM-13)."""
+    number of joint values doesn't match the arm's DOF count."""
 
     def __init__(self, message: str) -> None:
         ViamGRPCError.__init__(self, message, Status.INVALID_ARGUMENT)
@@ -97,7 +104,7 @@ class JointTargetOutOfLimitsError(ViamGRPCError, ValueError):
 
 class ArmMoveStalledError(ViamGRPCError):
     """The arm stopped moving (velocities settled) before reaching its
-    commanded target - e.g. blocked by an obstacle (ARM-12/ARM-13)."""
+    commanded target - e.g. blocked by an obstacle."""
 
     def __init__(self, message: str) -> None:
         ViamGRPCError.__init__(self, message, Status.ABORTED)
@@ -106,11 +113,44 @@ class ArmMoveStalledError(ViamGRPCError):
 
 class ArmMoveTimeoutError(ViamGRPCError, TimeoutError):
     """The move deadline passed while the arm was still converging on its
-    target (ARM-12/ARM-13)."""
+    target."""
 
     def __init__(self, message: str) -> None:
         ViamGRPCError.__init__(self, message, Status.DEADLINE_EXCEEDED)
         Exception.__init__(self, message)
+
+
+class PoseUnreachableError(ViamGRPCError, ValueError):
+    """No joint solution reaches the requested pose within the kinematics
+    solver's tolerances."""
+
+    def __init__(self, message: str) -> None:
+        ViamGRPCError.__init__(self, message, Status.INVALID_ARGUMENT)
+        Exception.__init__(self, message)
+
+
+class KinematicsUnavailableError(ViamGRPCError, RuntimeError):
+    """The arm has no kinematics file to solve MoveToPosition against (no
+    kinematics_url and no known asset kinematics)."""
+
+    def __init__(self, message: str) -> None:
+        ViamGRPCError.__init__(self, message, Status.FAILED_PRECONDITION)
+        Exception.__init__(self, message)
+
+
+def _pose_within_tolerance(
+    pos: tuple[float, float, float],
+    quat: tuple[float, float, float, float],
+    target_pos: tuple[float, float, float],
+    target_quat: tuple[float, float, float, float],
+) -> bool:
+    """True when `pos`/`quat` are within `_POSITION_SKIP_TOL_M` and
+    `_ANGULAR_SKIP_TOL_RAD` of the target, matching the "already there" skip
+    the real driver applies before commanding a move."""
+    position_error = math.dist(pos, target_pos)
+    dot = sum(a * b for a, b in zip(quat, target_quat, strict=True))
+    angular_error = 2 * math.acos(min(1.0, abs(dot)))
+    return position_error < _POSITION_SKIP_TOL_M and angular_error < _ANGULAR_SKIP_TOL_RAD
 
 
 def _stuck_joint_detail(
@@ -135,6 +175,7 @@ class IsaacArm(Arm, EasyResource):  # type: ignore[misc]  # SDK: API is Final on
         self._kinematics: tuple[KinematicsFileFormat.ValueType, bytes] | None = None
         self._kinematics_load_has_failed = False
         self._has_warned_options = False
+        self._kinematics_chain: Chain | None = None
 
     @classmethod
     def new(
@@ -155,9 +196,10 @@ class IsaacArm(Arm, EasyResource):  # type: ignore[misc]  # SDK: API is Final on
         self._move_timeout = float(attrs.get("move_timeout_sec", 30.0))
         self._attrs = attrs
         self._handle = SimManager.get().create_arm(self.name, attrs)
+        self._kinematics_chain = None
 
     async def close(self) -> None:
-        """XC-4: release the handle (hooks, callbacks); the prim stays attached."""
+        """Release the handle (hooks, callbacks). The prim stays attached."""
         SimManager.get().release_handle(self.name)
         self._handle = None
 
@@ -183,10 +225,55 @@ class IsaacArm(Arm, EasyResource):  # type: ignore[misc]  # SDK: API is Final on
             theta=math.degrees(theta),
         )
 
-    async def move_to_position(self, pose: Pose, **kwargs) -> None:
-        # IK and motion planning are Viam's job, not the module's: the motion
-        # service does this via GetKinematics + move_to_joint_positions.
-        raise MethodNotImplementedError("move_to_position")
+    async def _chain(self) -> Chain:
+        """The served kinematics as a `Chain`, loaded and parsed once."""
+        if self._kinematics_chain is not None:
+            return self._kinematics_chain
+        if self._kinematics is None:
+            if not self._kinematics_url():
+                raise KinematicsUnavailableError(
+                    f"arm {self.name}: no kinematics file to solve move_to_position "
+                    'against; set the "kinematics_url" attribute'
+                )
+            self._kinematics = await asyncio.to_thread(self._load_kinematics)
+        fmt, data = self._kinematics
+        chain = Chain.from_kinematics(fmt, data)
+        self._kinematics_chain = chain
+        return chain
+
+    async def move_to_position(
+        self,
+        pose: Pose,
+        *,
+        extra: Mapping[str, Any] | None = None,
+        timeout: float | None = None,
+        **kwargs,
+    ) -> None:
+        """Solves against the served kinematics and drives the joint path, so
+        the frame system, the motion service and the sim agree by
+        construction."""
+        chain = await self._chain()
+        target_pos = (pose.x / _MM_PER_M, pose.y / _MM_PER_M, pose.z / _MM_PER_M)
+        target_quat = ov_to_quat(pose.o_x, pose.o_y, pose.o_z, math.radians(pose.theta))
+
+        handle = self._h()
+        current = await asyncio.to_thread(handle.get_joint_positions)
+        current_pos, current_quat = chain.fk(current)
+        if _pose_within_tolerance(current_pos, current_quat, target_pos, target_quat):
+            return
+
+        try:
+            solution = chain.ik(target_pos, target_quat, current)
+        except UnreachablePoseError:
+            raise PoseUnreachableError(
+                f"arm {self.name}: no joint solution reaches pose {pose}"
+            ) from None
+        except JointLimitError as e:
+            raise JointTargetOutOfLimitsError(str(e)) from None
+
+        await self.move_to_joint_positions(
+            JointPositions(values=[math.degrees(v) for v in solution]), timeout=timeout
+        )
 
     async def _joint_limits_deg(self) -> list[tuple[str, float, float]] | None:
         """(joint id, min_deg, max_deg) per joint from the SVA kinematics, in
@@ -231,10 +318,10 @@ class IsaacArm(Arm, EasyResource):  # type: ignore[misc]  # SDK: API is Final on
     async def _clamped_joint_targets(self, targets_rad: Sequence[float]) -> list[float]:
         """The targets with any boundary value within _JOINT_LIMIT_TOLERANCE_DEG
         of an SVA limit clamped onto that limit; raises
-        JointTargetOutOfLimitsError beyond the tolerance (ARM-13). Physics
+        JointTargetOutOfLimitsError beyond the tolerance. Physics
         settle drifts a joint micro-degrees past its limit and the motion
-        service echoes that reported state back as a plan waypoint (GPU
-        phase-1: wrist_2 at -360.00003 deg wedged every subsequent plan), so
+        service echoes that reported state back as a plan waypoint
+        (wrist_2 at -360.00003 deg wedged every subsequent plan), so
         an exact-boundary target must execute, not raise. Targets pass through
         unchecked when limits aren't available."""
         limits = await self._joint_limits_deg()
@@ -306,12 +393,12 @@ class IsaacArm(Arm, EasyResource):  # type: ignore[misc]  # SDK: API is Final on
 
     def _max_vel_rad_s(self, options: MoveOptions | None) -> float | None:
         """The per-joint max_vel_degs_per_sec_joints, when non-empty, is the
-        ONLY velocity limit honoured (viam.md: the scalar is ignored in that
+        ONLY velocity limit honoured (the scalar is ignored in that
         case); the handle only takes one scalar, so the min across joints is
         used. Otherwise MoveOptions.max_vel_degs_per_sec applies when set.
         None = the drive's own limit. Acceleration fields and max_tcp_speed
         follow the same per-joint-wins precedence but aren't honoured at
-        all - logged once (ARM-13)."""
+        all - logged once."""
         if options is None:
             return None
 
@@ -479,13 +566,6 @@ class IsaacArm(Arm, EasyResource):  # type: ignore[misc]  # SDK: API is Final on
     async def get_3d_models(self, **kwargs) -> Mapping[str, Any]:
         return {}
 
-    def _default_ee_prim_path(self) -> str:
-        """The EE prim GetEndPosition/prim_world_pose fall back to when no
-        explicit prim_path is given, matching the normalisation SimManager
-        uses to spawn/mock the arm's prim."""
-        prim_path = self._attrs.get("prim_path") or f"/World/{_prim_name(self.name)}"
-        return f"{prim_path}/wrist_3_link"
-
     async def do_command(
         self,
         command: Mapping[str, ValueTypes],
@@ -493,46 +573,7 @@ class IsaacArm(Arm, EasyResource):  # type: ignore[misc]  # SDK: API is Final on
         timeout: float | None = None,
         **kwargs,
     ) -> Mapping[str, ValueTypes]:
-        cmd = command.get("command")
-        if cmd == "get_joint_positions_radians":
-            return {"values": list(await asyncio.to_thread(self._h().get_joint_positions))}
-        if cmd == "dof_names":
-            names: list[ValueTypes] = list(await asyncio.to_thread(self._h().dof_names))
-            return {"dof_names": names}
-        if cmd == "all_dof_names":
-            all_names: list[ValueTypes] = list(await asyncio.to_thread(self._h().all_dof_names))
-            return {"dof_names": all_names}
-        if cmd == "joint_state":
-            state = await asyncio.to_thread(self._h().joint_state)
-            joints: list[ValueTypes] = [
-                {
-                    "name": entry["name"],
-                    "named": entry["named"],
-                    "position_deg": math.degrees(entry["position"]),
-                    "velocity_deg_s": math.degrees(entry["velocity"]),
-                    "target_deg": (
-                        None if entry["target"] is None else math.degrees(entry["target"])
-                    ),
-                }
-                for entry in state
-            ]
-            return {"joints": joints}
-        if cmd == "prim_world_pose":
-            prim_path = command.get("prim_path") or self._default_ee_prim_path()
-            if not isinstance(prim_path, str):
-                raise ValueError(f"prim_path must be a string, got {prim_path!r}")
-            prim_path = prim_path.strip()
-            (x, y, z), quat = await asyncio.to_thread(self._h().get_prim_world_pose, prim_path)
-            ox, oy, oz, theta = quat_to_ov(quat)
-            return {
-                "prim_path": prim_path,
-                "position_mm": [x * 1000.0, y * 1000.0, z * 1000.0],
-                "quaternion_wxyz": list(quat),
-                "orientation_vector": {
-                    "o_x": ox,
-                    "o_y": oy,
-                    "o_z": oz,
-                    "theta_deg": math.degrees(theta),
-                },
-            }
+        # No sim-only verbs live here: the world's DoCommand answers
+        # joint_state/dof_names/prim_pose so a real driver's do_command
+        # never grows a verb it can't answer.
         raise ValueError(f"unknown command: {command}")

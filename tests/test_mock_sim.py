@@ -10,6 +10,7 @@ from viam.proto.app.robot import ComponentConfig
 from viam.proto.common import Vector3
 from viam.utils import dict_to_struct
 
+from isaac_module import DEFAULT_WORLD_NAME
 from isaac_module.models.arm import IsaacArm
 from isaac_module.models.base import IsaacBase
 from isaac_module.models.camera import IsaacCamera
@@ -29,24 +30,24 @@ def test_world_boots_and_status(world):
     assert status["isaac_version"] is None  # no Isaac here; a string like "5.0.0" on the VM
 
 
-def test_validate_requires_world():
-    with pytest.raises(ValueError, match="world"):
-        IsaacArm.validate_config(_config("a", {"asset": "ur20"}))
+def test_validate_defaults_world():
+    deps, _ = IsaacArm.validate_config(_config("a", {"asset": "ur20"}))
+    assert list(deps) == [DEFAULT_WORLD_NAME]
 
 
 def test_validate_requires_source():
     with pytest.raises(ValueError, match="asset"):
-        IsaacArm.validate_config(_config("a", {"world": "sim-world"}))
+        IsaacArm.validate_config(_config("a", {"world": "isaac-world"}))
 
 
 def test_validate_ok_returns_dependency():
-    deps, _ = IsaacArm.validate_config(_config("a", {"world": "sim-world", "asset": "ur20"}))
-    assert list(deps) == ["sim-world"]
+    deps, _ = IsaacArm.validate_config(_config("a", {"world": "isaac-world", "asset": "ur20"}))
+    assert list(deps) == ["isaac-world"]
 
 
 def test_arm_moves(world):
     arm = IsaacArm.new(
-        _config("my-arm", {"world": "sim-world", "asset": "ur20", "mock_dof": 6}), {}
+        _config("my-arm", {"world": "isaac-world", "asset": "ur20", "mock_dof": 6}), {}
     )
 
     async def scenario():
@@ -89,7 +90,7 @@ def test_arm_moves(world):
 
 def test_camera_returns_image(world):
     cam = IsaacCamera.new(
-        _config("my-cam", {"world": "sim-world", "width": 320, "height": 240}), {}
+        _config("my-cam", {"world": "isaac-world", "width": 320, "height": 240}), {}
     )
 
     async def scenario():
@@ -112,7 +113,7 @@ def test_camera_returns_image(world):
 
 
 def test_base_drives(world):
-    base = IsaacBase.new(_config("my-base", {"world": "sim-world", "asset": "jetbot"}), {})
+    base = IsaacBase.new(_config("my-base", {"world": "isaac-world", "asset": "jetbot"}), {})
 
     async def scenario():
         assert not await base.is_moving()

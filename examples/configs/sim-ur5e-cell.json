@@ -1,0 +1,105 @@
+{
+  "modules": [
+    {
+      "type": "registry",
+      "name": "viam_isaac-sim-devin",
+      "module_id": "viam:isaac-sim-devin",
+      "version": "0.4.1"
+    }
+  ],
+  "components": [
+    {
+      "name": "isaac-world",
+      "api": "rdk:component:generic",
+      "model": "viam:isaac-sim-devin:world",
+      "frame": {
+        "parent": "world"
+      },
+      "attributes": {
+        "headless": true,
+        "livestream": true,
+        "lighting": {
+          "dome": {
+            "intensity": 1000,
+            "color": [
+              1,
+              1,
+              1
+            ]
+          },
+          "sphere_intensity": 30000
+        },
+        "livestream_public_ip": ""
+      }
+    },
+    {
+      "name": "pick-arm",
+      "api": "rdk:component:arm",
+      "model": "viam:isaac-sim-devin:arm",
+      "frame": {
+        "parent": "world",
+        "translation": {
+          "x": 0,
+          "y": 0,
+          "z": 750
+        }
+      },
+      "attributes": {
+        "world": "isaac-world",
+        "asset": "ur5e"
+      }
+    },
+    {
+      "name": "pick-grip",
+      "api": "rdk:component:gripper",
+      "model": "viam:isaac-sim-devin:gripper",
+      "frame": {
+        "parent": "pick-arm",
+        "translation": {
+          "x": 0,
+          "y": 0,
+          "z": 134
+        }
+      },
+      "attributes": {
+        "world": "isaac-world",
+        "asset": "robotiq_2f_85",
+        "arm": "pick-arm"
+      }
+    },
+    {
+      "name": "wrist-cam",
+      "api": "rdk:component:camera",
+      "model": "viam:isaac-sim-devin:camera",
+      "frame": {
+        "parent": "pick-arm",
+        "translation": {
+          "x": 0,
+          "y": 30,
+          "z": 40
+        }
+      },
+      "attributes": {
+        "world": "isaac-world",
+        "width": 640,
+        "height": 480,
+        "parent_prim": "/World/pick_arm/wrist_3_link",
+        "depth": true
+      }
+    }
+  ],
+  "services": [
+    {
+      "name": "red-detector",
+      "api": "rdk:service:vision",
+      "model": "rdk:builtin:color_detector",
+      "attributes": {
+        "detect_color": "#EA8D8D",
+        "camera_name": "wrist-cam",
+        "hue_tolerance_pct": 0.05,
+        "segment_size_px": 100,
+        "value_cutoff_pct": 0.15
+      }
+    }
+  ]
+}

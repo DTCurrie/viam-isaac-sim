@@ -5,7 +5,7 @@ from typing import Any
 from viam.proto.app.robot import ComponentConfig
 from viam.utils import struct_to_dict
 
-from .. import FAMILY, NAMESPACE
+from .. import DEFAULT_WORLD_NAME, FAMILY, NAMESPACE
 from ..sim_manager import _prim_name
 from ..spatial import Quat, Vec3, ov_to_quat, quat_from_axis_angle, quat_mul
 
@@ -57,8 +57,7 @@ def apply_frame_to_attrs(config: ComponentConfig, attrs: dict[str, Any]) -> dict
     When "parent_prim" is set the component rides another prim, so the frame
     describes a LOCAL pose relative to that prim, not a world pose: it is
     written to local_position/local_orientation_wxyz instead of
-    position/orientation_wxyz (CAM-10 - mixing the two meant a world pose
-    landed on a mounted camera)."""
+    position/orientation_wxyz. Mixing the two meant a world pose landed on a mounted camera."""
     position, quat = frame_pose(config)
     if attrs.get("parent_prim"):
         if position is not None:
@@ -109,16 +108,18 @@ def validate_sim_component(
     config: ComponentConfig, needs_source: bool = True
 ) -> tuple[Sequence[str], Sequence[str]]:
     """Shared validation for arm/camera/base: they must name their world
-    component (so viam-server starts it first) and, when they spawn a prim,
-    say what to spawn. A component riding another prim (parent_prim) also
-    depends on the component that owns that prim, so viam-server builds the
-    owner first - siblings build concurrently, and a mounted camera built
-    before its arm fails with PrimNotFoundError (seen on the GPU, phase 3)."""
+    component (so viam-server starts it first, defaulting to
+    DEFAULT_WORLD_NAME) and, when they spawn a prim, say what to spawn. A
+    component riding another prim (parent_prim) also depends on the component
+    that owns that prim, so viam-server builds the owner first - siblings
+    build concurrently, and a mounted camera built before its arm fails with
+    PrimNotFoundError."""
     attrs = struct_to_dict(config.attributes)
-    world = attrs.get("world")
+    world = attrs.get("world", DEFAULT_WORLD_NAME)
     if not world or not isinstance(world, str):
         raise ValueError(
-            f'{config.name}: set the "world" attribute to the name of your '
+            f'{config.name}: "world" defaults to "{DEFAULT_WORLD_NAME}" and, when set, '
+            "must be a non-empty string naming your "
             f"{NAMESPACE}:{FAMILY}:world component"
         )
     if needs_source and not (attrs.get("asset") or attrs.get("usd_path") or attrs.get("prim_path")):
@@ -139,4 +140,21 @@ def validate_sim_component(
                 f"components in this release (got {parent!r}); to ride another prim "
                 'set "parent_prim"'
             )
+        _reject_pose_attributes_beside_frame(config, attrs)
     return [world], []
+
+
+# The spawn pose comes from the frame when one is set, so a pose attribute beside
+# it would be silently ignored: a camera configured at [1.2, 1.2, 0.9] with a
+# translation-less frame spawned at the origin, inside the arm, and rendered
+# black with no error (GPU machine, 2026-09-08).
+_POSE_ATTRIBUTES = ("position", "orientation_rpy_deg", "orientation_wxyz")
+
+
+def _reject_pose_attributes_beside_frame(config: ComponentConfig, attrs: dict[str, Any]) -> None:
+    present = [key for key in _POSE_ATTRIBUTES if key in attrs]
+    if present:
+        raise ValueError(
+            f"{config.name}: {', '.join(present)} would be ignored because a frame is set. "
+            "Put the pose in frame.translation (mm) and frame.orientation, or remove the frame"
+        )

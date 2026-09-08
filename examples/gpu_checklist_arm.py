@@ -23,6 +23,7 @@ import math
 from dataclasses import dataclass
 
 from viam.components.arm import Arm
+from viam.components.generic import Generic
 from viam.proto.common import Pose, PoseInFrame
 from viam.robot.client import RobotClient
 from viam.services.motion import MotionClient
@@ -133,6 +134,7 @@ class Args:
     api_key_id: str | None
     arm: str
     motion: str
+    world: str
     block_xyz_m: tuple[float, float, float]
     pregrasp_clearance_mm: float
     skip_move: bool
@@ -145,6 +147,7 @@ def _parse_args() -> Args:
     parser.add_argument("--api-key-id")
     parser.add_argument("--arm", default="pick-arm")
     parser.add_argument("--motion", default="builtin")
+    parser.add_argument("--world", default="isaac-world", help="the isaac-sim world component name")
     parser.add_argument("--block-xyz-m", default="0.60,0.10,0.7755")
     parser.add_argument("--pregrasp-clearance-mm", type=float, default=100.0)
     parser.add_argument("--skip-move", action="store_true")
@@ -156,6 +159,7 @@ def _parse_args() -> Args:
         api_key_id=ns.api_key_id,
         arm=ns.arm,
         motion=ns.motion,
+        world=ns.world,
         block_xyz_m=(bx, by, bz),
         pregrasp_clearance_mm=ns.pregrasp_clearance_mm,
         skip_move=ns.skip_move,
@@ -184,8 +188,8 @@ async def _check_joints_zero(arm: Arm) -> tuple[str, bool]:
     return line, ok
 
 
-async def _check_dof_names(arm: Arm) -> tuple[str, bool]:
-    result = await arm.do_command({"command": "dof_names"})
+async def _check_dof_names(arm: Arm, world: Generic) -> tuple[str, bool]:
+    result = await world.do_command({"command": "dof_names", "name": arm.name})
     names = list(result["dof_names"])  # type: ignore[arg-type]
     print(f"  dof_names ({len(names)}): {names}")
     line = verdict("5. dof_names logged", True, f"{len(names)} dofs: {names}")
@@ -193,12 +197,14 @@ async def _check_dof_names(arm: Arm) -> tuple[str, bool]:
     return line, True
 
 
-async def _prim_world_pose(arm: Arm) -> dict:
-    return dict(await arm.do_command({"command": "prim_world_pose"}))
+async def _prim_world_pose(arm: Arm, world: Generic) -> dict:
+    return dict(await world.do_command({"command": "prim_pose", "name": arm.name}))
 
 
-async def _check_world_pose(arm: Arm, motion: MotionClient) -> tuple[str, bool, dict]:
-    prim_result = await _prim_world_pose(arm)
+async def _check_world_pose(
+    arm: Arm, motion: MotionClient, world: Generic
+) -> tuple[str, bool, dict]:
+    prim_result = await _prim_world_pose(arm, world)
     isaac_pose: PoseTuple = (
         *prim_result["position_mm"],
         prim_result["orientation_vector"]["o_x"],
@@ -318,6 +324,7 @@ async def main() -> None:
     try:
         arm = Arm.from_robot(machine, args.arm)
         motion = MotionClient.from_robot(machine, args.motion)
+        world = Generic.from_robot(machine, args.world)
 
         results: list[tuple[str, bool]] = []
 
@@ -325,10 +332,10 @@ async def main() -> None:
         results.append(await _check_joints_zero(arm))
 
         print("\n-- item 5: dof_names --")
-        results.append(await _check_dof_names(arm))
+        results.append(await _check_dof_names(arm, world))
 
         print("\n-- item 1: isaac prim world pose vs viam world pose --")
-        line, ok, prim_result = await _check_world_pose(arm, motion)
+        line, ok, prim_result = await _check_world_pose(arm, motion, world)
         results.append((line, ok))
 
         print("\n-- item 2: get_end_position vs viam arm-frame pose --")

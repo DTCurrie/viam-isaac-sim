@@ -6,20 +6,17 @@ import time
 
 import pytest
 from grpclib import Status
-from viam.components.arm import JointPositions, Pose
-from viam.errors import MethodNotImplementedError
+from viam.components.arm import JointPositions
 from viam.proto.app.robot import ComponentConfig
 from viam.proto.component.arm import MoveOptions
 from viam.utils import dict_to_struct
 
-from isaac_module.errors import PrimNotFoundError
 from isaac_module.models.arm import (
     ArmMoveStalledError,
     ArmMoveTimeoutError,
     IsaacArm,
     JointTargetOutOfLimitsError,
 )
-from isaac_module.sim_manager import UR_JOINT_NAMES
 
 
 def _config(name: str, attrs: dict) -> ComponentConfig:
@@ -27,7 +24,7 @@ def _config(name: str, attrs: dict) -> ComponentConfig:
 
 
 def _arm(world, name: str = "test-arm") -> IsaacArm:
-    return IsaacArm.new(_config(name, {"world": "sim-world", "asset": "ur20", "mock_dof": 6}), {})
+    return IsaacArm.new(_config(name, {"world": "isaac-world", "asset": "ur20", "mock_dof": 6}), {})
 
 
 def test_move_to_joint_positions_length_mismatch_raises(world):
@@ -53,16 +50,6 @@ def test_move_to_joint_positions_matching_length_moves(world):
     asyncio.run(scenario())
 
 
-def test_move_to_position_raises_method_not_implemented(world):
-    arm = _arm(world, "arm-move-to-position")
-
-    async def scenario():
-        with pytest.raises(MethodNotImplementedError):
-            await arm.move_to_position(Pose())
-
-    asyncio.run(scenario())
-
-
 def test_get_geometries_returns_empty_list(world):
     arm = _arm(world, "arm-geometries")
 
@@ -81,52 +68,6 @@ def test_get_3d_models_returns_empty_dict(world):
     asyncio.run(scenario())
 
 
-def test_do_command_dof_names(world):
-    arm = IsaacArm.new(
-        _config("arm-dof-names", {"world": "sim-world", "asset": "ur20", "mock_dof": 12}), {}
-    )
-
-    async def scenario():
-        result = await arm.do_command({"command": "dof_names"})
-        names = result["dof_names"]
-        assert len(names) == 12
-        assert list(names[:6]) == list(UR_JOINT_NAMES)
-
-    asyncio.run(scenario())
-
-
-def test_do_command_prim_world_pose_default_prim(world):
-    arm = IsaacArm.new(
-        _config("arm-prim-pose", {"world": "sim-world", "asset": "ur5e", "mock_dof": 6}), {}
-    )
-
-    async def scenario():
-        result = await arm.do_command({"command": "prim_world_pose"})
-        # NOTE: the brief expected [-300, 0, 300] (root rotated by the ur5e
-        # correction); MockArmHandle._ee_world_pose actually composes the
-        # fixed local EE onto Viam's un-rotated base frame (it cancels the
-        # correction out via viam_base_frame), so this is invariant to
-        # base_frame_correction and always [300, 0, 300] here - see
-        # Deviations in the slice report.
-        assert result["position_mm"] == pytest.approx([300.0, 0.0, 300.0], abs=1e-3)
-        assert len(result["quaternion_wxyz"]) == 4
-
-    asyncio.run(scenario())
-
-
-def test_do_command_prim_world_pose_unknown_prim_raises(world):
-    arm = IsaacArm.new(
-        _config("arm-prim-pose-unknown", {"world": "sim-world", "asset": "ur5e", "mock_dof": 6}),
-        {},
-    )
-
-    async def scenario():
-        with pytest.raises(PrimNotFoundError):
-            await arm.do_command({"command": "prim_world_pose", "prim_path": "/World/nope"})
-
-    asyncio.run(scenario())
-
-
 def test_do_command_unknown_command_raises(world):
     arm = _arm(world, "arm-unknown-command")
 
@@ -137,25 +78,11 @@ def test_do_command_unknown_command_raises(world):
     asyncio.run(scenario())
 
 
-def test_do_command_all_dof_names(world):
-    arm = IsaacArm.new(
-        _config("arm-all-dof-names", {"world": "sim-world", "asset": "ur20", "mock_dof": 12}), {}
-    )
-
-    async def scenario():
-        result = await arm.do_command({"command": "all_dof_names"})
-        names = result["dof_names"]
-        assert len(names) == 12
-        assert list(names[:6]) == list(UR_JOINT_NAMES)
-
-    asyncio.run(scenario())
-
-
 def test_move_to_joint_positions_stall_raises_quickly(world):
     arm = IsaacArm.new(
         _config(
             "arm-stall",
-            {"world": "sim-world", "asset": "ur20", "mock_dof": 6, "mock_stall_fraction": 0.5},
+            {"world": "isaac-world", "asset": "ur20", "mock_dof": 6, "mock_stall_fraction": 0.5},
         ),
         {},
     )
@@ -177,7 +104,7 @@ def test_move_through_joint_positions_timeout_raises(world):
     arm = IsaacArm.new(
         _config(
             "arm-timeout",
-            {"world": "sim-world", "asset": "ur20", "mock_dof": 6, "move_timeout_sec": 0.2},
+            {"world": "isaac-world", "asset": "ur20", "mock_dof": 6, "move_timeout_sec": 0.2},
         ),
         {},
     )
@@ -216,7 +143,7 @@ def test_move_to_joint_positions_out_of_limits_raises(world, tmp_path):
         _config(
             "arm-limits",
             {
-                "world": "sim-world",
+                "world": "isaac-world",
                 "asset": "ur20",
                 "mock_dof": 6,
                 "kinematics_url": path.as_uri(),
@@ -269,7 +196,7 @@ def test_boundary_joint_target_clamps_instead_of_raising(world, tmp_path):
         _config(
             "arm-boundary-limits",
             {
-                "world": "sim-world",
+                "world": "isaac-world",
                 "asset": "ur20",
                 "mock_dof": 6,
                 "kinematics_url": path.as_uri(),
@@ -319,7 +246,7 @@ def test_get_joint_positions_clamps_a_micro_drift_past_a_limit(world, tmp_path):
         _config(
             "arm-report-limits",
             {
-                "world": "sim-world",
+                "world": "isaac-world",
                 "asset": "ur20",
                 "mock_dof": 6,
                 "kinematics_url": path.as_uri(),
@@ -348,7 +275,7 @@ def test_get_joint_positions_clamps_a_micro_drift_past_a_limit(world, tmp_path):
 
 def test_move_to_joint_positions_no_kinematics_skips_limit_check(world):
     arm = IsaacArm.new(
-        _config("arm-no-kinematics", {"world": "sim-world", "asset": "franka", "mock_dof": 6}), {}
+        _config("arm-no-kinematics", {"world": "isaac-world", "asset": "franka", "mock_dof": 6}), {}
     )
 
     async def scenario():
@@ -364,10 +291,10 @@ def test_move_to_joint_positions_no_kinematics_skips_limit_check(world):
 
 def test_move_through_joint_positions_max_vel_option_is_slower(world):
     arm_default = IsaacArm.new(
-        _config("arm-through-default", {"world": "sim-world", "asset": "ur20", "mock_dof": 6}), {}
+        _config("arm-through-default", {"world": "isaac-world", "asset": "ur20", "mock_dof": 6}), {}
     )
     arm_slow = IsaacArm.new(
-        _config("arm-through-slow", {"world": "sim-world", "asset": "ur20", "mock_dof": 6}), {}
+        _config("arm-through-slow", {"world": "isaac-world", "asset": "ur20", "mock_dof": 6}), {}
     )
 
     async def scenario():
@@ -394,10 +321,11 @@ def test_move_through_joint_positions_per_joint_max_vel_wins_over_scalar(world):
     to a slow per-joint limit; only honouring the per-joint value produces a
     move slower than the unlimited case."""
     arm_default = IsaacArm.new(
-        _config("arm-priority-default", {"world": "sim-world", "asset": "ur20", "mock_dof": 6}), {}
+        _config("arm-priority-default", {"world": "isaac-world", "asset": "ur20", "mock_dof": 6}),
+        {},
     )
     arm_both_set = IsaacArm.new(
-        _config("arm-priority-both", {"world": "sim-world", "asset": "ur20", "mock_dof": 6}), {}
+        _config("arm-priority-both", {"world": "isaac-world", "asset": "ur20", "mock_dof": 6}), {}
     )
 
     async def scenario():
@@ -422,7 +350,7 @@ def test_move_through_joint_positions_per_joint_max_vel_wins_over_scalar(world):
 
 def test_is_moving_false_after_move_true_during_move(world):
     arm = IsaacArm.new(
-        _config("arm-is-moving", {"world": "sim-world", "asset": "ur20", "mock_dof": 6}), {}
+        _config("arm-is-moving", {"world": "isaac-world", "asset": "ur20", "mock_dof": 6}), {}
     )
 
     async def scenario():
@@ -444,7 +372,7 @@ def test_failed_move_holds_position_instead_of_pushing(world):
     arm = IsaacArm.new(
         _config(
             "arm-hold-after-stall",
-            {"world": "sim-world", "asset": "ur20", "mock_dof": 6, "mock_stall_fraction": 0.5},
+            {"world": "isaac-world", "asset": "ur20", "mock_dof": 6, "mock_stall_fraction": 0.5},
         ),
         {},
     )
@@ -455,22 +383,5 @@ def test_failed_move_holds_position_instead_of_pushing(world):
         assert await arm.is_moving() is False  # target re-pointed at where it stopped
         held = await arm.get_joint_positions()
         assert held.values[0] == pytest.approx(20.0, abs=1.0)  # halfway, and staying there
-
-    asyncio.run(scenario())
-
-
-def test_joint_state_do_command_reports_targets_next_to_positions(world):
-    arm = _arm(world, "arm-joint-state")
-
-    async def scenario():
-        await arm.move_to_joint_positions(JointPositions(values=[10, -20, 30, 0, 5, -5]))
-        out = await arm.do_command({"command": "joint_state"})
-        joints = out["joints"]
-        assert [j["name"] for j in joints] == list(UR_JOINT_NAMES)
-        assert all(j["named"] for j in joints)
-        assert [j["target_deg"] for j in joints] == pytest.approx([10, -20, 30, 0, 5, -5])
-        assert [j["position_deg"] for j in joints] == pytest.approx(
-            [10, -20, 30, 0, 5, -5], abs=0.5
-        )
 
     asyncio.run(scenario())

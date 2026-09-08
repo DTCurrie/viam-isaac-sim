@@ -1,7 +1,7 @@
 """viam:isaac-sim-devin:base - a simulated differential-drive base.
 
 Attributes:
-  world (string, required)     - name of the viam:isaac-sim-devin:world component
+  world (string, default "isaac-world") - name of the viam:isaac-sim-devin:world component
   asset (string)               - known robot, e.g. "jetbot" (brings sensible
                                  wheel defaults)
   usd_path (string)            - explicit robot USD to spawn
@@ -14,7 +14,7 @@ Attributes:
   max_linear_mps (float)       - full-power linear speed, default 0.5
   max_angular_rps (float)      - full-power angular speed (rad/s), default 2.0
 
-close() releases the handle (XC-4); the prim stays in the stage. A
+close() releases the handle. The prim stays in the stage. A
 reconfigure that changes a spawn attribute (asset, usd_path, prim_path,
 position, wheel_joints, or the frame it derives from) after the base is
 already attached raises ValueError - restart the module to apply it.
@@ -36,6 +36,10 @@ from viam.resource.types import Model, ModelFamily
 from .. import FAMILY, NAMESPACE
 from ..sim_manager import BaseHandle, SimManager
 from .utils import apply_frame_to_attrs, get_attrs, validate_sim_component
+
+# wheeled_base.go treats an angle or speed within this threshold of zero as
+# "nearly 0" (`wheeled_base.go:243`, `wheeled_base.go:248`)
+NEAR_ZERO_THRESHOLD = 0.0001
 
 
 class IsaacBase(Base, EasyResource):  # type: ignore[misc]  # SDK: API is Final on the component, redeclared by EasyResource
@@ -70,7 +74,7 @@ class IsaacBase(Base, EasyResource):  # type: ignore[misc]  # SDK: API is Final 
         self._handle = SimManager.get().create_base(self.name, attrs)
 
     async def close(self) -> None:
-        """XC-4: release the handle; the prim stays attached."""
+        """Release the handle. The prim stays attached."""
         SimManager.get().release_handle(self.name)
         self._handle = None
 
@@ -80,8 +84,10 @@ class IsaacBase(Base, EasyResource):  # type: ignore[misc]  # SDK: API is Final 
         return self._handle
 
     async def move_straight(self, distance: int, velocity: float, **kwargs) -> None:
-        if velocity == 0:
-            raise ValueError("velocity must be nonzero")
+        if abs(velocity) < NEAR_ZERO_THRESHOLD:
+            # a zero speed is a no-op stop, not an error (`wheeled_base.go:267`)
+            await asyncio.to_thread(self._h().stop)
+            return
         meters = distance / 1000.0
         speed = abs(velocity) / 1000.0
         direction = 1.0 if (meters >= 0) == (velocity >= 0) else -1.0
@@ -94,8 +100,13 @@ class IsaacBase(Base, EasyResource):  # type: ignore[misc]  # SDK: API is Final 
             await asyncio.to_thread(handle.stop)
 
     async def spin(self, angle: float, velocity: float, **kwargs) -> None:
-        if velocity == 0:
-            raise ValueError("velocity must be nonzero")
+        if abs(angle) < NEAR_ZERO_THRESHOLD:
+            # nearly-zero angle is an error, not a no-op (`wheeled_base.go:243`)
+            raise ValueError(f"cannot move base {self.name} for an angle that is nearly 0")
+        if abs(velocity) < NEAR_ZERO_THRESHOLD:
+            # a zero speed is a no-op stop, not an error (`wheeled_base.go:248`)
+            await asyncio.to_thread(self._h().stop)
+            return
         radians = math.radians(angle)
         speed = math.radians(abs(velocity))
         direction = 1.0 if (radians >= 0) == (velocity >= 0) else -1.0

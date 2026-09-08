@@ -13,7 +13,7 @@ as ``examples/pick_red_block.py``.
 Usage (real machine)::
 
     python examples/gpu_checklist_world.py --address <machine-address> \\
-        --api-key <key> --api-key-id <key-id> --world sim-world
+        --api-key <key> --api-key-id <key-id> --world isaac-world
 
 Usage (in-process mock, no GPU, no running machine)::
 
@@ -458,7 +458,7 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     parser.add_argument("--address", help="machine address (required unless --mock)")
     parser.add_argument("--api-key")
     parser.add_argument("--api-key-id")
-    parser.add_argument("--world", default="sim-world", help="the isaac-sim world component name")
+    parser.add_argument("--world", default="isaac-world", help="the isaac-sim world component name")
     parser.add_argument(
         "--camera",
         default="wrist-cam",

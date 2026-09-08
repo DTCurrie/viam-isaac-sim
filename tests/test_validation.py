@@ -6,7 +6,7 @@ from isaac_module.models.world import IsaacWorld
 
 
 def _config(attrs: dict) -> ComponentConfig:
-    return ComponentConfig(name="sim-world", attributes=dict_to_struct(attrs))
+    return ComponentConfig(name="isaac-world", attributes=dict_to_struct(attrs))
 
 
 def test_valid_props_pass():

@@ -23,7 +23,7 @@ def _config(name: str, attrs: dict) -> ComponentConfig:
 
 
 def _make_camera(world, name: str, attrs: dict) -> IsaacCamera:
-    full_attrs = {"world": "sim-world", **attrs}
+    full_attrs = {"world": "isaac-world", **attrs}
     return IsaacCamera.new(_config(name, full_attrs), {})
 
 
@@ -169,6 +169,23 @@ def test_point_cloud_red_cluster_centroid(world):
     asyncio.run(scenario())
 
 
+def test_point_cloud_over_the_size_limit_raises(world, monkeypatch):
+    import isaac_module.models.camera as camera_module
+
+    monkeypatch.setattr(camera_module, "MAX_POINT_CLOUD_BYTES", 100)
+    cam = _make_camera(world, "cam-pcd-oversize", {"depth": True})
+
+    async def scenario():
+        with pytest.raises(ValueError) as excinfo:
+            await cam.get_point_cloud()
+        message = str(excinfo.value)
+        assert "100" in message
+        sizes = [int(tok) for tok in message.split() if tok.isdigit()]
+        assert any(size > 100 for size in sizes)
+
+    asyncio.run(scenario())
+
+
 def test_jpeg_image_format(world):
     cam = _make_camera(world, "cam-jpeg", {"image_format": "jpeg"})
 
@@ -225,48 +242,48 @@ def test_error_mapping(world, monkeypatch):
 
 def test_validate_config_rejects_bad_attrs():
     with pytest.raises(ValueError, match="width"):
-        IsaacCamera.validate_config(_config("c", {"world": "sim-world", "width": 0}))
+        IsaacCamera.validate_config(_config("c", {"world": "isaac-world", "width": 0}))
     with pytest.raises(ValueError, match="clip_near"):
         IsaacCamera.validate_config(
-            _config("c", {"world": "sim-world", "clip_near": 5, "clip_far": 1})
+            _config("c", {"world": "isaac-world", "clip_near": 5, "clip_far": 1})
         )
     with pytest.raises(ValueError, match="image_format"):
-        IsaacCamera.validate_config(_config("c", {"world": "sim-world", "image_format": "bmp"}))
+        IsaacCamera.validate_config(_config("c", {"world": "isaac-world", "image_format": "bmp"}))
     with pytest.raises(ValueError, match="fov_deg"):
-        IsaacCamera.validate_config(_config("c", {"world": "sim-world", "fov_deg": 200}))
+        IsaacCamera.validate_config(_config("c", {"world": "isaac-world", "fov_deg": 200}))
 
 
 def test_validate_config_accepts_integral_float_dimensions():
     # protobuf Struct decodes every number as float (dict_to_struct/struct_to_dict
     # round-trip, as _config below does), so 848 arrives as 848.0 - must be accepted.
     deps, _ = IsaacCamera.validate_config(
-        _config("c", {"world": "sim-world", "width": 848, "height": 480})
+        _config("c", {"world": "isaac-world", "width": 848, "height": 480})
     )
-    assert list(deps) == ["sim-world"]
+    assert list(deps) == ["isaac-world"]
 
 
 def test_validate_config_rejects_non_integral_or_bool_dimensions():
     with pytest.raises(ValueError, match="width"):
-        IsaacCamera.validate_config(_config("c", {"world": "sim-world", "width": 848.5}))
+        IsaacCamera.validate_config(_config("c", {"world": "isaac-world", "width": 848.5}))
     with pytest.raises(ValueError, match="width"):
-        IsaacCamera.validate_config(_config("c", {"world": "sim-world", "width": True}))
+        IsaacCamera.validate_config(_config("c", {"world": "isaac-world", "width": True}))
 
 
 def test_validate_config_accepts_wrist_cam_attrs():
     deps, _ = IsaacCamera.validate_config(
         _config(
             "wrist-cam",
-            {"world": "sim-world", "depth": True, "image_format": "png", "frequency": 30},
+            {"world": "isaac-world", "depth": True, "image_format": "png", "frequency": 30},
         )
     )
-    assert list(deps) == ["sim-world"]
+    assert list(deps) == ["isaac-world"]
 
 
 def test_frame_derived_orientation_is_marked_ros_axes(world):
     """A quat folded in from the Viam frame is ROS-optical (+Z forward); the
     spawn must not read it as world axes (+X forward). GPU phase-4 run 1:
     that mismatch aimed the side camera at the backdrop (7994 mm read)."""
-    config = _config("cam-frame-ov", {"world": "sim-world", "depth": True})
+    config = _config("cam-frame-ov", {"world": "isaac-world", "depth": True})
     config.frame.parent = "world"
     config.frame.translation.x = 575
     config.frame.translation.y = 650
@@ -280,7 +297,7 @@ def test_frame_derived_orientation_is_marked_ros_axes(world):
 
 def test_parent_prim_frame_orientation_is_not_marked(world):
     config = _config(
-        "cam-riding", {"world": "sim-world", "depth": True, "parent_prim": "/World/arm/wrist"}
+        "cam-riding", {"world": "isaac-world", "depth": True, "parent_prim": "/World/arm/wrist"}
     )
     config.frame.parent = "pick-arm"
     vector = config.frame.orientation.vector_degrees

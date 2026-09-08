@@ -64,9 +64,11 @@ def test_pose_in_frame_translates_and_rotates_into_the_base():
 
 
 def test_mock_arm_end_position_is_base_frame_regardless_of_spawn_pose(world):
-    arm_at_origin = IsaacArm.new(_config("arm-origin", {"world": "sim-world", "asset": "ur5e"}), {})
+    arm_at_origin = IsaacArm.new(
+        _config("arm-origin", {"world": "isaac-world", "asset": "ur5e"}), {}
+    )
 
-    config_with_frame = _config("arm-offset", {"world": "sim-world", "asset": "ur5e"})
+    config_with_frame = _config("arm-offset", {"world": "isaac-world", "asset": "ur5e"})
     config_with_frame.frame.translation.x = 500.0
     config_with_frame.frame.translation.y = -250.0
     config_with_frame.frame.translation.z = 750.0
@@ -120,7 +122,7 @@ def test_mock_arm_end_pose_is_in_viam_frame_not_the_raw_isaac_root(world):
     # regression for the defect found 2026-08-28: get_end_pose must be
     # reported in Viam's arm frame (the root un-rotated by
     # base_frame_correction), not the raw Isaac articulation root.
-    handle = MockArmHandle("ur5e-origin", {"world": "sim-world", "asset": "ur5e"})
+    handle = MockArmHandle("ur5e-origin", {"world": "isaac-world", "asset": "ur5e"})
 
     end_pos, end_quat = handle.get_end_pose()
     assert end_pos == pytest.approx(MockArmHandle.FIXED_LOCAL_EE[0], abs=1e-9)
@@ -177,7 +179,7 @@ def test_anchor_fixed_joint_frame_rotates_the_authored_offset_into_the_spawn_fra
 
 
 def test_mock_arm_get_prim_world_pose_rejects_unknown_prim(world):
-    handle = MockArmHandle("ur5e-unknown-prim", {"world": "sim-world", "asset": "ur5e"})
+    handle = MockArmHandle("ur5e-unknown-prim", {"world": "isaac-world", "asset": "ur5e"})
 
     with pytest.raises(PrimNotFoundError):
         handle.get_prim_world_pose("/World/does_not_exist")

@@ -31,7 +31,7 @@ def _config_with_frame_translation(name: str, attrs: dict, z_mm: float) -> Compo
 
 
 def test_arm_close_forgets_handle_and_next_create_makes_a_new_one(world):
-    arm = IsaacArm.new(_config("close-arm-1", {"world": "sim-world", "asset": "ur20"}), {})
+    arm = IsaacArm.new(_config("close-arm-1", {"world": "isaac-world", "asset": "ur20"}), {})
     first_handle = arm._handle
     assert "close-arm-1" in SimManager.get()._handles
 
@@ -39,12 +39,12 @@ def test_arm_close_forgets_handle_and_next_create_makes_a_new_one(world):
     assert "close-arm-1" not in SimManager.get()._handles
     assert arm._handle is None
 
-    arm2 = IsaacArm.new(_config("close-arm-1", {"world": "sim-world", "asset": "ur20"}), {})
+    arm2 = IsaacArm.new(_config("close-arm-1", {"world": "isaac-world", "asset": "ur20"}), {})
     assert arm2._handle is not first_handle
 
 
 def test_arm_close_is_idempotent(world):
-    arm = IsaacArm.new(_config("close-arm-2", {"world": "sim-world", "asset": "ur20"}), {})
+    arm = IsaacArm.new(_config("close-arm-2", {"world": "isaac-world", "asset": "ur20"}), {})
     asyncio.run(arm.close())
     asyncio.run(arm.close())  # must not raise
     assert "close-arm-2" not in SimManager.get()._handles
@@ -52,11 +52,11 @@ def test_arm_close_is_idempotent(world):
 
 def test_arm_reconfigure_rejects_changed_spawn_attribute(world):
     arm = IsaacArm.new(
-        _config("reconf-arm-1", {"world": "sim-world", "asset": "ur20", "position": [0, 0, 0]}),
+        _config("reconf-arm-1", {"world": "isaac-world", "asset": "ur20", "position": [0, 0, 0]}),
         {},
     )
     changed = _config(
-        "reconf-arm-1", {"world": "sim-world", "asset": "ur20", "position": [1, 0, 0]}
+        "reconf-arm-1", {"world": "isaac-world", "asset": "ur20", "position": [1, 0, 0]}
     )
     with pytest.raises(ValueError, match="restart the module"):
         arm.reconfigure(changed, {})
@@ -66,14 +66,14 @@ def test_arm_reconfigure_allows_changed_runtime_attribute_and_keeps_handle(world
     arm = IsaacArm.new(
         _config(
             "reconf-arm-2",
-            {"world": "sim-world", "asset": "ur20", "move_timeout_sec": 10},
+            {"world": "isaac-world", "asset": "ur20", "move_timeout_sec": 10},
         ),
         {},
     )
     original_handle = arm._handle
     changed = _config(
         "reconf-arm-2",
-        {"world": "sim-world", "asset": "ur20", "move_timeout_sec": 99},
+        {"world": "isaac-world", "asset": "ur20", "move_timeout_sec": 99},
     )
     arm.reconfigure(changed, {})  # must not raise
     assert arm._handle is original_handle
@@ -82,12 +82,12 @@ def test_arm_reconfigure_allows_changed_runtime_attribute_and_keeps_handle(world
 def test_arm_reconfigure_rejects_changed_frame_translation(world):
     arm = IsaacArm.new(
         _config_with_frame_translation(
-            "reconf-arm-3", {"world": "sim-world", "asset": "ur20"}, 0.0
+            "reconf-arm-3", {"world": "isaac-world", "asset": "ur20"}, 0.0
         ),
         {},
     )
     changed = _config_with_frame_translation(
-        "reconf-arm-3", {"world": "sim-world", "asset": "ur20"}, 60.0
+        "reconf-arm-3", {"world": "isaac-world", "asset": "ur20"}, 60.0
     )
     with pytest.raises(ValueError, match="restart the module"):
         arm.reconfigure(changed, {})
@@ -95,11 +95,11 @@ def test_arm_reconfigure_rejects_changed_frame_translation(world):
 
 def test_cached_handle_error_lists_runtime_keys(world):
     arm = IsaacArm.new(
-        _config("reconf-arm-4", {"world": "sim-world", "asset": "ur20", "position": [0, 0, 0]}),
+        _config("reconf-arm-4", {"world": "isaac-world", "asset": "ur20", "position": [0, 0, 0]}),
         {},
     )
     changed = _config(
-        "reconf-arm-4", {"world": "sim-world", "asset": "ur20", "position": [1, 0, 0]}
+        "reconf-arm-4", {"world": "isaac-world", "asset": "ur20", "position": [1, 0, 0]}
     )
     with pytest.raises(ValueError, match="move_timeout_sec"):
         arm.reconfigure(changed, {})
@@ -110,7 +110,7 @@ def test_cached_handle_error_lists_runtime_keys(world):
 
 def test_camera_close_forgets_handle_and_drops_post_reset_hook(world):
     sim = SimManager.get()
-    camera = IsaacCamera.new(_config("close-cam-1", {"world": "sim-world"}), {})
+    camera = IsaacCamera.new(_config("close-cam-1", {"world": "isaac-world"}), {})
     assert "close-cam-1" in sim._handles
 
     call_count = 0
@@ -138,7 +138,7 @@ def test_base_close_forgets_handle(world):
     base = IsaacBase.new(
         _config(
             "close-base-1",
-            {"world": "sim-world", "asset": "jetbot"},
+            {"world": "isaac-world", "asset": "jetbot"},
         ),
         {},
     )
@@ -153,9 +153,9 @@ def test_base_close_forgets_handle(world):
 
 
 def test_gripper_close_forgets_handle(world):
-    arm = IsaacArm.new(_config("gripper-host-arm", {"world": "sim-world", "asset": "ur20"}), {})
+    arm = IsaacArm.new(_config("gripper-host-arm", {"world": "isaac-world", "asset": "ur20"}), {})
     gripper = IsaacGripper.new(
-        _config("close-gripper-1", {"world": "sim-world", "arm": arm.name}), {}
+        _config("close-gripper-1", {"world": "isaac-world", "arm": arm.name}), {}
     )
 
     assert "close-gripper-1" in SimManager.get()._handles

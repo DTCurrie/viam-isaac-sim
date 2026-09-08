@@ -106,9 +106,9 @@ from viam.resource.easy_resource import EasyResource
 from viam.resource.types import Model, ModelFamily
 from viam.utils import ValueTypes, struct_to_dict
 
-from .. import FAMILY, NAMESPACE
+from .. import FAMILY, NAMESPACE, component_diagnostics
 from ..physics import PROP_PHYSICS_KEYS
-from ..sim_manager import SimConfig, SimManager, WorldHandle, _prim_name
+from ..sim_manager import ArmHandle, GripperHandle, SimConfig, SimManager, WorldHandle, _prim_name
 from ..spatial import Quat, quat_from_euler_deg, quat_to_ov, to_vec3
 
 LOGGER = getLogger(__name__)
@@ -136,7 +136,19 @@ _SUPPORTED_COMMANDS = (
     "ignore_props",
     "scatter_cell",
     "clear_cell",
+    "joint_state",
+    "dof_names",
+    "prim_pose",
+    "tcp_pose",
+    "jaw_deg",
 )
+
+
+def _require_name(command: Mapping[str, ValueTypes]) -> str:
+    name = command.get("name")
+    if not isinstance(name, str) or not name:
+        raise ValueError("this command requires a 'name'")
+    return name
 
 
 def _prop_label(prop: object, index: int) -> str:
@@ -609,4 +621,49 @@ class IsaacWorld(Generic, EasyResource):  # type: ignore[misc]  # SDK: API is Fi
         if cmd == "clear_cell":
             cleared = handle.clear_cell()
             return {"parked": cast("Any", cleared.parked)}
+        if cmd == "joint_state":
+            name = _require_name(command)
+            attrs, entry_handle = SimManager.get().handle_entry(name)
+            if not isinstance(entry_handle, ArmHandle):
+                raise ValueError(f"{name!r} is a {type(entry_handle).__name__}, not an arm")
+            return cast("Any", component_diagnostics.joint_state(attrs, entry_handle))
+        if cmd == "dof_names":
+            name = _require_name(command)
+            attrs, entry_handle = SimManager.get().handle_entry(name)
+            all_dofs = bool(command.get("all", False))
+            if all_dofs and not isinstance(entry_handle, ArmHandle):
+                raise ValueError(f"{name!r} is a {type(entry_handle).__name__}, not an arm")
+            if not isinstance(entry_handle, (ArmHandle, GripperHandle)):
+                raise ValueError(
+                    f"{name!r} is a {type(entry_handle).__name__}, not an arm or gripper"
+                )
+            return cast(
+                "Any", component_diagnostics.dof_names(attrs, entry_handle, all_dofs=all_dofs)
+            )
+        if cmd == "prim_pose":
+            name = _require_name(command)
+            attrs, entry_handle = SimManager.get().handle_entry(name)
+            if not isinstance(entry_handle, ArmHandle):
+                raise ValueError(f"{name!r} is a {type(entry_handle).__name__}, not an arm")
+            prim_path_value = command.get("prim_path")
+            if prim_path_value is None:
+                prim_path_value = component_diagnostics.default_ee_prim_path(attrs, name)
+            if not isinstance(prim_path_value, str):
+                raise ValueError(f"prim_path must be a string, got {prim_path_value!r}")
+            return cast(
+                "Any",
+                component_diagnostics.prim_pose(attrs, entry_handle, prim_path_value.strip()),
+            )
+        if cmd == "tcp_pose":
+            name = _require_name(command)
+            attrs, entry_handle = SimManager.get().handle_entry(name)
+            if not isinstance(entry_handle, GripperHandle):
+                raise ValueError(f"{name!r} is a {type(entry_handle).__name__}, not a gripper")
+            return cast("Any", component_diagnostics.tcp_pose(attrs, entry_handle))
+        if cmd == "jaw_deg":
+            name = _require_name(command)
+            attrs, entry_handle = SimManager.get().handle_entry(name)
+            if not isinstance(entry_handle, GripperHandle):
+                raise ValueError(f"{name!r} is a {type(entry_handle).__name__}, not a gripper")
+            return cast("Any", component_diagnostics.jaw_deg(attrs, entry_handle))
         raise ValueError(f"unknown command {cmd!r}; supported: {', '.join(_SUPPORTED_COMMANDS)}")

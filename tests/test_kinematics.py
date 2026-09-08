@@ -21,7 +21,7 @@ def test_kinematics_from_file_url(sim, tmp_path):
 
     arm = _arm(
         "kin-file-arm",
-        {"world": "sim-world", "asset": "ur20", "kinematics_url": path.as_uri()},
+        {"world": "isaac-world", "asset": "ur20", "kinematics_url": path.as_uri()},
     )
     fmt, data = asyncio.run(arm.get_kinematics())
     assert fmt == KinematicsFileFormat.KINEMATICS_FILE_FORMAT_SVA
@@ -33,20 +33,20 @@ def test_kinematics_urdf_format_detection(sim, tmp_path):
     path.write_text("<robot name='t'/>")
     arm = _arm(
         "kin-urdf-arm",
-        {"world": "sim-world", "asset": "ur20", "kinematics_url": path.as_uri()},
+        {"world": "isaac-world", "asset": "ur20", "kinematics_url": path.as_uri()},
     )
     fmt, _ = asyncio.run(arm.get_kinematics())
     assert fmt == KinematicsFileFormat.KINEMATICS_FILE_FORMAT_URDF
 
 
 def test_kinematics_missing_raises(sim):
-    arm = _arm("kin-none-arm", {"world": "sim-world", "asset": "franka"})
+    arm = _arm("kin-none-arm", {"world": "isaac-world", "asset": "franka"})
     with pytest.raises(NotImplementedError, match="kinematics_url"):
         asyncio.run(arm.get_kinematics())
 
 
 def test_kinematics_known_asset_download(sim):
-    arm = _arm("kin-ur20-arm", {"world": "sim-world", "asset": "ur20"})
+    arm = _arm("kin-ur20-arm", {"world": "isaac-world", "asset": "ur20"})
     try:
         fmt, data = asyncio.run(arm.get_kinematics())
     except urllib.error.URLError:

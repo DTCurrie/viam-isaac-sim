@@ -27,4 +27,4 @@ def sim():
 
 @pytest.fixture(scope="session")
 def world(sim):
-    return IsaacWorld.new(_config("sim-world", {"mock": True}), {})
+    return IsaacWorld.new(_config("isaac-world", {"mock": True}), {})

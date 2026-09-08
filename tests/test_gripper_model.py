@@ -9,7 +9,6 @@ from viam.components.gripper import Gripper
 from viam.proto.app.robot import ComponentConfig
 from viam.utils import dict_to_struct
 
-from isaac_module.models.arm import IsaacArm
 from isaac_module.models.gripper import IsaacGripper
 from isaac_module.sim_manager import SimManager
 
@@ -32,11 +31,11 @@ def _config(name: str, attrs: dict) -> ComponentConfig:
 def _make_arm(world, name: str) -> None:
     from isaac_module.models.arm import IsaacArm
 
-    IsaacArm.new(_config(name, {"world": "sim-world", "asset": "ur5e", "mock_dof": 6}), {})
+    IsaacArm.new(_config(name, {"world": "isaac-world", "asset": "ur5e", "mock_dof": 6}), {})
 
 
 def _make_gripper(world, arm_name: str, name: str, extra: dict | None = None) -> IsaacGripper:
-    attrs = {"world": "sim-world", "arm": arm_name}
+    attrs = {"world": "isaac-world", "arm": arm_name}
     if extra:
         attrs.update(extra)
     return IsaacGripper.new(_config(name, attrs), {})
@@ -49,13 +48,13 @@ def test_instantiates_with_exactly_the_eight_abstract_methods():
 
 def test_validate_config_requires_arm():
     with pytest.raises(ValueError, match="arm"):
-        IsaacGripper.validate_config(_config("gripper-no-arm", {"world": "sim-world"}))
+        IsaacGripper.validate_config(_config("gripper-no-arm", {"world": "isaac-world"}))
 
 
 def test_validate_config_frame_parent_must_be_arm():
     config = ComponentConfig(
         name="gripper-bad-frame",
-        attributes=dict_to_struct({"world": "sim-world", "arm": "my-arm"}),
+        attributes=dict_to_struct({"world": "isaac-world", "arm": "my-arm"}),
     )
     config.frame.parent = "not-my-arm"
     with pytest.raises(ValueError, match="frame.parent"):
@@ -65,11 +64,11 @@ def test_validate_config_frame_parent_must_be_arm():
 def test_validate_config_valid_returns_deps():
     config = ComponentConfig(
         name="gripper-valid",
-        attributes=dict_to_struct({"world": "sim-world", "arm": "my-arm"}),
+        attributes=dict_to_struct({"world": "isaac-world", "arm": "my-arm"}),
     )
     config.frame.parent = "my-arm"
     deps, implicit = IsaacGripper.validate_config(config)
-    assert list(deps) == ["sim-world", "my-arm"]
+    assert list(deps) == ["isaac-world", "my-arm"]
     assert list(implicit) == []
 
 
@@ -179,19 +178,17 @@ def test_get_geometries_is_one_box(world):
     asyncio.run(scenario())
 
 
-def test_is_moving_true_during_open_then_false(world):
+def test_open_blocks_until_the_jaw_settles_at_the_open_limit(world):
     _make_arm(world, "moving-arm")
     gripper = _make_gripper(world, "moving-arm", "moving-gripper")
 
     async def scenario():
         await gripper.grab()  # closes with nothing to grab -> jaw at closed_rad
         await gripper.open()
-        assert await gripper.is_moving() is True
-        for _ in range(500):
-            if not await gripper.is_moving():
-                break
-            await asyncio.sleep(0.01)
+        # open() returns only once the jaw has stopped moving, at the open limit
         assert await gripper.is_moving() is False
+        status = await gripper.is_holding_something()
+        assert status.meta["jaw_deg"] == pytest.approx(status.meta["open_deg"], abs=0.5)
 
     asyncio.run(scenario())
 
@@ -205,20 +202,3 @@ def test_close_releases_the_handle(world):
         assert "close-gripper" not in SimManager.get()._handles
 
     asyncio.run(scenario())
-
-
-def test_tcp_pose_do_command_measures_the_configured_offset_in_mock(world):
-    """GPU checklist item 4: the fingertip midpoint sits tcp_offset_m along the
-    mount link's +Z, so measured == configured and delta is 0 in the mock."""
-    arm = IsaacArm.new(_config("tcp-arm", {"world": "sim-world", "asset": "ur5e"}), {})
-    gripper = IsaacGripper.new(
-        _config("tcp-grip", {"world": "sim-world", "arm": arm.name, "tcp_offset_m": 0.115}), {}
-    )
-    out = asyncio.run(gripper.do_command({"command": "tcp_pose"}))
-    assert out["configured_tcp_offset_mm"] == pytest.approx(115.0)
-    assert out["measured_tcp_offset_mm"] == pytest.approx(115.0)
-    assert out["delta_mm"] == pytest.approx(0.0)
-    assert out["pad_center_midpoint_mm"] == pytest.approx([0.0, 0.0, 115.0])
-    assert out["jaw_gap_mm"] == pytest.approx(85.0)
-    assert out["fingertip_reach_mm"] == pytest.approx(115.0 + 19.0)
-    assert set(out) >= {"parent", "left_inner_finger", "right_inner_finger", "fingertips"}

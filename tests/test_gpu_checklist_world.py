@@ -199,7 +199,7 @@ def test_camera_frame_activity_grabs_frames_from_the_mock_camera(world):
         ComponentConfig(
             name="gpu_checklist_world_test_cam",
             attributes=dict_to_struct(
-                {"world": "sim-world", "width": 64, "height": 48, "depth": True}
+                {"world": "isaac-world", "width": 64, "height": 48, "depth": True}
             ),
         ),
         {},
