@@ -1,9 +1,5 @@
-"""R-4 / OQ-4 applied BEFORE composition (GPU 2026-09-03: the 2F-85's isaac-dev
-part references stalled the stage 131 s per module start): preparing a local
-copy of an asset layer with those references moved onto the assets root
-(SimManager._prepared_asset_layer and its pure helpers), driven with fakes."""
-
 from pathlib import Path
+from typing import ClassVar
 
 import pytest
 
@@ -111,9 +107,9 @@ class FakeLayer:
 
 
 class FakeSdf:
-    opened: list[str] = []
-    layers: dict[str, FakeLayer] = {}
-    anonymous: list[FakeLayer] = []
+    opened: ClassVar[list[str]] = []
+    layers: ClassVar[dict[str, FakeLayer]] = {}
+    anonymous: ClassVar[list[FakeLayer]] = []
 
     class Layer:
         @staticmethod
@@ -299,7 +295,7 @@ def test_mutually_referencing_layers_terminate(manager):
     FakeSdf.layers[a] = FakeLayer([b])
     FakeSdf.layers[b] = FakeLayer([a])
 
-    path, report = manager._prepared_asset_layer(FakeSdf, FakeUsdUtils, a)
+    path, _report = manager._prepared_asset_layer(FakeSdf, FakeUsdUtils, a)
 
     assert path == a
     assert FakeSdf.anonymous == []

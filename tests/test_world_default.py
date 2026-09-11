@@ -1,7 +1,3 @@
-"""The `world` attribute defaults to DEFAULT_WORLD_NAME across every model
-that needs the sim, so swapping a real driver for its sim model requires no
-extra attribute beyond the asset (see docs/SIMULATION.md)."""
-
 import pytest
 from viam.proto.app.robot import ComponentConfig
 from viam.utils import dict_to_struct
@@ -74,4 +70,4 @@ def test_conductor_defaults_world():
             },
         )
     )
-    assert list(deps)[0] == DEFAULT_WORLD_NAME
+    assert next(iter(deps)) == DEFAULT_WORLD_NAME

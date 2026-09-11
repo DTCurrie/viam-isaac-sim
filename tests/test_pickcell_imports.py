@@ -1,8 +1,3 @@
-"""Import-boundary test for the ``pickcell`` package (phase 3 seam): every
-submodule imports cleanly, and none of them pulls in a client-SDK-only or
-mock-only dependency the module process cannot carry (isaac_module,
-viam.robot.client) or the CLI-only argparse."""
-
 import os
 import subprocess
 import sys
@@ -30,7 +25,7 @@ print("OK")
 """
 
 
-def test_pickcell_submodules_import_without_forbidden_dependencies():
+def test_pickcell_submodules_stay_within_the_import_boundary():
     src_dir = str(Path(__file__).resolve().parent.parent / "src")
     env = dict(os.environ, PYTHONPATH=src_dir)
     result = subprocess.run(

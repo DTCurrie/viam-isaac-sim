@@ -1,9 +1,3 @@
-"""Unit tests for the item runners in examples/gpu_checklist_world.py, run
-against the session-shared mock world (the ``world`` fixture from conftest -
-its SimManager is a singleton, so every prop name here must be unique across
-the whole test suite). Loaded via importlib like the other gpu_checklist
-tests - examples/ is not on pythonpath."""
-
 import asyncio
 import importlib.util
 import sys
@@ -16,8 +10,8 @@ checklist = importlib.util.module_from_spec(_spec)
 sys.modules["gpu_checklist_world"] = checklist
 _spec.loader.exec_module(checklist)
 
-ITEM1_PROP = "gpu_checklist_world_test_item1_cube"
-ITEM3_PROP = "gpu_checklist_world_test_item3_cube"
+RANDOMIZE_PROP = "gpu_checklist_world_test_randomize_cube"
+SPAWN_TELEPORT_PROP = "gpu_checklist_world_test_spawn_teleport_cube"
 SOFT_RESET_PROP = "gpu_checklist_world_test_soft_reset_cube"
 
 RANDOMIZE_REGION_MM = ((300.0, -300.0, 50.0), (900.0, 300.0, 50.0))
@@ -51,38 +45,38 @@ async def _spawn(world, name: str, position_mm) -> None:
     )
 
 
-def test_item1_same_seed_deterministic_different_seed_reported(world):
+def test_randomize_props_determinism_same_seed_deterministic_different_seed_reported(world):
     async def scenario():
-        await _spawn(world, ITEM1_PROP, SPAWN_POSITION_MM)
-        return await checklist.run_item1(
-            world, names=[ITEM1_PROP], region_mm=RANDOMIZE_REGION_MM, seed_a=11, seed_b=12
+        await _spawn(world, RANDOMIZE_PROP, SPAWN_POSITION_MM)
+        return await checklist.run_randomize_props_determinism(
+            world, names=[RANDOMIZE_PROP], region_mm=RANDOMIZE_REGION_MM, seed_a=11, seed_b=12
         )
 
     report = asyncio.run(scenario())
 
     assert report["deterministic_same_seed"] is True
-    assert set(report["positions_seed_a"]) == {ITEM1_PROP}
-    assert set(report["positions_seed_b"]) == {ITEM1_PROP}
+    assert set(report["positions_seed_a"]) == {RANDOMIZE_PROP}
+    assert set(report["positions_seed_b"]) == {RANDOMIZE_PROP}
     assert isinstance(report["prop_geometries_before"], list)
     assert isinstance(report["prop_geometries_after"], list)
     assert "seed=12" not in report["pick_command"]  # the seed is interpolated, not literal
     assert "--randomize-seed 12" in report["pick_command"]
 
 
-def test_item1_different_seeds_usually_differ(world):
+def test_randomize_props_determinism_different_seeds_usually_differ(world):
     async def scenario():
-        await checklist.run_item1(
-            world, names=[ITEM1_PROP], region_mm=RANDOMIZE_REGION_MM, seed_a=21, seed_b=22
+        await checklist.run_randomize_props_determinism(
+            world, names=[RANDOMIZE_PROP], region_mm=RANDOMIZE_REGION_MM, seed_a=21, seed_b=22
         )
-        return await checklist.run_item1(
-            world, names=[ITEM1_PROP], region_mm=RANDOMIZE_REGION_MM, seed_a=21, seed_b=99
+        return await checklist.run_randomize_props_determinism(
+            world, names=[RANDOMIZE_PROP], region_mm=RANDOMIZE_REGION_MM, seed_a=21, seed_b=99
         )
 
     report = asyncio.run(scenario())
-    assert report["positions_seed_a"][ITEM1_PROP] != report["positions_seed_b"][ITEM1_PROP]
+    assert report["positions_seed_a"][RANDOMIZE_PROP] != report["positions_seed_b"][RANDOMIZE_PROP]
 
 
-def test_item2_mock_has_no_sim_time_but_reports_wall_time(world):
+def test_step_rate_measurement_mock_has_no_sim_time_but_reports_wall_time(world):
     calls = []
 
     async def rgb_activity():
@@ -90,7 +84,7 @@ def test_item2_mock_has_no_sim_time_but_reports_wall_time(world):
         await asyncio.sleep(TINY_WINDOW_S)
 
     async def scenario():
-        return await checklist.run_item2(
+        return await checklist.run_step_rate_measurement(
             world, window_s=TINY_WINDOW_S, camera_activity={"rgb": rgb_activity}
         )
 
@@ -106,11 +100,11 @@ def test_item2_mock_has_no_sim_time_but_reports_wall_time(world):
     assert calls == ["rgb"]
 
 
-def test_item3_spawn_teleport_reset_round_trip(world):
+def test_spawn_teleport_reset_round_trip(world):
     async def scenario():
-        return await checklist.run_item3(
+        return await checklist.run_spawn_teleport_reset(
             world,
-            prop_name=ITEM3_PROP,
+            prop_name=SPAWN_TELEPORT_PROP,
             spawn_position_mm=SPAWN_POSITION_MM,
             teleport_position_mm=TELEPORT_POSITION_MM,
         )
@@ -124,9 +118,9 @@ def test_item3_spawn_teleport_reset_round_trip(world):
     assert not checklist.pose_close(report["spawn_pose_mm"], report["teleported_pose_mm"])
 
 
-def test_item4_and_item5_report_not_applicable():
-    assert checklist.run_item4() == "not applicable (DEC-5 cube table)"
-    assert checklist.run_item5() == "not applicable (XC-9 deferred)"
+def test_mesh_table_and_executor_checks_report_not_applicable():
+    assert checklist.run_mesh_table_check() == checklist.MESH_TABLE_NOT_APPLICABLE_NOTE
+    assert checklist.run_executor_check() == checklist.EXECUTOR_CHECK_DEFERRED_NOTE
 
 
 def test_soft_reset_demo_restores_the_spawn_pose(world):
@@ -146,7 +140,7 @@ def test_soft_reset_demo_restores_the_spawn_pose(world):
     assert not checklist.pose_close(report["spawn_pose_mm"], report["teleported_pose_mm"])
 
 
-def test_item1_scene_defaults_derive_movable_names_and_face_height():
+def test_scene_randomization_defaults_derive_movable_names_and_face_height():
     geometries = [
         {
             "name": "block",
@@ -167,15 +161,15 @@ def test_item1_scene_defaults_derive_movable_names_and_face_height():
             "pose_in_world_mm": {"x": 0.0, "y": 0.0, "z": 0.0},
         },
     ]
-    names, (lo, hi) = checklist.item1_scene_defaults(geometries)
+    names, (lo, hi) = checklist.scene_randomization_defaults(geometries)
     assert names == ["block"]
     # face = the block's bottom: 30 - 60/2 = 0 (the floor)
     assert (lo[2], hi[2]) == (0.0, 0.0)
     assert (lo[0], lo[1], hi[0], hi[1]) == (300.0, -300.0, 900.0, 300.0)
 
 
-def test_item1_scene_defaults_with_no_movable_props_returns_empty():
-    names, region = checklist.item1_scene_defaults(
+def test_scene_randomization_defaults_with_no_movable_props_returns_empty():
+    names, region = checklist.scene_randomization_defaults(
         [
             {
                 "name": "pad",

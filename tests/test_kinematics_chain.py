@@ -34,7 +34,7 @@ def _xarm7() -> Chain:
 
 
 def test_ur5e_fk_at_zero_matches_dh_parameters():
-    # UR5e Denavit-Hartenberg parameters (metres): d1=0.1625, a2=-0.425,
+    # UR5e Denavit-Hartenberg parameters (meters): d1=0.1625, a2=-0.425,
     # a3=-0.3922, d4=0.1333, d5=0.0997, d6=0.0996. At q=0 the standard DH
     # chain places the tool at x = a2+a3, y = -(d4+d6), z = d1-d5.
     d1, a2, a3, d4, d5, d6 = 0.1625, -0.425, -0.3922, 0.1333, 0.0997, 0.0996

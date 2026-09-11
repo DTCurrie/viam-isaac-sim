@@ -106,7 +106,7 @@ def tallest_in_region_mm(
 
     above_support = region_points[:, 2] > support_z_mm + TALLEST_SUPPORT_EPSILON_MM
     above_points = region_points[above_support]
-    points = int(len(above_points))
+    points = len(above_points)
     if points < MIN_TALLEST_REGION_POINTS:
         reasons.append(
             f"point floor: {points} in-region above-support points < {MIN_TALLEST_REGION_POINTS}"
@@ -284,7 +284,7 @@ def segment_stats(
     """What a segment is made of, camera frame: point counts (all / red /
     nearest-depth band) and the red points' extents in mm. Printed at detect
     so a biased block pose can be read off the segment's shape."""
-    stats: dict[str, Any] = {"points": int(len(xyz)), "red": 0, "band": 0}
+    stats: dict[str, Any] = {"points": len(xyz), "red": 0, "band": 0}
     if xyz.size == 0:
         return stats
     far_enough = xyz[:, 2] >= MIN_BLOCK_DEPTH_M

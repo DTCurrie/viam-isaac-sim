@@ -1,14 +1,10 @@
-"""IsaacCameraHandle + the camera-creation helpers, driven through duck-typed
-fake camera objects (no Isaac here). CAM-1/2/3/4/9/17, the create_camera attrs
-contract, and the CAM-10 local-pose sim side."""
-
 import math
 
 import numpy as np
 import pytest
 
-from isaac_module.camera_base import NoFrameYetError
 from isaac_module.encoding import intrinsics_from_fov
+from isaac_module.handles.camera import NoFrameYetError
 from isaac_module.sim_manager import (
     IsaacCameraHandle,
     _configure_camera_optics,
@@ -119,6 +115,19 @@ def _rgb_frame(width=848, height=480):
     return np.zeros((height, width, 4), dtype=np.uint8)
 
 
+class _DuckTypedArray:
+    """Stands in for 5.0's warp.array, returned by get_rgba()/get_depth() when
+    annotator_device is "cuda": has .size and .numpy() but no .copy() or
+    __getitem__, so slicing or copying it directly would raise."""
+
+    def __init__(self, array):
+        self._array = array
+        self.size = array.size
+
+    def numpy(self):
+        return self._array
+
+
 def _make_handle(cam, *, depth_enabled=False, sleep=None):
     sim = FakeSim()
     recorded_sleeps: list[float] = []
@@ -138,7 +147,7 @@ def _make_handle(cam, *, depth_enabled=False, sleep=None):
 
 
 # ---------------------------------------------------------------------
-# per-step cache (CAM-9)
+# per-step cache
 # ---------------------------------------------------------------------
 
 
@@ -157,7 +166,7 @@ def test_get_frame_caches_by_sim_time():
 
 
 # ---------------------------------------------------------------------
-# warm-up retry (CAM-2)
+# warm-up retry
 # ---------------------------------------------------------------------
 
 
@@ -172,11 +181,11 @@ def test_get_frame_retries_through_warmup_then_succeeds():
 
 
 def test_get_frame_raises_after_warmup_retries_exhausted():
-    from isaac_module.sim_manager import WARMUP_RETRIES
+    from isaac_module.handles.camera import WARMUP_RETRIES
 
     cam = FakeCam()
     cam.set_rgba_sequence([None] * (WARMUP_RETRIES + 5))
-    handle, _, sleeps = _make_handle(cam, sleep=lambda s: None)
+    handle, _, _sleeps = _make_handle(cam, sleep=lambda s: None)
 
     with pytest.raises(NoFrameYetError):
         handle.get_frame()
@@ -186,7 +195,7 @@ def test_get_frame_raises_after_warmup_retries_exhausted():
 
 
 # ---------------------------------------------------------------------
-# depth (CAM-1)
+# depth
 # ---------------------------------------------------------------------
 
 
@@ -209,6 +218,33 @@ def test_get_depth_disabled_raises_and_never_calls_get_depth():
     with pytest.raises(RuntimeError):
         handle.get_depth()
     assert cam._depth_sequence == []  # get_depth was never called/popped
+
+
+# ---------------------------------------------------------------------
+# non-numpy frame conversion (annotator_device="cuda" returns warp.array)
+# ---------------------------------------------------------------------
+
+
+def test_grab_converts_non_numpy_rgba_before_slicing():
+    cam = FakeCam()
+    cam.set_rgba_sequence([_DuckTypedArray(_rgb_frame())])
+    handle, _, _ = _make_handle(cam)
+
+    frame = handle.get_frame()
+    assert isinstance(frame.rgb, np.ndarray)
+    assert frame.rgb.shape == (480, 848, 3)
+
+
+def test_grab_converts_non_numpy_depth_before_slicing():
+    cam = FakeCam()
+    cam.set_rgba_sequence([_rgb_frame()])
+    cam.set_depth_sequence([_DuckTypedArray(np.ones((480, 848, 1), dtype=np.float64) * 2.5)])
+    handle, _, _ = _make_handle(cam, depth_enabled=True)
+
+    depth = handle.get_depth()
+    assert isinstance(depth, np.ndarray)
+    assert depth.shape == (480, 848)
+    assert depth.dtype == np.float32
 
 
 # ---------------------------------------------------------------------
@@ -261,14 +297,14 @@ def test_get_intrinsics_zero_focal_length_raises():
 
 
 # ---------------------------------------------------------------------
-# _configure_camera_optics (CAM-3, CAM-4, CAM-1, frequency)
+# _configure_camera_optics
 # ---------------------------------------------------------------------
 
 
-def test_configure_camera_optics_sets_clip_focal_aperture_depth_frequency():
+def test_configure_camera_optics_sets_clip_focal_aperture_depth():
     horizontal_aperture = 20.0
     cam = FakeCam(resolution=(848, 480), horizontal_aperture=horizontal_aperture)
-    attrs = {"depth": True, "frequency": 30, "fov_deg": 90.5}
+    attrs = {"depth": True, "fov_deg": 90.5}
 
     _configure_camera_optics(cam, attrs)
 
@@ -278,7 +314,9 @@ def test_configure_camera_optics_sets_clip_focal_aperture_depth_frequency():
     assert focal_calls[-1] == pytest.approx(expected_focal, abs=1e-9)
     assert ("set_vertical_aperture", (horizontal_aperture * 480 / 848,)) in cam.calls
     assert cam.call_count("add_distance_to_image_plane_to_frame") == 1
-    assert ("set_frequency", (30.0,)) in cam.calls
+    # frequency is no longer plumbed to the camera; the render product
+    # renders every frame regardless of any value a caller might pass.
+    assert cam.call_count("set_frequency") == 0
 
 
 def test_configure_camera_optics_no_depth_skips_annotator():
@@ -294,7 +332,7 @@ def test_configure_camera_optics_custom_clip_range():
 
 
 # ---------------------------------------------------------------------
-# _place_camera (CAM-10)
+# _place_camera
 # ---------------------------------------------------------------------
 
 
@@ -326,14 +364,14 @@ def test_place_camera_parent_prim_legacy_rpy_uses_usd_axes():
 
 
 # ---------------------------------------------------------------------
-# post_reset (CAM-17)
+# post_reset
 # ---------------------------------------------------------------------
 
 
 def test_post_reset_drops_cache_and_calls_cam_post_reset():
     cam = FakeCam()
     cam.set_rgba_sequence([_rgb_frame(), _rgb_frame()])
-    handle, sim, _ = _make_handle(cam)
+    handle, _sim, _ = _make_handle(cam)
 
     handle.get_frame()
     handle.post_reset()
@@ -358,7 +396,7 @@ def test_post_reset_falls_back_to_initialize_when_absent():
 
 
 # ---------------------------------------------------------------------
-# create_camera wires post_reset into the sim's registry (CAM-17, mock mode)
+# create_camera wires post_reset into the sim's registry (mock mode)
 # ---------------------------------------------------------------------
 
 

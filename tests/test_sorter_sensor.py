@@ -1,9 +1,3 @@
-"""sorter-sensor: at-most-once emission of new conductor loop records to
-data capture, at both bounds - a repeated capture poll raises
-NoCaptureToStoreError (never re-emits, never returns the empty map the RDK
-rejects), and a genuinely new record is never silently dropped. Interactive
-polls are live snapshots that never consume the capture cursor."""
-
 from typing import Any
 
 import pytest

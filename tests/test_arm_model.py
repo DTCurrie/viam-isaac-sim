@@ -1,5 +1,3 @@
-"""Unit tests for IsaacArm's Viam-facing contract in mock mode."""
-
 import asyncio
 import json
 import time
@@ -7,6 +5,7 @@ import time
 import pytest
 from grpclib import Status
 from viam.components.arm import JointPositions
+from viam.errors import MethodNotImplementedError
 from viam.proto.app.robot import ComponentConfig
 from viam.proto.component.arm import MoveOptions
 from viam.utils import dict_to_struct
@@ -68,12 +67,13 @@ def test_get_3d_models_returns_empty_dict(world):
     asyncio.run(scenario())
 
 
-def test_do_command_unknown_command_raises(world):
+def test_do_command_raises_method_not_implemented(world):
     arm = _arm(world, "arm-unknown-command")
 
     async def scenario():
-        with pytest.raises(ValueError, match="unknown command"):
+        with pytest.raises(MethodNotImplementedError) as excinfo:
             await arm.do_command({"command": "not-a-real-command"})
+        assert excinfo.value.grpc_code == Status.UNIMPLEMENTED
 
     asyncio.run(scenario())
 
@@ -315,10 +315,10 @@ def test_move_through_joint_positions_max_vel_option_is_slower(world):
 
 def test_move_through_joint_positions_per_joint_max_vel_wins_over_scalar(world):
     """viam.md: when max_vel_degs_per_sec_joints is set it is the ONLY
-    velocity limit honoured, and max_vel_degs_per_sec is ignored - not the
+    velocity limit honored, and max_vel_degs_per_sec is ignored - not the
     other way around. Set a fast scalar (faster than the mock's own top
     speed, so it would be indistinguishable from "no limit" if it won) next
-    to a slow per-joint limit; only honouring the per-joint value produces a
+    to a slow per-joint limit; only honoring the per-joint value produces a
     move slower than the unlimited case."""
     arm_default = IsaacArm.new(
         _config("arm-priority-default", {"world": "isaac-world", "asset": "ur20", "mock_dof": 6}),
@@ -331,7 +331,7 @@ def test_move_through_joint_positions_per_joint_max_vel_wins_over_scalar(world):
     async def scenario():
         target = JointPositions(values=[45, 0, 0, 0, 0, 0])
         options = MoveOptions(
-            max_vel_degs_per_sec=1000.0,  # far above the mock's SPEED; a no-op if honoured
+            max_vel_degs_per_sec=1000.0,  # far above the mock's SPEED; a no-op if honored
             max_vel_degs_per_sec_joints=[5.0] * 6,  # should be the only limit applied
         )
 
@@ -366,8 +366,52 @@ def test_is_moving_false_after_move_true_during_move(world):
     asyncio.run(scenario())
 
 
+def test_move_to_joint_positions_cancelled_holds_position(world):
+    """A dropped RPC (task cancellation) must stop the drive where it is,
+    not leave it pushing toward a target nothing is waiting on."""
+    arm = IsaacArm.new(
+        _config("arm-cancel-hold", {"world": "isaac-world", "asset": "ur20", "mock_dof": 6}), {}
+    )
+
+    async def scenario():
+        target = JointPositions(values=[90, 0, 0, 0, 0, 0])
+        move_task = asyncio.ensure_future(arm.move_to_joint_positions(target))
+        await asyncio.sleep(0.02)
+        move_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await move_task
+        assert await arm.is_moving() is False
+        held = await arm.get_joint_positions()
+        assert 0.0 < held.values[0] < 90.0  # stopped partway, not at the target
+
+    asyncio.run(scenario())
+
+
+def test_move_through_joint_positions_cancelled_holds_position(world):
+    arm = IsaacArm.new(
+        _config(
+            "arm-through-cancel-hold", {"world": "isaac-world", "asset": "ur20", "mock_dof": 6}
+        ),
+        {},
+    )
+
+    async def scenario():
+        waypoints = [
+            JointPositions(values=[45, 0, 0, 0, 0, 0]),
+            JointPositions(values=[90, 0, 0, 0, 0, 0]),
+        ]
+        move_task = asyncio.ensure_future(arm.move_through_joint_positions(waypoints))
+        await asyncio.sleep(0.02)
+        move_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await move_task
+        assert await arm.is_moving() is False
+
+    asyncio.run(scenario())
+
+
 def test_failed_move_holds_position_instead_of_pushing(world):
-    """GPU run 15: after a stall the drive target must be the current pose, so
+    """After a stall the drive target must be the current pose, so
     the arm stops pushing into whatever blocked it."""
     arm = IsaacArm.new(
         _config(
@@ -385,3 +429,127 @@ def test_failed_move_holds_position_instead_of_pushing(world):
         assert held.values[0] == pytest.approx(20.0, abs=1.0)  # halfway, and staying there
 
     asyncio.run(scenario())
+
+
+# ----------------------------------------------------------------------
+# max_vel_degs_per_sec: the config-level default velocity cap (carries a
+# real UR's speed_degs_per_sec) applied to any move that carries no
+# MoveOptions cap of its own.
+# ----------------------------------------------------------------------
+
+
+def test_validate_config_rejects_non_positive_max_vel_degs_per_sec(world):
+    config = _config(
+        "arm-bad-max-vel", {"world": "isaac-world", "asset": "ur20", "max_vel_degs_per_sec": 0}
+    )
+    with pytest.raises(ValueError, match="max_vel_degs_per_sec"):
+        IsaacArm.validate_config(config)
+
+
+def test_move_to_joint_positions_honors_configured_max_vel_default(world):
+    arm_default = IsaacArm.new(
+        _config("arm-mtjp-default", {"world": "isaac-world", "asset": "ur20", "mock_dof": 6}), {}
+    )
+    arm_slow = IsaacArm.new(
+        _config(
+            "arm-mtjp-slow",
+            {"world": "isaac-world", "asset": "ur20", "mock_dof": 6, "max_vel_degs_per_sec": 5.0},
+        ),
+        {},
+    )
+
+    async def scenario():
+        target = JointPositions(values=[45, 0, 0, 0, 0, 0])
+
+        start = time.monotonic()
+        await arm_default.move_to_joint_positions(target)
+        default_elapsed = time.monotonic() - start
+
+        start = time.monotonic()
+        await arm_slow.move_to_joint_positions(target)
+        slow_elapsed = time.monotonic() - start
+
+        assert slow_elapsed > default_elapsed
+
+    asyncio.run(scenario())
+
+
+def test_move_through_joint_positions_falls_back_to_configured_max_vel(world):
+    """MoveOptions() with no velocity fields set carries no cap of its own,
+    so the configured max_vel_degs_per_sec attribute applies."""
+    arm_default = IsaacArm.new(
+        _config(
+            "arm-through-fallback-default", {"world": "isaac-world", "asset": "ur20", "mock_dof": 6}
+        ),
+        {},
+    )
+    arm_configured = IsaacArm.new(
+        _config(
+            "arm-through-fallback-configured",
+            {"world": "isaac-world", "asset": "ur20", "mock_dof": 6, "max_vel_degs_per_sec": 5.0},
+        ),
+        {},
+    )
+
+    async def scenario():
+        target = JointPositions(values=[45, 0, 0, 0, 0, 0])
+
+        start = time.monotonic()
+        await arm_default.move_through_joint_positions([target], MoveOptions())
+        default_elapsed = time.monotonic() - start
+
+        start = time.monotonic()
+        await arm_configured.move_through_joint_positions([target], MoveOptions())
+        configured_elapsed = time.monotonic() - start
+
+        assert configured_elapsed > default_elapsed
+
+    asyncio.run(scenario())
+
+
+def test_move_through_joint_positions_explicit_option_overrides_configured_default(world):
+    """A MoveOptions cap still wins over the configured default, even a
+    faster one - the configured attribute is only a fallback."""
+    arm = IsaacArm.new(
+        _config(
+            "arm-through-explicit-overrides",
+            {"world": "isaac-world", "asset": "ur20", "mock_dof": 6, "max_vel_degs_per_sec": 1.0},
+        ),
+        {},
+    )
+
+    async def scenario():
+        target = JointPositions(values=[45, 0, 0, 0, 0, 0])
+        start = time.monotonic()
+        await arm.move_through_joint_positions([target], MoveOptions(max_vel_degs_per_sec=1000.0))
+        elapsed = time.monotonic() - start
+        # far faster than the 1.0 deg/s configured default would allow (45s)
+        assert elapsed < 5.0
+
+    asyncio.run(scenario())
+
+
+# ----------------------------------------------------------------------
+# Known-asset kinematics ship inside the module and are prefetched on
+# reconfigure, not the first RPC.
+# ----------------------------------------------------------------------
+
+
+def test_known_asset_kinematics_url_is_a_packaged_file(world):
+    arm = IsaacArm.new(
+        _config("arm-packaged-kinematics", {"world": "isaac-world", "asset": "ur20"}), {}
+    )
+    url = arm._kinematics_url()
+    assert url is not None
+    assert url.startswith("file://")
+    assert url.endswith("kinematics_files/ur20.json")
+
+
+def test_reconfigure_prefetches_kinematics_in_the_background(world):
+    arm = IsaacArm.new(
+        _config("arm-prefetch-kinematics", {"world": "isaac-world", "asset": "ur20"}), {}
+    )
+    deadline = time.monotonic() + 2.0
+    while arm._kinematics is None and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert arm._kinematics is not None, "reconfigure did not prefetch kinematics in the background"

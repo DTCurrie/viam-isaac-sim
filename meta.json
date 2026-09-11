@@ -1,13 +1,15 @@
 {
+  "$schema": "https://dl.viam.dev/module.schema.json",
   "module_id": "viam:isaac-sim-devin",
   "visibility": "private",
   "url": "https://github.com/DTCurrie/viam-isaac-sim",
   "description": "Control and simulate robots in NVIDIA Isaac Sim through Viam",
+  "markdown_link": "README.md",
   "models": [
     {
       "model": "viam:isaac-sim-devin:world",
       "api": "rdk:component:generic",
-      "short_description": "Boots and manages the Isaac Sim world/stage"
+      "short_description": "Boots and manages the Isaac Sim world/stage. Configure exactly one."
     },
     {
       "model": "viam:isaac-sim-devin:arm",
@@ -32,7 +34,7 @@
     {
       "model": "viam:isaac-sim-devin:conductor",
       "api": "rdk:service:generic",
-      "short_description": "Color-sorts scattered blocks onto per-color pads by DoCommand start/stop/status, N loops or forever"
+      "short_description": "Color-sorts blocks onto per-color pads via DoCommand start/stop/status: N loops or continuous"
     },
     {
       "model": "viam:isaac-sim-devin:sorter-sensor",

@@ -1,7 +1,6 @@
-"""Tests for the Isaac Sim compat layer (FINDINGS XC-6)."""
-
 from __future__ import annotations
 
+import importlib.metadata
 import importlib.util
 import sys
 import types
@@ -26,42 +25,18 @@ def test_isaac_version_is_none_without_isaac() -> None:
     assert compat.isaac_version() is None
 
 
-def test_caps_by_release_has_both_known_rows() -> None:
-    assert set(compat.CAPS_BY_RELEASE) == {(4, 5), (5, 0)}
-
-    row_45 = compat.CAPS_BY_RELEASE[(4, 5)]
-    row_50 = compat.CAPS_BY_RELEASE[(5, 0)]
-
-    assert row_45.has_depth_sensor != row_50.has_depth_sensor
-    assert row_45.pointcloud_is_world_frame != row_50.pointcloud_is_world_frame
-    assert row_45.camera_reads_cached_frame != row_50.camera_reads_cached_frame
+def test_caps_by_release_has_only_the_5_0_row() -> None:
+    assert set(compat.CAPS_BY_RELEASE) == {(5, 0)}
 
 
 @pytest.mark.parametrize(
     "version",
-    [(4, 5, 0), (5, 0, 0), (4, 6, 1)],
+    [None, (4, 5, 0), (5, 0, 0), (4, 6, 1), (6, 0, 0), (4, 0, 0)],
 )
-def test_caps_resolves_exact_and_nearest_lower(version: tuple[int, int, int]) -> None:
-    if version[:2] == (5, 0):
-        assert compat.caps(version) == compat.CAPS_BY_RELEASE[(5, 0)]
-    else:
-        assert compat.caps(version) == compat.CAPS_BY_RELEASE[(4, 5)]
-
-
-def test_caps_above_newest_known_row_uses_newest() -> None:
-    assert compat.caps((6, 0, 0)) == compat.CAPS_BY_RELEASE[(5, 0)]
-
-
-def test_caps_below_oldest_known_row_uses_oldest() -> None:
-    assert compat.caps((4, 0, 0)) == compat.CAPS_BY_RELEASE[(4, 5)]
-
-
-@pytest.mark.skipif(
-    _isaac_is_installed(),
-    reason="isaac_version() answers for real when Isaac is importable",
-)
-def test_caps_with_no_version_and_no_isaac_uses_newest() -> None:
-    assert compat.caps(None) == compat.CAPS_BY_RELEASE[(5, 0)]
+def test_caps_resolves_to_the_5_0_row_for_any_version(
+    version: tuple[int, int, int] | None,
+) -> None:
+    assert compat.caps(version) == compat.CAPS_BY_RELEASE[(5, 0)]
 
 
 def _install_fake_module(
@@ -88,17 +63,6 @@ def test_probe_isaacsim_core_version_parses_sequence(monkeypatch: pytest.MonkeyP
     assert compat.isaac_version() == (5, 0, 0)
 
 
-def test_probe_omni_isaac_version_parses_string(monkeypatch: pytest.MonkeyPatch) -> None:
-    _install_fake_module(monkeypatch, "omni", types.ModuleType("omni"))
-    _install_fake_module(monkeypatch, "omni.isaac", types.ModuleType("omni.isaac"))
-
-    fake_version_module = types.ModuleType("omni.isaac.version")
-    fake_version_module.get_version = lambda: "4.5.0"  # type: ignore[attr-defined]
-    _install_fake_module(monkeypatch, "omni.isaac.version", fake_version_module)
-
-    assert compat.isaac_version() == (4, 5, 0)
-
-
 def test_probe_that_raises_falls_through_to_none(monkeypatch: pytest.MonkeyPatch) -> None:
     _install_fake_module(monkeypatch, "isaacsim", types.ModuleType("isaacsim"))
     _install_fake_module(monkeypatch, "isaacsim.core", types.ModuleType("isaacsim.core"))
@@ -110,15 +74,10 @@ def test_probe_that_raises_falls_through_to_none(monkeypatch: pytest.MonkeyPatch
     fake_version_module.get_version = _raise  # type: ignore[attr-defined]
     _install_fake_module(monkeypatch, "isaacsim.core.version", fake_version_module)
 
-    _install_fake_module(monkeypatch, "omni", types.ModuleType("omni"))
-    _install_fake_module(monkeypatch, "omni.isaac", types.ModuleType("omni.isaac"))
+    def _raise_metadata_lookup(name: str) -> str:
+        raise importlib.metadata.PackageNotFoundError(name)
 
-    def _raise_too() -> None:
-        raise RuntimeError("boom too")
-
-    fake_omni_version_module = types.ModuleType("omni.isaac.version")
-    fake_omni_version_module.get_version = _raise_too  # type: ignore[attr-defined]
-    _install_fake_module(monkeypatch, "omni.isaac.version", fake_omni_version_module)
+    monkeypatch.setattr(importlib.metadata, "version", _raise_metadata_lookup)
 
     assert compat.isaac_version() is None
 
@@ -129,29 +88,74 @@ def test_import_isaac_moved_into_sim_manager() -> None:
     assert import_isaac is compat.import_isaac
 
 
-def test_gripper_caps_follow_the_2f85_asset_per_release():
-    """FINDINGS R-9 / W13: the 2F-85 finger_joint closes at 47 deg on 5.0 and
-    45 deg on 4.5, with drive maxForce 26 vs 16.5 - version splits live here,
-    never in models/gripper.py."""
-    row_45 = compat.CAPS_BY_RELEASE[(4, 5)]
-    row_50 = compat.CAPS_BY_RELEASE[(5, 0)]
-    assert (row_45.gripper_closed_deg, row_45.gripper_max_force) == (45.0, 16.5)
-    assert (row_50.gripper_closed_deg, row_50.gripper_max_force) == (47.0, 26.0)
+def _fake_isaac_module(monkeypatch: pytest.MonkeyPatch, dotted_path: str, **attrs: object) -> None:
+    """Install ``dotted_path`` in ``sys.modules``, filling in any missing
+    parent packages, so ``import_isaac``'s ``from a.b.c import X`` lines
+    resolve against fakes instead of the real Isaac Sim packages."""
+    parts = dotted_path.split(".")
+    for depth in range(1, len(parts)):
+        parent = ".".join(parts[:depth])
+        if parent not in sys.modules:
+            monkeypatch.setitem(sys.modules, parent, types.ModuleType(parent))
+
+    module = types.ModuleType(dotted_path)
+    for name, value in attrs.items():
+        setattr(module, name, value)
+    monkeypatch.setitem(sys.modules, dotted_path, module)
+
+
+def test_import_isaac_result_satisfies_isaac_api_protocol(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """import_isaac()'s namespace carries every attribute IsaacAPI declares,
+    proving the enumerable surface stays in sync with the protocol."""
+
+    class _Stub:
+        pass
+
+    _fake_isaac_module(monkeypatch, "isaacsim.core.api", World=_Stub)
+    _fake_isaac_module(
+        monkeypatch, "isaacsim.core.utils.stage", add_reference_to_stage=_Stub, open_stage=_Stub
+    )
+    _fake_isaac_module(monkeypatch, "isaacsim.storage.native", get_assets_root_path=_Stub)
+    _fake_isaac_module(
+        monkeypatch, "isaacsim.core.prims", SingleArticulation=_Stub, SingleXFormPrim=_Stub
+    )
+    _fake_isaac_module(monkeypatch, "isaacsim.core.utils.types", ArticulationAction=_Stub)
+    _fake_isaac_module(
+        monkeypatch, "isaacsim.core.api.objects", DynamicCuboid=_Stub, FixedCuboid=_Stub
+    )
+    _fake_isaac_module(monkeypatch, "isaacsim.sensors.camera", Camera=_Stub)
+    _fake_isaac_module(
+        monkeypatch,
+        "isaacsim.robot.wheeled_robots.controllers.differential_controller",
+        DifferentialController=_Stub,
+    )
+    _fake_isaac_module(monkeypatch, "isaacsim.robot.wheeled_robots.robots", WheeledRobot=_Stub)
+
+    ns = compat.import_isaac()
+
+    for name in compat.IsaacAPI.__annotations__:
+        assert hasattr(ns, name), f"import_isaac() result is missing {name!r}"
+
+
+def test_gripper_caps_follow_the_2f85_asset() -> None:
+    """The 2F-85 finger_joint closes at 47 deg on 5.0 - version splits live
+    here, never in models/gripper.py."""
+    row = compat.CAPS_BY_RELEASE[(5, 0)]
+    assert row.gripper_closed_deg == 47.0
     assert compat.caps((5, 0, 0)).gripper_dof_count == 6
 
 
-def test_gripper_open_angle_is_zero_on_both_releases():
-    """GPU run 19: with the articulation fixes in place the 5.0 2F-85 reaches
-    0.4 deg at an open target of 0 (the 7.76 deg rest seen in run 12 was an
-    artifact of the broken wrapper); W13's 0 stands on both releases."""
+def test_gripper_open_angle_is_zero() -> None:
+    """With the articulation fixes in place the 2F-85 reaches 0.4 deg at an
+    open target of 0 (a 7.76 deg rest was an artifact of the broken
+    wrapper); the 0 target stands."""
     assert compat.CAPS_BY_RELEASE[(5, 0)].gripper_open_deg == 0.0
-    assert compat.CAPS_BY_RELEASE[(4, 5)].gripper_open_deg == 0.0
 
 
-def test_camera_supports_annotator_device_only_on_5_0():
-    """CAM-12: Camera(annotator_device=...) is a 5.0-only GPU-resident data
-    path (CHANGELOG 0.4.0); 4.5 always lands in host numpy."""
-    assert compat.CAPS_BY_RELEASE[(4, 5)].camera_supports_annotator_device is False
+def test_camera_supports_annotator_device() -> None:
+    """Camera(annotator_device=...)/get_*(device=...) is a GPU-resident data
+    path (CHANGELOG 0.4.0)."""
     assert compat.CAPS_BY_RELEASE[(5, 0)].camera_supports_annotator_device is True
-    assert compat.caps((4, 5, 0)).camera_supports_annotator_device is False
     assert compat.caps((5, 0, 0)).camera_supports_annotator_device is True

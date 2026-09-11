@@ -1,11 +1,3 @@
-"""Unit tests for the pure helpers in examples/gpu_checklist_arm.py.
-
-The module lives under examples/ (not a package under src/) and must not be
-imported by anything in src/isaac_module (it runs on a laptop against a
-remote machine), so it is loaded here via importlib rather than adding
-examples/ to pyproject's pythonpath.
-"""
-
 import importlib.util
 import math
 import sys

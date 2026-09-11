@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 import numpy as np
 from viam.components.arm import KinematicsFileFormat
 
+from .length_units import to_meters
 from .spatial import (
     Quat,
     Vec3,
@@ -37,7 +38,6 @@ IK_DAMPING = 1e-2
 # is fully stretched) an uncapped damped-least-squares step winds a joint through several turns.
 IK_MAX_STEP_RAD = 0.5
 
-_MM_PER_M = 1000.0
 _IDENTITY_POS: Vec3 = (0.0, 0.0, 0.0)
 _IDENTITY_QUAT: Quat = (1.0, 0.0, 0.0, 0.0)
 _JACOBIAN_STEP_RAD = 1e-6
@@ -72,7 +72,7 @@ class Joint:
     max_rad: float
 
 
-# The fixed transform (metres, quaternion) from the previous joint's frame
+# The fixed transform (meters, quaternion) from the previous joint's frame
 # (or the base, for the first entry) up to and including a joint's own
 # origin, where the joint's variable motion is applied.
 _FixedFrame = tuple[Vec3, Quat]
@@ -83,7 +83,7 @@ _DEFAULT_FRAME: _FixedFrame = (_IDENTITY_POS, _IDENTITY_QUAT)
 class Chain:
     """A serial kinematic chain from the base link to the end-effector link.
 
-    Positions are metres in the arm's base frame (the frame `GetEndPosition`
+    Positions are meters in the arm's base frame (the frame `GetEndPosition`
     reports in). Orientations are `(w, x, y, z)` quaternions. Joint vectors
     are radians in `joints` order, which is the order `GetJointPositions`
     and `MoveToJointPositions` use for the same file.
@@ -351,9 +351,9 @@ def _unit_vec3(value: dict | Sequence[float], context: str) -> Vec3:
 def _sva_link_frame(link: dict) -> _FixedFrame:
     translation = link.get("translation", {"x": 0.0, "y": 0.0, "z": 0.0})
     pos = (
-        translation.get("x", 0.0) / _MM_PER_M,
-        translation.get("y", 0.0) / _MM_PER_M,
-        translation.get("z", 0.0) / _MM_PER_M,
+        to_meters(translation.get("x", 0.0)),
+        to_meters(translation.get("y", 0.0)),
+        to_meters(translation.get("z", 0.0)),
     )
     orientation = link.get("orientation")
     quat = _parse_sva_orientation(orientation, link["id"]) if orientation else _IDENTITY_QUAT

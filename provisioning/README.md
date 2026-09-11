@@ -1,10 +1,11 @@
 # Provisioning a sim machine
 
-Redeploy: not applicable, this provisions a new host.
+Redeploy the module before following this? No. Nothing here runs the module
+from your working tree, so no build or push is needed first.
 
-Three ways to get a running sim machine on Isaac Sim, in the order a reader
-should try them: build the image once, then either drive it by hand or with
-`create-sim-machine.sh`.
+Build the image once, then create a machine either by hand or with
+`create-sim-machine.sh`. The three sections below are in the order a reader
+should try them.
 
 ## 1. Building the image
 
@@ -28,9 +29,9 @@ credentials.
 3. Expect it to create a builder instance, install the driver and Isaac Sim,
    reboot once to confirm the install, install viam-agent, then stop the
    builder, snapshot it into an image named `viam-isaac-sim-<YYYYMMDD>` in the
-   `viam-isaac-sim` family, and delete the builder. Isaac Sim's pip install is
-   the slow step, and the whole run takes on the order of 20-30 minutes,
-   most of it the reboot and the Isaac Sim download.
+   `viam-isaac-sim` family, and delete the builder. The slow step is the Isaac
+   Sim pip install, which downloads 10GB+. The whole run takes on the order of
+   20-30 minutes.
 4. Confirm the image landed: `gcloud compute images list --filter="family=viam-isaac-sim"`.
 
 ## 2. Creating a sim machine by hand
@@ -62,22 +63,22 @@ Use this path on a cloud other than GCP, or when you want to see every step.
 5. Add the sim world. Target: the `CONFIGURE` tab, the `+` button, then
    search for the `isaac-sim-world-devin` fragment by name and install it. Save.
    Expected result: the `LOGS` tab shows the `isaac-world` component coming
-   up. Alternatively, paste the output of `tools/simulate_config.py` in place
-   of the fragment if you are starting from a real machine's config, since
-   its output already carries the module entry and `isaac-world` and adding
-   the fragment on top would duplicate the world.
+   up. Starting from a real machine's config instead? Paste the output of
+   `tools/simulate_config.py` in place of the fragment. That output already
+   carries the module entry and `isaac-world`, so adding the fragment on top
+   would duplicate the world.
 6. Open the livestream. Target: the `CONTROL` tab, the `isaac-world`
-   component's livestream panel. Expected result: an empty Isaac Sim stage
-   with no tables and no arm.
+   component's livestream panel, once TCP 49100 (WebRTC signaling) and UDP
+   47998 (media) are reachable on the instance. Expected result: an empty
+   Isaac Sim stage with no tables and no arm.
 
 ## 3. Creating a sim machine with the script
 
-`provisioning/create-sim-machine.sh` wraps the steps above into one command,
-built by a sibling slice of this phase.
+`provisioning/create-sim-machine.sh` wraps the steps above into one command.
 
 ```
 provisioning/create-sim-machine.sh <real-config.json> --name NAME --location-id ID \
-  [--project P] [--zone Z] [--dry-run]
+  [--project P] [--zone Z] [--dry-run] [--open-livestream]
 ```
 
 Target: the Viam org identified by your `VIAM_API_KEY` / `VIAM_API_KEY_ID`,
@@ -87,19 +88,29 @@ launched from the `viam-isaac-sim` image with that machine's credentials, and
 the resolved config (from `tools/simulate_config.py`) pushed once the part
 reports online. `--dry-run` prints every remote call without making any.
 
+`--open-livestream` opens the two ports the livestream needs, TCP 49100
+(WebRTC signaling) and UDP 47998 (media): it idempotently creates a firewall
+rule for them targeting the `viam-isaac-sim` network tag, then applies that
+tag to the created instance. Without it, GCP's default VPC only allows
+22/3389/ICMP inbound and the livestream panel in step 6 above has nothing to
+connect to.
+
 ## Pins
 
 - Ubuntu 24.04, image family `ubuntu-2404-lts-amd64` in project
   `ubuntu-os-cloud`: `build-image.sh`'s source image, matching the version
   `first_run.sh` targets on the `24.04` branch of its case statement.
-- NVIDIA driver 580: the branch `first_run.sh` installs. Later branches
-  (590/595) crash the RTX renderer (isaac-sim/IsaacSim#537, #643).
+- NVIDIA driver 580: the branch `first_run.sh` installs. Later branches crash
+  the RTX renderer, see the driver bullet under
+  ["Machine requirements and automatic setup"](../README.md#machine-requirements-and-automatic-setup).
 - Python 3.11: the interpreter `first_run.sh` picks for Ubuntu 24.04.
 - isaacsim 5.0.0: the pip package version `first_run.sh` installs from
   `https://pypi.nvidia.com`.
 - `g2-standard-8` (one NVIDIA L4): `build-image.sh`'s default machine type,
   matching `tools/create_sim_machine.py`'s `DEFAULT_MACHINE_TYPE`.
 
-These pins were not read off the reference VM directly, since `gcloud` was
-logged out when this doc was written. The reference VM inventory (user-run)
-corrects them if it finds a mismatch.
+Every pin above was read on 2026-09-09 out of `build-image.sh`,
+`first_run.sh` and `tools/create_sim_machine.py`, not off a running VM. To
+re-check one against a built image, launch an instance from the
+`viam-isaac-sim` family and read `nvidia-smi`, `python3 --version`, and
+`pip show isaacsim` on it.

@@ -1,9 +1,3 @@
-"""The place-zone keep-out (phase 5, GPU round): with ``place_region_mm`` and
-``placed_tallest_mm`` set, the carry plans against a ``place_area_keepout``
-box over the pads and the pre-place hover is floored so the held block's
-bottom clears it. With the fields at their defaults the pipeline's world
-states and poses are unchanged."""
-
 import asyncio
 
 import pytest
@@ -131,11 +125,11 @@ def test_place_keepout_boxes_the_pad_zone_and_floors_the_hover(monkeypatch):
     assert box.box.dims_mm.x == pytest.approx(400.0 + 2 * KEEPOUT_MARGIN_MM)
     assert box.box.dims_mm.y == pytest.approx(100.0 + 2 * KEEPOUT_MARGIN_MM)
 
-    # the hover floor: held block bottom (TCP - centre_below_tcp - size/2)
+    # the hover floor: held block bottom (TCP - center_below_tcp - size/2)
     # clears the box top exactly
     grasp_pose = fakes.moves[2][0]
-    centre_below_tcp_mm = grasp_pose.z - BLOCK_TOP_Z_MM
-    expected_floor = PAD_TOP_Z_MM + height_mm + centre_below_tcp_mm + BLOCK_SIZE_MM / 2.0
+    center_below_tcp_mm = grasp_pose.z - BLOCK_TOP_Z_MM
+    expected_floor = PAD_TOP_Z_MM + height_mm + center_below_tcp_mm + BLOCK_SIZE_MM / 2.0
     assert fakes.pipeline.place_clear_tcp_z_mm == pytest.approx(expected_floor)
     pre_place_pose = keepout_states[0][0]
     assert pre_place_pose.z == pytest.approx(expected_floor)

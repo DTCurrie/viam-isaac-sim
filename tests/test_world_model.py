@@ -1,13 +1,13 @@
-"""SCN-16: every DoCommand verb on the world component routes through
-WorldHandle, never SimManager scene methods directly; plus the new
-scene verbs and live get_geometries."""
-
 import asyncio
 import itertools
 import logging
+import threading
+import time
 
 import pytest
+from grpclib import Status
 from viam.components.arm import JointPositions
+from viam.errors import ViamGRPCError
 from viam.proto.app.robot import ComponentConfig
 from viam.utils import dict_to_struct
 
@@ -20,6 +20,7 @@ from isaac_module.sim_manager import (
     DEFAULT_MIN_SEPARATION_M,
     UR_JOINT_NAMES,
     RandomizeResult,
+    ScatterCellResult,
     SimManager,
 )
 
@@ -30,6 +31,24 @@ POOL_NAMES = [
     for color in cell_layout.BLOCK_COLORS
     for index in range(1, cell_layout.POOL_BLOCKS_PER_COLOR + 1)
 ]
+
+# scatter_cell/clear_cell take their names, region and park grid from the
+# DoCommand payload (the world component knows no cell): these are the
+# same values cell_layout carries, in the shapes the payload expects.
+POOL_NAMES_BY_COLOR = {
+    color: [
+        cell_layout.pool_block_name(color, index)
+        for index in range(1, cell_layout.POOL_BLOCKS_PER_COLOR + 1)
+    ]
+    for color in cell_layout.BLOCK_COLORS
+}
+_SCATTER_REGION_M = cell_layout.scatter_region_m()
+SCATTER_REGION_MM = [
+    [v * 1000.0 for v in _SCATTER_REGION_M[0]],
+    [v * 1000.0 for v in _SCATTER_REGION_M[1]],
+]
+PARK_POSITIONS_M = cell_layout.park_positions_m()
+PARK_POSITIONS_MM = {name: [x * 1000.0, y * 1000.0] for name, (x, y) in PARK_POSITIONS_M.items()}
 
 
 def _config(name: str, attrs: dict) -> ComponentConfig:
@@ -142,6 +161,44 @@ def test_every_verb_routes_through_handle(world, monkeypatch):
     ]
     assert fake.calls[3] == ("reset", False)
     assert fake.calls[4] == ("reset", True)
+
+
+def test_do_command_runs_the_handler_off_the_event_loop(world, monkeypatch):
+    """do_command must not block the module's event loop: the handler has
+    to actually execute on a worker thread, not just get scheduled as if
+    it would. A synchronous `handler(...)` call here (the bug this guards
+    against) would record the event loop's own thread id instead."""
+    main_thread_id = threading.get_ident()
+    seen_thread_ids: list[int] = []
+
+    class _ThreadRecordingHandle(_RecordingWorldHandle):
+        def status(self) -> dict:
+            seen_thread_ids.append(threading.get_ident())
+            return super().status()
+
+    monkeypatch.setattr(SimManager, "world_handle", lambda self: _ThreadRecordingHandle())
+
+    asyncio.run(world.do_command({"command": "status"}))
+
+    assert seen_thread_ids
+    assert seen_thread_ids[0] != main_thread_id
+
+
+def test_get_geometries_reads_prop_geometries_off_the_event_loop(world, monkeypatch):
+    main_thread_id = threading.get_ident()
+    seen_thread_ids: list[int] = []
+
+    class _ThreadRecordingHandle(_RecordingWorldHandle):
+        def prop_geometries(self) -> list:
+            seen_thread_ids.append(threading.get_ident())
+            return []
+
+    monkeypatch.setattr(SimManager, "world_handle", lambda self: _ThreadRecordingHandle())
+
+    asyncio.run(world.get_geometries())
+
+    assert seen_thread_ids
+    assert seen_thread_ids[0] != main_thread_id
 
 
 def test_spawn_prop_and_prop_geometries_round_trip(world):
@@ -259,7 +316,7 @@ def test_randomize_props_deterministic_and_within_region(world):
         assert sizes[name] == pytest.approx([50.0, 50.0, 50.0])  # unranged: default cube size
 
 
-def test_randomize_props_size_range_mm_list_form_reaches_the_handle_in_metres(world):
+def test_randomize_props_size_range_mm_list_form_reaches_the_handle_in_meters(world):
     names = ["sz_a", "sz_b"]
     region = [[0.0, 0.0, 0.0], [1000.0, 1000.0, 0.0]]
 
@@ -283,7 +340,7 @@ def test_randomize_props_size_range_mm_list_form_reaches_the_handle_in_metres(wo
         assert x == y == z
 
 
-def test_randomize_props_size_range_mm_map_form_reaches_the_handle_in_metres(world):
+def test_randomize_props_size_range_mm_map_form_reaches_the_handle_in_meters(world):
     names = ["sz_c", "sz_d"]
     region = [[0.0, 0.0, 0.0], [1000.0, 1000.0, 0.0]]
 
@@ -422,17 +479,36 @@ def pool_world(world):
     return world
 
 
+def _scatter_command(**overrides: object) -> dict:
+    command: dict = {
+        "command": "scatter_cell",
+        "names_by_color": POOL_NAMES_BY_COLOR,
+        "region": SCATTER_REGION_MM,
+        "park_positions_mm": PARK_POSITIONS_MM,
+    }
+    command.update(overrides)
+    return command
+
+
+def _clear_command() -> dict:
+    return {
+        "command": "clear_cell",
+        "names_by_color": POOL_NAMES_BY_COLOR,
+        "park_positions_mm": PARK_POSITIONS_MM,
+    }
+
+
 def test_scatter_cell_response_shape_and_mm_conversion(pool_world):
     handle = pool_world._handle()
     seed = 9001
 
     async def scenario():
-        return await pool_world.do_command(
-            {"command": "scatter_cell", "seed": seed, "size_range_mm": [30.0, 90.0]}
-        )
+        return await pool_world.do_command(_scatter_command(seed=seed, size_range_mm=[30.0, 90.0]))
 
     result = asyncio.run(scenario())
-    direct = handle.scatter_cell(seed, size_range_m=(0.03, 0.09))
+    direct = handle.scatter_cell(
+        POOL_NAMES_BY_COLOR, _SCATTER_REGION_M, PARK_POSITIONS_M, seed, size_range_m=(0.03, 0.09)
+    )
 
     assert result["seed"] == seed
     assert result["counts"] == direct.counts
@@ -449,7 +525,7 @@ def test_scatter_cell_response_shape_and_mm_conversion(pool_world):
 
 def test_scatter_cell_same_seed_is_deterministic(pool_world):
     async def scatter():
-        return await pool_world.do_command({"command": "scatter_cell", "seed": 42})
+        return await pool_world.do_command(_scatter_command(seed=42))
 
     first = asyncio.run(scatter())
     second = asyncio.run(scatter())
@@ -459,22 +535,18 @@ def test_scatter_cell_same_seed_is_deterministic(pool_world):
 
 def test_scatter_cell_missing_seed_raises_value_error(pool_world):
     with pytest.raises(ValueError):
-        asyncio.run(pool_world.do_command({"command": "scatter_cell"}))
+        asyncio.run(pool_world.do_command(_scatter_command()))
 
 
 def test_scatter_cell_bad_size_range_mm_raises_value_error(pool_world):
     with pytest.raises(ValueError):
-        asyncio.run(
-            pool_world.do_command(
-                {"command": "scatter_cell", "seed": 1, "size_range_mm": [90.0, 30.0]}
-            )
-        )
+        asyncio.run(pool_world.do_command(_scatter_command(seed=1, size_range_mm=[90.0, 30.0])))
 
 
 def test_clear_cell_parks_all_eighteen_pool_blocks(pool_world):
     async def scenario():
-        await pool_world.do_command({"command": "scatter_cell", "seed": 7})
-        return await pool_world.do_command({"command": "clear_cell"})
+        await pool_world.do_command(_scatter_command(seed=7))
+        return await pool_world.do_command(_clear_command())
 
     result = asyncio.run(scenario())
     assert sorted(result["parked"]) == sorted(POOL_NAMES)
@@ -482,9 +554,7 @@ def test_clear_cell_parks_all_eighteen_pool_blocks(pool_world):
 
 def test_scatter_cell_counts_override_zero_parks_the_whole_color(pool_world):
     async def scenario():
-        return await pool_world.do_command(
-            {"command": "scatter_cell", "seed": 3, "counts": {"red": 0}}
-        )
+        return await pool_world.do_command(_scatter_command(seed=3, counts={"red": 0}))
 
     result = asyncio.run(scenario())
     red_names = [
@@ -494,6 +564,40 @@ def test_scatter_cell_counts_override_zero_parks_the_whole_color(pool_world):
     assert result["counts"]["red"] == 0
     assert all(name not in result["positions"] for name in red_names)
     assert all(name in result["parked"] for name in red_names)
+
+
+def test_scatter_cell_concurrent_calls_serialize(world, monkeypatch):
+    """Off the event loop, two scatter_cell calls that arrive together both
+    reach the handle; do_command's lock must still keep only one of them
+    inside the handler at a time. Without the lock this would race up to
+    max_active == 2."""
+    active = 0
+    max_active = 0
+    active_lock = threading.Lock()
+
+    class _SlowScatterHandle(_RecordingWorldHandle):
+        def scatter_cell(
+            self, names_by_color, region, park_positions_m, seed, size_range_m=None, counts=None
+        ):
+            nonlocal active, max_active
+            with active_lock:
+                active += 1
+                max_active = max(max_active, active)
+            time.sleep(0.05)
+            with active_lock:
+                active -= 1
+            return ScatterCellResult(seed=seed, counts={}, positions_m={}, sizes_m={}, parked=[])
+
+    monkeypatch.setattr(SimManager, "world_handle", lambda self: _SlowScatterHandle())
+
+    async def scenario():
+        await asyncio.gather(
+            world.do_command(_scatter_command(seed=1)),
+            world.do_command(_scatter_command(seed=2)),
+        )
+
+    asyncio.run(scenario())
+    assert max_active == 1
 
 
 def test_usd_stage_without_lighting_warns(caplog):
@@ -566,8 +670,9 @@ def test_do_command_prim_pose_unknown_prim_raises(world):
             }
         )
 
-    with pytest.raises(PrimNotFoundError):
+    with pytest.raises(PrimNotFoundError) as excinfo:
         asyncio.run(scenario())
+    assert excinfo.value.grpc_code == Status.INVALID_ARGUMENT
 
 
 def test_joint_state_do_command_reports_targets_next_to_positions(world):
@@ -624,9 +729,10 @@ def test_do_command_wrong_kind_name_raises(world):
 
 
 def test_unknown_command_lists_verbs(world):
-    with pytest.raises(ValueError) as exc_info:
+    with pytest.raises(ViamGRPCError) as exc_info:
         asyncio.run(world.do_command({"command": "bogus"}))
-    message = str(exc_info.value)
+    assert exc_info.value.grpc_code == Status.INVALID_ARGUMENT
+    message = exc_info.value.message
     for verb in (
         "status",
         "play",

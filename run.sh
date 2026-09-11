@@ -34,12 +34,23 @@ export OMNI_KIT_ACCEPT_EULA=${OMNI_KIT_ACCEPT_EULA:-yes}
 export ACCEPT_EULA=${ACCEPT_EULA:-Y}
 export OMNI_KIT_ALLOW_ROOT=${OMNI_KIT_ALLOW_ROOT:-1}
 
-# Dependency install into whichever interpreter we're using. Idempotent:
-# pip is a no-op when the pins are already satisfied, so we run this on
-# every start rather than gating it behind an "import viam" check (that
-# check would never re-apply a bumped pin on an already-provisioned box).
-echo "viam-isaac-sim: installing python dependencies..." >&2
-"$PY" -m pip install -q -r requirements.txt >&2
+# Dependency install into whichever interpreter we're using, gated behind a
+# marker recording requirements.txt's hash (under $VIAM_MODULE_DATA, falling
+# back to this module's own directory - our cwd, since the `cd` above - when
+# that's unset). A restart with an unchanged requirements.txt is then free,
+# while a hand-bumped pin still reinstalls on the next start.
+REQUIREMENTS_HASH_DIR="${VIAM_MODULE_DATA:-$(pwd)}"
+REQUIREMENTS_HASH_MARKER="$REQUIREMENTS_HASH_DIR/requirements.sha256"
+REQUIREMENTS_HASH="$(sha256sum requirements.txt | awk '{print $1}')"
+
+if [ "$(cat "$REQUIREMENTS_HASH_MARKER" 2>/dev/null || true)" = "$REQUIREMENTS_HASH" ]; then
+    echo "viam-isaac-sim: requirements.txt unchanged since last install, skipping pip install" >&2
+else
+    echo "viam-isaac-sim: installing python dependencies..." >&2
+    "$PY" -m pip install -q -r requirements.txt >&2
+    mkdir -p "$REQUIREMENTS_HASH_DIR"
+    echo "$REQUIREMENTS_HASH" > "$REQUIREMENTS_HASH_MARKER"
+fi
 "$PY" -m pip check || echo "warning: pip check reported conflicts (non-fatal)" >&2
 
 exec "$PY" src/main.py "$@"

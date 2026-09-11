@@ -1,8 +1,3 @@
-"""``select_segment`` decides which vision segment a detection locks onto:
-largest by default, nearest-the-boresight under ``prefer_centred`` — the
-mode the conductor's per-pick verify uses so a bigger same-band neighbor at
-the frame edge never out-competes the centred target (GPU seed-7)."""
-
 from dataclasses import dataclass, field
 
 import pytest

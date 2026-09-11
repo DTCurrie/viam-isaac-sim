@@ -1,11 +1,4 @@
-"""ArmHandle/GripperHandle contract, parametrised over mock and isaac
-backends (FINDINGS ARM-18; OQ-5), plus a mock pick rehearsal at the model
-level and a GPU-only DOF-count smoke.
-
-Handle-level tests speak radians (the handle contract); the model-level
-rehearsal speaks degrees (viam.components.arm.JointPositions) - never mixed.
-"""
-
+import asyncio
 import itertools
 import math
 import threading
@@ -184,7 +177,7 @@ def test_gripper_release_twice_does_not_raise(arm_and_gripper):
 # ----------------------------------------------------------------------
 
 
-def test_mock_pick_rehearsal(world):
+async def test_mock_pick_rehearsal(world):
     arm_name = _unique("rehearsal-arm")
     gripper_name = _unique("rehearsal-gripper")
 
@@ -223,17 +216,15 @@ def test_mock_pick_rehearsal(world):
         for _ in range(500):
             if not await gripper.is_moving():
                 break
-            time.sleep(MockArmHandle.STEP_S)
+            await asyncio.sleep(MockArmHandle.STEP_S)
         status = await gripper.is_holding_something()
         assert status.is_holding_something is False
 
-    import asyncio
-
-    asyncio.run(scenario())
+    await scenario()
 
 
 # ----------------------------------------------------------------------
-# GPU smoke (OQ-5 / R-3): the gripper's DOFs join the arm's articulation
+# GPU smoke: the gripper's DOFs join the arm's articulation
 # ----------------------------------------------------------------------
 
 

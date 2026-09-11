@@ -184,6 +184,32 @@ _POOL_PRIM_COLORS: dict[str, str] = {
     for index in range(1, cell_layout.POOL_BLOCKS_PER_COLOR + 1)
 }
 
+# the cell's own pool names, scatter region and park grid: the world
+# component knows no cell, so scatter_cell/clear_cell take these from the
+# DoCommand payload and the conductor is what supplies them
+_POOL_NAMES_BY_COLOR: dict[str, list[str]] = {
+    color: [
+        cell_layout.pool_block_name(color, index)
+        for index in range(1, cell_layout.POOL_BLOCKS_PER_COLOR + 1)
+    ]
+    for color in cell_layout.BLOCK_COLORS
+}
+
+
+def _scatter_region_mm() -> tuple[list[float], list[float]]:
+    """The cell's scatter zone as scatter_cell's DoCommand ``region``."""
+    x_lo, x_hi = cell_layout.SCATTER_ZONE_X_MM
+    y_lo, y_hi = cell_layout.SCATTER_ZONE_Y_MM
+    z = cell_layout.TABLE_TOP_Z_MM
+    return ([x_lo, y_lo, z], [x_hi, y_hi, z])
+
+
+def _park_positions_mm_payload() -> dict[str, list[float]]:
+    """``cell_layout.park_positions_mm()`` as scatter_cell/clear_cell's
+    DoCommand ``park_positions_mm`` (JSON-safe lists, not tuples)."""
+    return {name: list(xy) for name, xy in cell_layout.park_positions_mm().items()}
+
+
 # The arm can cover up to 26% of a single census frame, occluding whole blocks, and it
 # renders blue-gray, which can produce phantom segments at arm height. A kept census item's
 # top face must sit just above the table (clear of glints) and well below the arm's resting
@@ -590,7 +616,13 @@ class IsaacConductor(Generic, EasyResource):  # type: ignore[misc]  # SDK: API i
                     if loop_mode:
                         assert base_seed is not None  # scatter_cell requires a seed in loop mode
                         current_seed = compute_loop_seed(base_seed, loop_index)
-                        await self._world.do_command({"command": "clear_cell"})
+                        await self._world.do_command(
+                            {
+                                "command": "clear_cell",
+                                "names_by_color": _POOL_NAMES_BY_COLOR,
+                                "park_positions_mm": _park_positions_mm_payload(),
+                            }
+                        )
                         await self._scatter(current_seed, counts)
                         self._seed = current_seed
                     elif seed is not None:
@@ -671,16 +703,21 @@ class IsaacConductor(Generic, EasyResource):  # type: ignore[misc]  # SDK: API i
             self._cancel_requested = False
             try:
                 await self._park()
-            except Exception:  # noqa: BLE001 - best-effort: never changes the run's outcome
+            except Exception:  # best-effort: never changes the run's outcome
                 LOGGER.exception("conductor end-of-run park move failed")
 
     async def _scatter(self, seed: int, counts: dict[str, int] | None) -> None:
         """Issues one ``scatter_cell`` at ``seed`` with the config
-        ``size_range_mm``, ``counts`` passed through when given."""
+        ``size_range_mm``, ``counts`` passed through when given, and the
+        cell's own pool names, scatter region and park grid (the world
+        component knows no cell, so the conductor supplies its numbers)."""
         scatter_command: dict[str, Any] = {
             "command": "scatter_cell",
             "seed": seed,
             "size_range_mm": list(self._size_range_mm),
+            "names_by_color": _POOL_NAMES_BY_COLOR,
+            "region": list(_scatter_region_mm()),
+            "park_positions_mm": _park_positions_mm_payload(),
         }
         if counts is not None:
             scatter_command["counts"] = counts

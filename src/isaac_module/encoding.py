@@ -1,9 +1,8 @@
-"""Pure-numpy encoders for Viam's camera wire formats (FINDINGS CAM-7).
+"""Pure-numpy encoders for Viam's camera wire formats.
 
-No Isaac imports, no sim-thread affinity: every function here is safe to call
-from ``asyncio.to_thread``. Byte layouts are rdk-exact; the verified layouts are
-in ``.claude/plans/isaac-mvp-research/research/RESEARCH.md`` §V-2 and §P-5
-(sources: rdk ``rimage/depth_map_raw.go``, ``pointcloud/pointcloud_file.go``).
+No Isaac imports, no sim-thread affinity. Every function here is safe to call
+from ``asyncio.to_thread``. Byte layouts are rdk-exact, matching rdk's
+``rimage/depth_map_raw.go`` and ``pointcloud/pointcloud_file.go``.
 """
 
 from __future__ import annotations
@@ -13,12 +12,13 @@ from io import BytesIO
 from typing import NamedTuple
 
 import numpy as np
+from numpy.typing import NDArray
 from PIL import Image
 
 DEPTH_MAGIC = b"DEPTHMAP"  # big-endian uint64 4919426490892632400
 DEPTH_MIME = "image/vnd.viam.dep"
 PCD_MIME = "pointcloud/pcd"
-MAX_DEPTH_MM = 65535  # rdk rimage.MaxDepth; deeper → 0 (invalid)
+MAX_DEPTH_MM = 65535  # rdk rimage.MaxDepth. Deeper than this encodes as 0 (invalid)
 
 
 class Intrinsics(NamedTuple):
@@ -50,12 +50,12 @@ def intrinsics_from_fov(width: int, height: int, hfov_deg: float) -> Intrinsics:
     return Intrinsics(fx=fx, fy=fy, cx=cx, cy=cy, width=width, height=height)
 
 
-def _validate_rgb(rgb: np.ndarray) -> None:
+def _validate_rgb(rgb: NDArray[np.uint8]) -> None:
     if rgb.ndim != 3 or rgb.shape[2] != 3 or rgb.dtype != np.uint8:
         raise ValueError(f"expected (H, W, 3) uint8, got shape={rgb.shape} dtype={rgb.dtype}")
 
 
-def rgb_to_png(rgb: np.ndarray) -> bytes:
+def rgb_to_png(rgb: NDArray[np.uint8]) -> bytes:
     """(H, W, 3) uint8 → PNG bytes."""
     _validate_rgb(rgb)
     image = Image.fromarray(np.ascontiguousarray(rgb), "RGB")
@@ -64,7 +64,7 @@ def rgb_to_png(rgb: np.ndarray) -> bytes:
     return buffer.getvalue()
 
 
-def rgb_to_jpeg(rgb: np.ndarray, quality: int = 90) -> bytes:
+def rgb_to_jpeg(rgb: NDArray[np.uint8], quality: int = 90) -> bytes:
     """(H, W, 3) uint8 → JPEG bytes."""
     _validate_rgb(rgb)
     image = Image.fromarray(np.ascontiguousarray(rgb), "RGB")
@@ -73,11 +73,11 @@ def rgb_to_jpeg(rgb: np.ndarray, quality: int = 90) -> bytes:
     return buffer.getvalue()
 
 
-def depth_m_to_viam_dep(depth_m: np.ndarray) -> bytes:
-    """(H, W) float metres → ``image/vnd.viam.dep`` bytes.
+def depth_m_to_viam_dep(depth_m: NDArray[np.float32]) -> bytes:
+    """(H, W) float meters → ``image/vnd.viam.dep`` bytes.
 
     Layout: ``b"DEPTHMAP"`` + width as big-endian uint64 + height as big-endian
-    uint64 + H·W big-endian uint16 millimetres, row-major. ``0`` = no reading.
+    uint64 + H·W big-endian uint16 millimeters, row-major. ``0`` = no reading.
     Non-finite, negative, or > 65.535 m → 0. Must round-trip through
     ``viam.media.video.ViamImage.bytes_to_depth_array``.
     """
@@ -94,14 +94,16 @@ def depth_m_to_viam_dep(depth_m: np.ndarray) -> bytes:
     return header + payload
 
 
-def depth_to_xyz(depth_m: np.ndarray, k: Intrinsics) -> tuple[np.ndarray, np.ndarray]:
-    """Back-project (H, W) float metres to camera-optical-frame points.
+def depth_to_xyz(
+    depth_m: NDArray[np.float32], k: Intrinsics
+) -> tuple[NDArray[np.float32], NDArray[np.bool_]]:
+    """Back-project (H, W) float meters to camera-optical-frame points.
 
-    Integer pixel grid (u, v) → x = (u − cx)·z/fx, y = (v − cy)·z/fy, z = depth.
+    Integer pixel grid (u, v) → x = (u - cx)·z/fx, y = (v - cy)·z/fy, z = depth.
     Frame: +X right, +Y down, +Z forward (ROS/OpenCV optical). Returns
-    ``(xyz, mask)``: ``xyz`` is (N, 3) float32 metres for the valid pixels only
+    ``(xyz, mask)``: ``xyz`` is (N, 3) float32 meters for the valid pixels only
     (finite and > 0), ``mask`` is the (H, W) bool array selecting them so a
-    caller can pick the matching colours with ``rgb[mask]``.
+    caller can pick the matching colors with ``rgb[mask]``.
     """
     height, width = depth_m.shape
     u, v = np.meshgrid(np.arange(width), np.arange(height))
@@ -114,8 +116,8 @@ def depth_to_xyz(depth_m: np.ndarray, k: Intrinsics) -> tuple[np.ndarray, np.nda
     return xyz, mask
 
 
-def xyz_rgb_to_pcd(xyz: np.ndarray, rgb: np.ndarray | None) -> bytes:
-    """(N, 3) float32 metres [+ (N, 3) uint8] → binary ``pointcloud/pcd`` bytes.
+def xyz_rgb_to_pcd(xyz: NDArray[np.float32], rgb: NDArray[np.uint8] | None) -> bytes:
+    """(N, 3) float32 meters [+ (N, 3) uint8] → binary ``pointcloud/pcd`` bytes.
 
     Header (ASCII, ``\\n``-terminated lines, no ``# .PCD`` comment)::
 
@@ -130,26 +132,26 @@ def xyz_rgb_to_pcd(xyz: np.ndarray, rgb: np.ndarray | None) -> bytes:
         POINTS <N>
         DATA binary
 
-    Payload per point: little-endian float32 x, y, z, then (coloured) a
-    little-endian uint32 ``r << 16 | g << 8 | b`` — 16 B/point coloured, 12 B
-    uncoloured. Wire units are METRES.
+    Payload per point: little-endian float32 x, y, z, then (colored) a
+    little-endian uint32 ``r << 16 | g << 8 | b`` — 16 B/point colored, 12 B
+    uncolored. Wire units are METERS.
     """
     if xyz.ndim != 2 or xyz.shape[1] != 3:
         raise ValueError(f"expected (N, 3) xyz, got shape={xyz.shape}")
 
     num_points = xyz.shape[0]
-    coloured = rgb is not None
-    if coloured:
+    colored = rgb is not None
+    if colored:
         assert rgb is not None  # narrow for mypy
         if rgb.ndim != 2 or rgb.shape != (num_points, 3) or rgb.dtype != np.uint8:
             raise ValueError(
                 f"expected ({num_points}, 3) uint8 rgb, got shape={rgb.shape} dtype={rgb.dtype}"
             )
 
-    fields = "x y z rgb" if coloured else "x y z"
-    sizes = "4 4 4 4" if coloured else "4 4 4"
-    types = "F F F I" if coloured else "F F F"
-    counts = "1 1 1 1" if coloured else "1 1 1"
+    fields = "x y z rgb" if colored else "x y z"
+    sizes = "4 4 4 4" if colored else "4 4 4"
+    types = "F F F I" if colored else "F F F"
+    counts = "1 1 1 1" if colored else "1 1 1"
     header = (
         "VERSION .7\n"
         f"FIELDS {fields}\n"
@@ -163,7 +165,7 @@ def xyz_rgb_to_pcd(xyz: np.ndarray, rgb: np.ndarray | None) -> bytes:
         "DATA binary\n"
     ).encode("ascii")
 
-    if coloured:
+    if colored:
         assert rgb is not None
         dtype = np.dtype([("x", "<f4"), ("y", "<f4"), ("z", "<f4"), ("rgb", "<u4")])
         points = np.zeros(num_points, dtype=dtype)

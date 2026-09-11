@@ -8,12 +8,17 @@ sim module entry and the world component come from the public world
 fragment when the config lacks them. `name`, `api`, `frame`, `depends_on`
 and every service are left byte for byte.
 
-Two rules live here rather than in the table, because they read more than
-one entry. A component already on one of this module's models is passed
-through untouched, which makes resolving twice a no-op. A swapped camera
+Three rules live here rather than in the table, because they read more than
+one entry. A component already on one of this module's models, or already
+on `rdk:builtin:fake`, is passed through untouched, which makes resolving
+twice a no-op. A swapped camera
 whose frame parent is a swapped arm gets `parent_prim` set to that arm's
 default end-effector prim, since the sim camera needs the prim to ride and
-the real entry carries only the frame.
+the real entry carries only the frame. A swapped arm, camera, base or
+gripper whose frame parent is neither `world`, the world component, nor
+(for a camera or gripper) a swapped arm, fails here instead of resolving to
+a config that only fails once it reaches the GPU host, since this module
+does not build the parent frame chain.
 
 This is the reference behavior for an app button or a viam-server flag that
 would do the same thing at save or construction time.
@@ -21,28 +26,28 @@ would do the same thing at save or construction time.
 
 from __future__ import annotations
 
-import argparse
 import copy
-import json
-import sys
 from collections.abc import Collection, Sequence
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
 
 from . import FAMILY, NAMESPACE
-from .component_diagnostics import default_ee_prim_path
+from .prim_paths import default_ee_prim_path
 
 # Component APIs that drive hardware and so must be simulated or explicitly
 # passed through. `rdk:component:generic` is not listed: the world itself is
-# generic and a generic component has no hardware to stand in for. Source:
-# https://docs.viam.com/dev/reference/apis/ component list (verify when
-# implementing, and cite the page read).
+# generic and a generic component has no hardware to stand in for. Subtype
+# names checked against the installed SDK's package layout, not the docs
+# page, for audio: .venv/lib/python*/site-packages/viam/components/ lists
+# `audio_in` and `audio_out`, not `audio_input`.
+# Source: https://docs.viam.com/dev/reference/apis/, read 2026-09-09, audio
+# subtypes cross-checked against the installed viam-sdk the same day.
 HARDWARE_APIS: frozenset[str] = frozenset(
     f"rdk:component:{name}"
     for name in (
         "arm",
-        "audio_input",
+        "audio_in",
+        "audio_out",
         "base",
         "board",
         "button",
@@ -64,6 +69,7 @@ HARDWARE_APIS: frozenset[str] = frozenset(
 WILDCARD_REAL_MODEL = "*"
 CATCH_ALL_API = "*"
 PLACEHOLDER_API = "rdk:component:generic"
+FAKE_MODEL = "rdk:builtin:fake"
 FRAME_PARENT_REFERENCE = "$frame.parent"
 
 # The table's conventional filename, used only in the unmatched-hardware
@@ -89,12 +95,20 @@ class UnmatchedHardwareError(ValueError):
 
 @dataclass(frozen=True)
 class Resolution:
-    """What `resolve` produced and which components it touched."""
+    """What `resolve` produced and which components it touched.
+
+    `pruned_modules` lists the `module_id` of every entry dropped because no
+    remaining component or service model needs it. `unresolved_variables`
+    lists the `name` of every fragment `$variable` reference left in place
+    because it carried no `default_value`.
+    """
 
     config: dict[str, Any]
     swapped: tuple[str, ...]
     passed_through: tuple[str, ...]
     placeholders: tuple[str, ...] = ()
+    pruned_modules: tuple[str, ...] = ()
+    unresolved_variables: tuple[str, ...] = ()
 
 
 def resolve(
@@ -115,7 +129,9 @@ def resolve(
     hardware component with no row becomes a placeholder generic component
     through the table's catch-all row, or raises `UnmatchedHardwareError`
     when the table has no catch-all. `allow_unmatched` keeps such a
-    component's real entry instead. Never mutates `config`.
+    component's real entry instead, and also skips the check that a swapped
+    arm, camera, base or gripper's frame parent resolves to a sim prim.
+    Never mutates `config`.
     """
     resolved = copy.deepcopy(config)
     rows: Sequence[dict[str, Any]] = table.get("rows", [])
@@ -136,7 +152,7 @@ def resolve(
         name = component["name"]
         api = component.get("api")
         model = component.get("model", "")
-        if model.startswith(module_prefix):
+        if model.startswith(module_prefix) or model == FAKE_MODEL:
             passed_through.append(name)
             new_components.append(component)
             continue
@@ -149,11 +165,12 @@ def resolve(
             if catch_all is None:
                 unmatched.append(name)
             else:
-                # The catch-all is the one row where the api changes: a placeholder generic
-                # component keeps the name, frame and depends_on so the config loads, and
-                # carries no attributes because nothing stands behind it.
+                # The catch-all keeps the component's own api and points it at the
+                # builtin fake model, which is registered for every hardware api but
+                # pose_tracker. pose_tracker falls back to generic, the one api the
+                # placeholder still has to change, so the config still loads.
                 placeholder = dict(component)
-                placeholder["api"] = PLACEHOLDER_API
+                placeholder["api"] = PLACEHOLDER_API if api == "rdk:component:pose_tracker" else api
                 placeholder["model"] = catch_all["sim_model"]
                 placeholder["attributes"] = {}
                 placeholders.append(name)
@@ -178,15 +195,22 @@ def resolve(
     by_name = {c["name"]: c for c in new_components}
     original_by_name = {c["name"]: c for c in original_components}
     _apply_camera_rules(new_components, by_name, original_by_name, swapped_names)
+    if not allow_unmatched:
+        _validate_frame_parents(new_components, by_name, swapped_names, default_world)
 
-    resolved["components"] = _with_world_component(new_components, world_fragment)
+    resolved["components"], unresolved_variables = _with_world_component(
+        new_components, world_fragment
+    )
     resolved = _with_module_entry(resolved, world_fragment)
+    resolved, pruned_modules = _prune_unused_modules(resolved)
 
     return Resolution(
         config=resolved,
         swapped=tuple(swapped),
         passed_through=tuple(passed_through),
         placeholders=tuple(placeholders),
+        pruned_modules=tuple(pruned_modules),
+        unresolved_variables=tuple(unresolved_variables),
     )
 
 
@@ -240,42 +264,108 @@ def _apply_camera_rules(
             and parent.get("api") == "rdk:component:arm"
             and parent_name in swapped_names
         ):
-            component["attributes"]["parent_prim"] = default_ee_prim_path(
-                parent.get("attributes") or {}, parent_name
-            )
-        sensors = (original_by_name[name].get("attributes") or {}).get("sensors")
-        if isinstance(sensors, list) and "depth" in sensors:
+            ee_prim_path = default_ee_prim_path(parent.get("attributes") or {}, parent_name)
+            if ee_prim_path is not None:
+                component["attributes"]["parent_prim"] = ee_prim_path
+        real_attrs = original_by_name[name].get("attributes") or {}
+        if "sensors" in real_attrs:
+            sensors = real_attrs["sensors"]
+            wants_depth = isinstance(sensors, list) and "depth" in sensors
+        else:
+            # The real RealSense driver defaults sensors to color plus depth when the
+            # config omits the key, so an absent key resolves the same way.
+            wants_depth = True
+        if wants_depth:
             component["attributes"]["depth"] = True
 
 
-def _resolve_fragment_variables(node: Any) -> Any:
+# frame.parent values allowed to ride an arm without a spawned sim prim of their own,
+# since the sim gripper and camera each get a mount point on the arm's own prim (the
+# gripper through its "arm" attribute, the camera through _apply_camera_rules).
+_RIDES_ARM_APIS = ("rdk:component:camera", "rdk:component:gripper")
+
+
+def _validate_frame_parents(
+    new_components: list[dict[str, Any]],
+    by_name: dict[str, dict[str, Any]],
+    swapped_names: set[str],
+    default_world: str,
+) -> None:
+    """A swapped arm, camera, base or gripper whose frame rides another
+    component has no sim prim to land on: this module carries `frame`
+    unchanged rather than building the parent frame chain (a plan of its
+    own), so the swap would resolve to valid-looking JSON that only fails
+    once it reaches the GPU host. Fail here instead, naming the remedy. A
+    camera or gripper riding a swapped arm is the one exception, since each
+    gets a mount point on that arm's own prim.
+    """
+    checked_apis = {
+        "rdk:component:arm",
+        "rdk:component:camera",
+        "rdk:component:base",
+        *_RIDES_ARM_APIS,
+    }
+    for component in new_components:
+        name = component["name"]
+        if name not in swapped_names or component.get("api") not in checked_apis:
+            continue
+        frame = component.get("frame") or {}
+        parent = frame.get("parent") or ""
+        if parent in ("", "world", default_world):
+            continue
+        parent_name = parent.split(":")[0]
+        if component.get("api") in _RIDES_ARM_APIS:
+            parent_component = by_name.get(parent_name)
+            if (
+                parent_component is not None
+                and parent_component.get("api") == "rdk:component:arm"
+                and parent_name in swapped_names
+            ):
+                continue
+        raise ValueError(
+            f'{name}: frame.parent {parent!r} names a component, not "world" or the '
+            f"world component ({default_world!r}). This module carries frame "
+            "unchanged rather than building the parent frame chain, so the resolved "
+            f'config would fail to construct on the GPU host. Mount {name} on "world" '
+            "for the sim, or pass allow_unmatched to resolve() to keep its real frame "
+            "entry as it is"
+        )
+
+
+def _resolve_fragment_variables(node: Any, unresolved: list[str]) -> Any:
     """Replace each `{"$variable": {"name", "default_value"}}` object with its default.
 
     The app substitutes fragment variables when it renders a machine's config. A resolved
-    config is a machine config, not a fragment, so the defaults are baked in here and a
-    caller that wants another value (the create-sim-machine flow filling the livestream
-    IP) sets the attribute on the emitted component.
+    config is a machine config, not a fragment, so the defaults are baked in here, and a
+    caller that wants a different value sets the attribute on the emitted component. A
+    variable with no `default_value` is left as its `$variable` object and its `name` is
+    appended to `unresolved`, rather than raising, since the docs describe `default_value`
+    narratively and do not guarantee every fragment sets it.
     """
     if isinstance(node, dict):
         variable = node.get("$variable")
         if variable is not None and set(node.keys()) == {"$variable"}:
-            return _resolve_fragment_variables(variable["default_value"])
-        return {key: _resolve_fragment_variables(value) for key, value in node.items()}
+            if "default_value" not in variable:
+                unresolved.append(variable.get("name", "<unnamed>"))
+                return node
+            return _resolve_fragment_variables(variable["default_value"], unresolved)
+        return {key: _resolve_fragment_variables(value, unresolved) for key, value in node.items()}
     if isinstance(node, list):
-        return [_resolve_fragment_variables(item) for item in node]
+        return [_resolve_fragment_variables(item, unresolved) for item in node]
     return node
 
 
 def _with_world_component(
     components: list[dict[str, Any]], world_fragment: dict[str, Any]
-) -> list[dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], list[str]]:
     existing_names = {c["name"] for c in components}
+    unresolved: list[str] = []
     missing = [
-        _resolve_fragment_variables(copy.deepcopy(c))
+        _resolve_fragment_variables(copy.deepcopy(c), unresolved)
         for c in world_fragment.get("components", [])
         if c["name"] not in existing_names
     ]
-    return missing + components
+    return missing + components, unresolved
 
 
 def _with_module_entry(config: dict[str, Any], world_fragment: dict[str, Any]) -> dict[str, Any]:
@@ -293,46 +383,36 @@ def _with_module_entry(config: dict[str, Any], world_fragment: dict[str, Any]) -
     return new_config
 
 
-def main(argv: Sequence[str] | None = None) -> int:
-    """CLI entry: `simulate_config.py <real-config.json> [--table PATH]
-    [--world-fragment PATH] [--allow-unmatched] [--only a,b] [--out PATH]`.
+def _prune_unused_modules(config: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
+    """Drop `modules` entries whose `module_id` prefixes no remaining model.
 
-    Writes the resolved config as two-space-indented JSON with a trailing
-    newline to stdout or `--out`. Exit 0 on success, 2 for unmatched
-    hardware, 1 for any other error, each with a one-line message on stderr.
+    A swap replaces a component's model with one served by a different module, and the
+    real driver's module entry then installs and runs on the sim host for nothing. A local
+    module, one with no `module_id`, is left alone: nothing here can tell what model it
+    serves.
     """
-    repo_root = Path(__file__).resolve().parents[2]
-    parser = argparse.ArgumentParser(
-        description="Resolve a real machine config into the config of its sim machine"
-    )
-    parser.add_argument("config", help="path to the real machine's config JSON")
-    parser.add_argument("--table", default=str(repo_root / "simulates.json"))
-    parser.add_argument(
-        "--world-fragment", default=str(repo_root / "fragments" / "isaac-sim-world.json")
-    )
-    parser.add_argument("--allow-unmatched", action="store_true")
-    parser.add_argument("--only", default=None, help="comma-separated component names")
-    parser.add_argument("--out", default=None, help="write to this path instead of stdout")
-    args = parser.parse_args(argv)
-
-    try:
-        config = json.loads(Path(args.config).read_text())
-        table = json.loads(Path(args.table).read_text())
-        world_fragment = json.loads(Path(args.world_fragment).read_text())
-        only = set(args.only.split(",")) if args.only else None
-        resolution = resolve(
-            config, table, world_fragment, allow_unmatched=args.allow_unmatched, only=only
-        )
-    except UnmatchedHardwareError as exc:
-        print(str(exc), file=sys.stderr)
-        return 2
-    except Exception as exc:  # noqa: BLE001 - CLI boundary, reported as a one-line error
-        print(str(exc), file=sys.stderr)
-        return 1
-
-    output = json.dumps(resolution.config, indent=2) + "\n"
-    if args.out:
-        Path(args.out).write_text(output)
-    else:
-        sys.stdout.write(output)
-    return 0
+    modules: list[dict[str, Any]] = config.get("modules") or []
+    if not modules:
+        return config, []
+    remaining_models = {
+        resource.get("model")
+        for resource in (*config.get("components", []), *config.get("services", []))
+        if resource.get("model")
+    }
+    kept: list[dict[str, Any]] = []
+    pruned: list[str] = []
+    for module in modules:
+        module_id = module.get("module_id")
+        if not module_id:
+            kept.append(module)
+            continue
+        if any(
+            model == module_id or model.startswith(f"{module_id}:") for model in remaining_models
+        ):
+            kept.append(module)
+        else:
+            pruned.append(module_id)
+    if not pruned:
+        return config, []
+    config["modules"] = kept
+    return config, pruned

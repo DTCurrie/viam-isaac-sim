@@ -1,4 +1,3 @@
-import math
 from collections.abc import Sequence
 from typing import Any
 
@@ -6,86 +5,17 @@ from viam.proto.app.robot import ComponentConfig
 from viam.utils import struct_to_dict
 
 from .. import DEFAULT_WORLD_NAME, FAMILY, NAMESPACE
-from ..sim_manager import _prim_name
-from ..spatial import Quat, Vec3, ov_to_quat, quat_from_axis_angle, quat_mul
-
-
-def get_attrs(config: ComponentConfig) -> dict[str, Any]:
-    return struct_to_dict(config.attributes)
-
-
-def frame_pose(config: ComponentConfig) -> tuple[Vec3 | None, Quat | None]:
-    """Spawn pose from the component's standard frame config: position in
-    meters (frame translations are mm) and a (w,x,y,z) quaternion, or None
-    for whatever isn't set. The frame system is the preferred way to place
-    isaac-sim components - it keeps viam's view of the machine (e.g. the
-    motion service) consistent with where prims actually are in the sim."""
-    if not config.HasField("frame"):
-        return None, None
-    frame = config.frame
-    t = frame.translation
-    position = (t.x / 1000.0, t.y / 1000.0, t.z / 1000.0)
-
-    quat: Quat | None = None
-    o = frame.orientation
-    which = o.WhichOneof("type")
-    if which == "quaternion":
-        q = o.quaternion
-        quat = (q.w, q.x, q.y, q.z)
-    elif which == "vector_radians":
-        v = o.vector_radians
-        quat = ov_to_quat(v.x, v.y, v.z, v.theta)
-    elif which == "vector_degrees":
-        v = o.vector_degrees
-        quat = ov_to_quat(v.x, v.y, v.z, math.radians(v.theta))
-    elif which == "euler_angles":
-        e = o.euler_angles  # radians, applied as Rz(yaw)*Ry(pitch)*Rx(roll)
-        qz = (math.cos(e.yaw / 2), 0.0, 0.0, math.sin(e.yaw / 2))
-        qy = (math.cos(e.pitch / 2), 0.0, math.sin(e.pitch / 2), 0.0)
-        qx = (math.cos(e.roll / 2), math.sin(e.roll / 2), 0.0, 0.0)
-        quat = quat_mul(qz, quat_mul(qy, qx))
-    elif which == "axis_angles":
-        a = o.axis_angles
-        quat = quat_from_axis_angle((a.x, a.y, a.z), a.theta)
-    return position, quat
-
-
-def apply_frame_to_attrs(config: ComponentConfig, attrs: dict[str, Any]) -> dict[str, Any]:
-    """Fold the frame config into the spawn attrs (frame wins over the
-    legacy position/orientation attributes).
-
-    When "parent_prim" is set the component rides another prim, so the frame
-    describes a LOCAL pose relative to that prim, not a world pose: it is
-    written to local_position/local_orientation_wxyz instead of
-    position/orientation_wxyz. Mixing the two meant a world pose landed on a mounted camera."""
-    position, quat = frame_pose(config)
-    if attrs.get("parent_prim"):
-        if position is not None:
-            attrs["local_position"] = list(position)
-        if quat is not None or config.HasField("frame"):
-            attrs["local_orientation_wxyz"] = list(quat or (1.0, 0.0, 0.0, 0.0))
-        return attrs
-    if position is not None:
-        attrs["position"] = list(position)
-    if quat is not None:
-        attrs["orientation_wxyz"] = list(quat)
-    return attrs
-
-
-def _prim_root(parent_prim: str) -> str:
-    """The prim segment that owns parent_prim: the segment right after a
-    leading /World/, or the first segment when the path doesn't start with
-    /World/."""
-    parts = [p for p in parent_prim.split("/") if p]
-    if parent_prim.startswith("/World/") and len(parts) >= 2:
-        return parts[1]
-    return parts[0]
+from ..sim_manager import prim_name
+from .component_frame_pose import _prim_root
 
 
 def _validate_parent_prim_frame(config: ComponentConfig, attrs: dict[str, Any]) -> None:
     """A component riding another prim (parent_prim set) must agree with
     Viam about who owns that prim: frame.parent names the component whose
-    prim it is, so viam's view (e.g. the motion service) matches the sim."""
+    prim it is, so viam's view (e.g. the motion service) matches the sim.
+    When frame.parent also carries a link (<arm-name>:<link-name>), that
+    link must be the same one parent_prim ends in, or Viam and the sim would
+    silently disagree about which joint the mount rides."""
     parent_prim = attrs["parent_prim"]
     if not config.HasField("frame") or config.frame.parent in ("", "world"):
         raise ValueError(
@@ -94,14 +24,22 @@ def _validate_parent_prim_frame(config: ComponentConfig, attrs: dict[str, Any]) 
             'cannot be "world" for a mounted component)'
         )
     parent = config.frame.parent
-    owner = parent.split(":")[0]
+    owner, _, link = parent.partition(":")
     root = _prim_root(parent_prim)
-    if _prim_name(owner) != root:
+    if prim_name(owner) != root:
         raise ValueError(
             f"{config.name}: frame.parent {parent!r} does not own parent_prim "
             f"{parent_prim!r} (root prim {root!r}); set frame.parent to the "
             "component whose prim that is"
         )
+    if link:
+        last_segment = parent_prim.rstrip("/").rsplit("/", 1)[-1]
+        if link != last_segment:
+            raise ValueError(
+                f"{config.name}: frame.parent {parent!r} names link {link!r}, "
+                f"but parent_prim {parent_prim!r} ends in {last_segment!r}; "
+                "the link half of frame.parent must match parent_prim's last segment"
+            )
 
 
 def validate_sim_component(
@@ -113,7 +51,9 @@ def validate_sim_component(
     component riding another prim (parent_prim) also depends on the component
     that owns that prim, so viam-server builds the owner first - siblings
     build concurrently, and a mounted camera built before its arm fails with
-    PrimNotFoundError."""
+    PrimNotFoundError. A bare arm parent (no ":<link>" suffix) means the
+    arm's end-effector frame; see _validate_parent_prim_frame for the link
+    form."""
     attrs = struct_to_dict(config.attributes)
     world = attrs.get("world", DEFAULT_WORLD_NAME)
     if not world or not isinstance(world, str):

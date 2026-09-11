@@ -1,7 +1,3 @@
-"""The zone constants are safe by construction: every point the arm must
-visit sits inside 80% of the ur20's reach, every zone sits on the surface
-that supports it, and the park grid stays clear of the cell."""
-
 import itertools
 import math
 

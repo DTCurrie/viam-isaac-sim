@@ -146,3 +146,47 @@ def test_prop_nonnumeric_friction_rejected():
     cfg = _config({"props": [{"name": "block", "friction": "slippery"}]})
     with pytest.raises(ValueError, match="friction"):
         IsaacWorld.validate_config(cfg)
+
+
+def test_kit_log_level_accepts_a_known_value():
+    cfg = _config({"kit_log_level": "verbose"})
+    IsaacWorld.validate_config(cfg)
+
+
+def test_kit_log_level_rejects_an_unenumerated_value():
+    # PY-15: unvalidated kit_log_level lets a machine-config field inject
+    # arbitrary Kit settings via the flag it becomes at boot.
+    cfg = _config({"kit_log_level": "warning --/some/other/setting=x"})
+    with pytest.raises(ValueError, match="kit_log_level"):
+        IsaacWorld.validate_config(cfg)
+
+
+def test_world_frame_translation_rejected():
+    # get_geometries reports prop and floor poses in world coordinates, so a
+    # translated world frame would silently shift every reported geometry.
+    cfg = _config({})
+    cfg.frame.parent = "world"
+    cfg.frame.translation.x = 100
+    with pytest.raises(ValueError, match="frame"):
+        IsaacWorld.validate_config(cfg)
+
+
+def test_world_frame_orientation_rejected():
+    cfg = _config({})
+    cfg.frame.parent = "world"
+    cfg.frame.orientation.euler_angles.yaw = 0.1
+    with pytest.raises(ValueError, match="frame"):
+        IsaacWorld.validate_config(cfg)
+
+
+def test_world_identity_frame_accepted():
+    cfg = _config({})
+    cfg.frame.parent = "world"
+    cfg.frame.translation.x = 0
+    cfg.frame.orientation.quaternion.w = 1
+    IsaacWorld.validate_config(cfg)
+
+
+def test_world_with_no_frame_accepted():
+    cfg = _config({})
+    IsaacWorld.validate_config(cfg)

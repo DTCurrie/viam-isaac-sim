@@ -824,6 +824,65 @@ async def test_loop_mode_advances_seed_deterministically_from_the_base():
     assert clear_count == 3
 
 
+async def test_scatter_cell_command_carries_the_cells_pool_names_region_and_park_grid():
+    """The world component knows no cell (D13): the conductor is the one
+    that supplies scatter_cell's names_by_color/region/park_positions_mm,
+    sourced from its own copy of cell_layout."""
+    world = FakeWorld()
+    conductor = _empty_resolve_prims_conductor()
+    conductor._world = world  # type: ignore[attr-defined]
+
+    await conductor.do_command({"command": "start", "seed": 1})
+    await conductor.wait_until_done()
+
+    (scatter_command,) = [cmd for cmd in world.commands if cmd["command"] == "scatter_cell"]
+    expected_names_by_color = {
+        color: [
+            cell_layout.pool_block_name(color, index)
+            for index in range(1, cell_layout.POOL_BLOCKS_PER_COLOR + 1)
+        ]
+        for color in cell_layout.BLOCK_COLORS
+    }
+    assert scatter_command["names_by_color"] == expected_names_by_color
+    assert scatter_command["region"] == [
+        [
+            cell_layout.SCATTER_ZONE_X_MM[0],
+            cell_layout.SCATTER_ZONE_Y_MM[0],
+            cell_layout.TABLE_TOP_Z_MM,
+        ],
+        [
+            cell_layout.SCATTER_ZONE_X_MM[1],
+            cell_layout.SCATTER_ZONE_Y_MM[1],
+            cell_layout.TABLE_TOP_Z_MM,
+        ],
+    ]
+    assert scatter_command["park_positions_mm"] == {
+        name: list(xy) for name, xy in cell_layout.park_positions_mm().items()
+    }
+
+
+async def test_clear_cell_command_carries_the_cells_pool_names_and_park_grid():
+    world = FakeWorld()
+    conductor = _empty_resolve_prims_conductor()
+    conductor._world = world  # type: ignore[attr-defined]
+
+    await conductor.do_command({"command": "start", "seed": 100, "loops": 1})
+    await conductor.wait_until_done()
+
+    (clear_command,) = [cmd for cmd in world.commands if cmd["command"] == "clear_cell"]
+    expected_names_by_color = {
+        color: [
+            cell_layout.pool_block_name(color, index)
+            for index in range(1, cell_layout.POOL_BLOCKS_PER_COLOR + 1)
+        ]
+        for color in cell_layout.BLOCK_COLORS
+    }
+    assert clear_command["names_by_color"] == expected_names_by_color
+    assert clear_command["park_positions_mm"] == {
+        name: list(xy) for name, xy in cell_layout.park_positions_mm().items()
+    }
+
+
 async def test_n_loop_run_ends_complete_with_n_loop_records(monkeypatch):
     monkeypatch.setattr("isaac_module.models.conductor.current_rss_mb", lambda: 123.5)
     conductor = _empty_resolve_prims_conductor()

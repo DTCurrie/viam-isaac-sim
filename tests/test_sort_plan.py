@@ -1,7 +1,3 @@
-"""sort_plan is pure planning: nearest-first sequencing and pad-slot
-assignment, both proven against hand-computed positions and
-cell_layout's own constants."""
-
 import pytest
 
 from isaac_module import cell_layout, sort_plan

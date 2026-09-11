@@ -1,20 +1,21 @@
-"""Isaac Sim compatibility layer (FINDINGS XC-6).
+"""Isaac Sim compatibility layer.
 
 Everything the module needs from Isaac Sim is imported HERE, as data on a
-namespace object, so the 4.5 (``omni.isaac.*``) vs 5.0 (``isaacsim.*``) module
-renames live in one place. Version- and capability-dependent behaviour is keyed
-on :func:`isaac_version` / :func:`caps`, never on scattered ``try/except
+namespace object, so a future Isaac Sim release only needs one place to
+change. Version- and capability-dependent behavior is keyed on
+:func:`isaac_version` / :func:`caps`, never on scattered ``try/except
 ImportError`` in feature code.
 
 Mock mode never imports Isaac: :func:`isaac_version` returns ``None`` and
-:func:`caps` returns the entry for the newest known release.
+:func:`caps` returns the 5.0 row.
 """
 
 from __future__ import annotations
 
 import importlib.metadata
 import re
-from typing import Any, NamedTuple
+from types import SimpleNamespace
+from typing import Any, NamedTuple, Protocol, cast
 
 from viam.logging import getLogger
 
@@ -25,46 +26,59 @@ _LOGGER = getLogger(__name__)
 _VERSION_RE = re.compile(r"(\d+)\.(\d+)\.(\d+)")
 
 
-def import_isaac() -> Any:
-    """Import everything we need from isaac sim, tolerating the module
-    renames across releases (isaacsim.* in >=4.5, omni.isaac.* before)."""
+class IsaacAPI(Protocol):
+    """The attributes :func:`import_isaac` sets on its return value.
 
-    class NS:
-        pass
+    Every attribute names an Isaac Sim (or ``pxr``) type, none of which is
+    importable outside Isaac Sim, so each is typed ``Any`` rather than
+    pulling in an import that can't be type-checked.
+    """
 
-    ns: Any = NS()
+    World: Any
+    add_reference_to_stage: Any
+    open_stage: Any
+    get_assets_root_path: Any
+    SingleArticulation: Any
+    SingleXFormPrim: Any
+    ArticulationAction: Any
+    client: Any
+    DynamicCuboid: Any
+    FixedCuboid: Any
+    get_prim_at_path: Any
+    Camera: Any
+    WheeledRobot: Any
+    DifferentialController: Any
+    PhysicsMaterial: Any
+    PhysxSchema: Any
+    UsdPhysics: Any
 
-    try:
-        from isaacsim.core.api import World
-    except ImportError:
-        from omni.isaac.core import World
+
+def import_isaac() -> IsaacAPI:
+    """Import everything the module needs from Isaac Sim's ``isaacsim.*``
+    namespace."""
+
+    ns = SimpleNamespace()
+
+    from isaacsim.core.api import World
+
     ns.World = World
 
-    try:
-        from isaacsim.core.utils.stage import add_reference_to_stage, open_stage
-    except ImportError:
-        from omni.isaac.core.utils.stage import add_reference_to_stage, open_stage
+    from isaacsim.core.utils.stage import add_reference_to_stage, open_stage
+
     ns.add_reference_to_stage = add_reference_to_stage
     ns.open_stage = open_stage
 
-    try:
-        from isaacsim.storage.native import get_assets_root_path
-    except ImportError:
-        from omni.isaac.core.utils.nucleus import get_assets_root_path
+    from isaacsim.storage.native import get_assets_root_path
+
     ns.get_assets_root_path = get_assets_root_path
 
-    try:
-        from isaacsim.core.prims import SingleArticulation, SingleXFormPrim
-    except ImportError:
-        from omni.isaac.core.articulations import Articulation as SingleArticulation
-        from omni.isaac.core.prims import XFormPrim as SingleXFormPrim
+    from isaacsim.core.prims import SingleArticulation, SingleXFormPrim
+
     ns.SingleArticulation = SingleArticulation
     ns.SingleXFormPrim = SingleXFormPrim
 
-    try:
-        from isaacsim.core.utils.types import ArticulationAction
-    except ImportError:
-        from omni.isaac.core.utils.types import ArticulationAction
+    from isaacsim.core.utils.types import ArticulationAction
+
     ns.ArticulationAction = ArticulationAction
 
     try:
@@ -74,55 +88,38 @@ def import_isaac() -> Any:
     except ImportError:
         ns.client = None
 
-    try:
-        from isaacsim.core.api.objects import DynamicCuboid, FixedCuboid
-    except ImportError:
-        from omni.isaac.core.objects import DynamicCuboid, FixedCuboid
+    from isaacsim.core.api.objects import DynamicCuboid, FixedCuboid
+
     ns.DynamicCuboid = DynamicCuboid
     ns.FixedCuboid = FixedCuboid
 
     try:
         from isaacsim.core.utils.prims import get_prim_at_path
     except ImportError:
-        try:
-            from omni.isaac.core.utils.prims import get_prim_at_path
-        except ImportError:
-            get_prim_at_path = None
+        get_prim_at_path = None
     ns.get_prim_at_path = get_prim_at_path
 
-    try:
-        from isaacsim.sensors.camera import Camera
-    except ImportError:
-        from omni.isaac.sensor import Camera
+    from isaacsim.sensors.camera import Camera
+
     ns.Camera = Camera
 
-    try:
-        from isaacsim.robot.wheeled_robots.controllers.differential_controller import (
-            DifferentialController,
-        )
-        from isaacsim.robot.wheeled_robots.robots import WheeledRobot
-    except ImportError:
-        from omni.isaac.wheeled_robots.controllers.differential_controller import (
-            DifferentialController,
-        )
-        from omni.isaac.wheeled_robots.robots import WheeledRobot
+    from isaacsim.robot.wheeled_robots.controllers.differential_controller import (
+        DifferentialController,
+    )
+    from isaacsim.robot.wheeled_robots.robots import WheeledRobot
+
     ns.WheeledRobot = WheeledRobot
     ns.DifferentialController = DifferentialController
 
-    # phase 3 (SCN-6 / ARM-2): physics materials and the USD physics schemas.
-    # Exposed on the namespace (None when absent) so physics.py can be driven
-    # with fakes on a machine without Kit.
+    # Physics materials and the USD physics schemas, exposed on the
+    # namespace (None when absent) so physics.py can be driven with fakes on
+    # a machine without Kit.
     try:
         from isaacsim.core.api.materials import PhysicsMaterial
 
         ns.PhysicsMaterial = PhysicsMaterial
     except ImportError:
-        try:
-            from omni.isaac.core.materials import PhysicsMaterial as _PhysicsMaterial
-
-            ns.PhysicsMaterial = _PhysicsMaterial
-        except ImportError:
-            ns.PhysicsMaterial = None
+        ns.PhysicsMaterial = None
     try:
         from pxr import PhysxSchema, UsdPhysics
 
@@ -132,16 +129,15 @@ def import_isaac() -> Any:
         ns.PhysxSchema = None
         ns.UsdPhysics = None
 
-    return ns
+    return cast(IsaacAPI, ns)
 
 
 def _parse_version(value: Any) -> IsaacVersion | None:
     """Tolerantly extract (major, minor, patch) from an unknown-shape value.
 
-    ``get_version()``'s return shape is undocumented (FINDINGS OQ-14): a
-    ``str`` is regexed directly; a sequence is first regexed after joining
-    its stringified elements, then falls back to its first three int-like
-    elements.
+    ``get_version()``'s return shape is undocumented: a ``str`` is regexed
+    directly; a sequence is first regexed after joining its stringified
+    elements, then falls back to its first three int-like elements.
     """
     if isinstance(value, str):
         match = _VERSION_RE.search(value)
@@ -172,19 +168,12 @@ def _probe_isaacsim_core_version() -> Any:
     return get_version()
 
 
-def _probe_omni_isaac_version() -> Any:
-    from omni.isaac.version import get_version
-
-    return get_version()
-
-
 def _probe_importlib_metadata() -> Any:
     return importlib.metadata.version("isaacsim")
 
 
 _PROBES: tuple[Any, ...] = (
     _probe_isaacsim_core_version,
-    _probe_omni_isaac_version,
     _probe_importlib_metadata,
 )
 
@@ -193,13 +182,13 @@ def isaac_version() -> IsaacVersion | None:
     """Best-effort (major, minor, patch) of the installed Isaac Sim.
 
     ``None`` when Isaac is not importable (mock mode, unit tests) or when no
-    known probe answers. The probe API is FINDINGS OQ-14 / RQ-23: try the
-    candidates in order and stop at the first that works; never raise.
+    known probe answers. Try the candidates in order and stop at the first
+    that works; never raise.
     """
     for probe in _PROBES:
         try:
             raw = probe()
-        except Exception:  # any probe failure just tries the next
+        except Exception:  # noqa: BLE001 - any probe failure just tries the next
             continue
         parsed = _parse_version(raw)
         if parsed is not None:
@@ -214,45 +203,27 @@ def isaac_version() -> IsaacVersion | None:
 
 
 class Caps(NamedTuple):
-    """Capability flags the feature code branches on (one row per release).
+    """Capability flags the feature code branches on.
 
-    Gripper fields are added in phase 3; keep the field order append-only.
+    Keep the field order append-only.
     """
 
-    has_depth_sensor: bool  # SingleViewDepthSensor exists (5.0+)
-    pointcloud_is_world_frame: bool  # Camera.get_pointcloud() returns world-frame points
-    camera_reads_cached_frame: bool  # get_depth() reads _current_frame (4.5), not the annotator
-    # Robotiq 2F-85 asset differences per release (FINDINGS R-9, W13, OQ-18;
-    # phase 3). Kept here so models/gripper.py never branches on the version.
+    # Robotiq 2F-85 asset differences per release. Kept here so
+    # models/gripper.py never branches on the version.
     gripper_closed_deg: float  # finger_joint angle at full closure (open is 0)
-    gripper_max_force: float  # authored finger drive maxForce - a tuning knob, not applied yet
-    gripper_dof_count: int  # DOFs the gripper adds to the arm articulation (OQ-5: 4.5 unverified)
+    gripper_dof_count: int  # DOFs the gripper adds to the arm articulation
     # finger_joint angle at the OPEN limit: 0 on both releases (a 7.76 deg rest
     # seen on the GPU before the articulation fixes was an artifact; run 19
     # reaches 0.4 deg at an open target of 0)
     gripper_open_deg: float
-    # CAM-12: Camera(annotator_device=...)/get_*(device=...) GPU-resident data
-    # path exists only on 5.0 (CHANGELOG 0.4.0); 4.5 always lands in host numpy
+    # Camera(annotator_device=...)/get_*(device=...) GPU-resident data path
+    # exists only on 5.0 (CHANGELOG 0.4.0); 4.5 always lands in host numpy
     camera_supports_annotator_device: bool
 
 
 CAPS_BY_RELEASE: dict[tuple[int, int], Caps] = {
-    (4, 5): Caps(
-        has_depth_sensor=False,
-        pointcloud_is_world_frame=True,
-        camera_reads_cached_frame=True,
-        gripper_closed_deg=45.0,
-        gripper_max_force=16.5,
-        gripper_dof_count=10,
-        gripper_open_deg=0.0,
-        camera_supports_annotator_device=False,
-    ),
     (5, 0): Caps(
-        has_depth_sensor=True,
-        pointcloud_is_world_frame=False,
-        camera_reads_cached_frame=False,
         gripper_closed_deg=47.0,
-        gripper_max_force=26.0,
         gripper_dof_count=6,
         gripper_open_deg=0.0,
         camera_supports_annotator_device=True,
@@ -263,22 +234,8 @@ CAPS_BY_RELEASE: dict[tuple[int, int], Caps] = {
 def caps(version: IsaacVersion | None = None) -> Caps:
     """Flags for ``version`` (default: :func:`isaac_version`).
 
-    Unknown/None → the newest known release's row; a version between two known
-    rows → the nearest lower row. The flag table must carry both 4.5 and 5.0.
+    ``CAPS_BY_RELEASE`` carries a single row now that Isaac Sim 4.5 support
+    is dropped, so every version, known or not, resolves to it. ``version``
+    stays a parameter so existing call sites are unchanged.
     """
-    if version is None:
-        version = isaac_version()
-
-    releases = sorted(CAPS_BY_RELEASE)
-
-    if version is None:
-        return CAPS_BY_RELEASE[releases[-1]]
-
-    major, minor = version[0], version[1]
-    release = (major, minor)
-
-    lower_or_equal = [row for row in releases if row <= release]
-    if lower_or_equal:
-        return CAPS_BY_RELEASE[lower_or_equal[-1]]
-
-    return CAPS_BY_RELEASE[releases[0]]
+    return CAPS_BY_RELEASE[(5, 0)]

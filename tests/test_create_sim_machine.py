@@ -1,7 +1,3 @@
-"""`build_plan` is pure and complete, `--dry-run` never touches the SDK or a
-secret, and a real run drives the app client and `gcloud` in order and exits
-3 when the part never comes online."""
-
 import json
 import subprocess
 import sys
@@ -24,7 +20,6 @@ def _args(**overrides: Any) -> SimpleNamespace:
     defaults = dict(
         name="sim-1",
         location_id="loc",
-        org_id=None,
         project=None,
         zone=csm.DEFAULT_ZONE,
         machine_type=csm.DEFAULT_MACHINE_TYPE,
@@ -137,7 +132,7 @@ class _FakeAppClient:
     def __init__(self, parts_sequence: list[list[_FakePart]]) -> None:
         self._parts_sequence = parts_sequence
         self.calls: list[str] = []
-        self.update_calls: list[tuple[str, str, dict[str, Any]]] = []
+        self.update_calls: list[tuple[str, str, str | None]] = []
 
     async def new_robot(self, name: str, location_id: str) -> str:
         self.calls.append("new_robot")
@@ -149,9 +144,16 @@ class _FakeAppClient:
             return self._parts_sequence.pop(0)
         return self._parts_sequence[0]
 
-    async def update_robot_part(self, part_id: str, name: str, config: dict[str, Any]) -> None:
+    async def update_robot_part(
+        self,
+        part_id: str,
+        name: str,
+        robot_config: dict[str, Any] | None = None,
+        last_known_update: Any = None,
+        robot_config_json: str | None = None,
+    ) -> None:
         self.calls.append("update_robot_part")
-        self.update_calls.append((part_id, name, config))
+        self.update_calls.append((part_id, name, robot_config_json))
 
 
 class _FakeViamClient:

@@ -10,6 +10,7 @@ w-first quaternions, so no reordering is needed at the call sites.
 
 import math
 from collections.abc import Sequence
+from typing import Any
 
 _ANGLE_EPSILON = 1e-4
 _POLE_RADIUS = 1e-4
@@ -161,3 +162,76 @@ def to_vec3(value: Sequence[float] | None, default: Vec3 = (0.0, 0.0, 0.0)) -> V
     if len(vals) != 3:
         raise ValueError(f"expected 3 values, got {len(vals)}")
     return (vals[0], vals[1], vals[2])
+
+
+def _as_quat(values: Sequence[float]) -> Quat:
+    """Four numbers -> a (w, x, y, z) quaternion tuple (validates arity)."""
+    w, x, y, z = (float(v) for v in values)
+    return (w, x, y, z)
+
+
+def spawn_orientation(attrs: dict[str, Any], meta: dict[str, Any]) -> Quat:
+    """The (w,x,y,z) quaternion to spawn an arm's articulation with: the
+    configured frame/orientation composed with the known asset's
+    base_frame_correction (frame first), if any."""
+    q_frame: Quat = (
+        _as_quat(attrs["orientation_wxyz"])
+        if attrs.get("orientation_wxyz") is not None
+        else (1.0, 0.0, 0.0, 0.0)
+    )
+    correction = meta.get("base_frame_correction")
+    if correction is not None:
+        return quat_mul(q_frame, _as_quat(correction))
+    return q_frame
+
+
+def pose_in_frame(base_pos: Vec3, base_quat: Quat, pos: Vec3, quat: Quat) -> tuple[Vec3, Quat]:
+    """Express a world pose (pos, quat) in the frame defined by
+    (base_pos, base_quat) - both (w,x,y,z)."""
+    base_quat_conj = quat_conj(base_quat)
+    relative_position = quat_rotate(
+        base_quat_conj,
+        (pos[0] - base_pos[0], pos[1] - base_pos[1], pos[2] - base_pos[2]),
+    )
+    relative_orientation = quat_mul(base_quat_conj, quat)
+    return relative_position, relative_orientation
+
+
+def compose_pose(
+    parent_pos: Vec3, parent_quat: Quat, local_pos: Vec3, local_quat: Quat
+) -> tuple[Vec3, Quat]:
+    """Inverse of pose_in_frame: express a pose (local_pos, local_quat) given
+    in the frame (parent_pos, parent_quat) back in the parent's frame."""
+    world_position = (
+        parent_pos[0] + quat_rotate(parent_quat, local_pos)[0],
+        parent_pos[1] + quat_rotate(parent_quat, local_pos)[1],
+        parent_pos[2] + quat_rotate(parent_quat, local_pos)[2],
+    )
+    world_orientation = quat_mul(parent_quat, local_quat)
+    return world_position, world_orientation
+
+
+def viam_base_frame(root_pos: Vec3, root_quat: Quat, correction: Quat) -> tuple[Vec3, Quat]:
+    """Recover Viam's arm frame from the Isaac articulation root's world
+    pose: spawn composed root = frame * correction,
+    so frame = root * correction^-1."""
+    return root_pos, quat_mul(root_quat, quat_conj(correction))
+
+
+def anchor_fixed_joint_frame(
+    spawn_pos: Vec3, spawn_quat: Quat, authored_pos: Vec3, authored_quat: Quat
+) -> tuple[Vec3, Quat]:
+    """Re-express a world-anchored fixed-base joint frame (authored_pos,
+    authored_quat) so it matches an articulation spawned at (spawn_pos,
+    spawn_quat). The UR assets' base FixedJoint has an empty body0 (= world
+    frame) with localPos0/localRot0 authored in world coordinates, so PhysX
+    resyncs the root xform to that joint frame on world.reset() and undoes
+    any spawn pose passed to SingleArticulation."""
+    return (
+        (
+            spawn_pos[0] + quat_rotate(spawn_quat, authored_pos)[0],
+            spawn_pos[1] + quat_rotate(spawn_quat, authored_pos)[1],
+            spawn_pos[2] + quat_rotate(spawn_quat, authored_pos)[2],
+        ),
+        quat_mul(spawn_quat, authored_quat),
+    )

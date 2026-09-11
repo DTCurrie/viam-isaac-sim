@@ -1,12 +1,12 @@
 # Getting started guide
 
-This guide assumes that you're on linux with the Isaac simulator already installed.
+This guide assumes that you're on Linux with Isaac Sim already installed.
 
 These instructions were tested with:
 - nvidia-open driver 580.178.04
 - dual RTX 5060 Ti
-- isaac sim 5.0.0-rc45 installed at /isaac-sim
-- ubuntu 24.04.4
+- Isaac Sim 5.0.0-rc45 installed at /isaac-sim
+- Ubuntu 24.04.4
 
 ## Viam setup
 
@@ -17,6 +17,17 @@ These instructions were tested with:
 	- inside the new folder, download viam-server with `wget https://storage.googleapis.com/packages.viam.com/apps/viam-server/viam-server-stable-$(uname -m) && mv viam-server-stable-$(uname -m) viam-server && chmod +x viam-server && ./viam-server -version`
 1. Grab your credentials: back in the web UI, go to the status dropdown on the top menu bar. It's likely in the blue 'awaiting setup' state. Open it, hit the 'Machine cloud credentials' button, then paste the credentials into a `viam.json` file in your `~/viam-isaac` folder.
 1. Boot viam: in your terminal, run `ISAAC_SIM_PATH=/isaac-sim ./viam-server -config viam.json`. As it comes up, in the web UI, you should see the status dropdown turn to a green 'Online' state.
+
+## Optional: resolve a real machine's config
+
+If you already have a machine configured for the real hardware you want to simulate, don't hand-write a sim config. `tools/simulate_config.py` writes it for you:
+
+```sh
+.venv/bin/python tools/simulate_config.py examples/configs/real-ur5e-cell.json \
+  --out examples/configs/sim-ur5e-cell.json
+```
+
+`examples/configs/real-ur5e-cell.json` is a committed example. Point the tool at your own config instead. It swaps every hardware model that has a sim stand-in, adds the module entry and the `isaac-world` component, and leaves services and every other field alone. It prints `swapped:`, `passed through:` and `placeholders:` lines on stderr, naming the components in each group. Paste the output into the machine's 'configure' tab instead of installing a fragment. [`docs/SIMULATION.md`](docs/SIMULATION.md) is the contract behind the swap.
 
 ## Sim world only
 
@@ -44,11 +55,11 @@ Save, then drive the arm from the control tab. Its card can move a single joint,
 
 ## Start Isaac in Viam
 
-In the 'configure' tab of the web UI, hit the '+' button or tap 'A', then tap 'B' for blocks, then find the `isaac-sim-pick-and-place` fragment from the `viam-dev` org (it pulls in the private `viam:isaac-sim-devin` registry module — the machine must be in `viam-dev` to see it) and install it. Click 'Save' in the top right.
+In the 'configure' tab of the web UI, hit the '+' button or tap 'A', then tap 'B' for blocks, then find the `isaac-sim-block-sorting` fragment from the `viam-dev` org and install it. The fragment pulls in the private `viam:isaac-sim-devin` registry module, so the machine must be in `viam-dev` to see it. Click 'Save' in the top right.
 
 The fragment card has a 'Variables' section with nineteen entries. Leave every one of them unset for your first run. They group as:
 
-- `table-height-m` (default `0.75`): the table top height, in metres, that every other measurement in the cell is built from.
+- `table-height-m` (default `0.75`): the table top height, in meters, that every other measurement in the cell is built from.
 - Six `block-color-<color>` entries, one per `red`, `green`, `blue`, `yellow`, `purple`, `orange`: the RGB triple each pool block is spawned with.
 - `detect-color` (default `#EA8D8D`) and `hue-tolerance-pct` (default `0.05`): the red detector's target hue and tolerance, kept unsuffixed for backward compatibility.
 - Five `detect-color-<color>` entries (green, blue, yellow, purple, orange): the other five detectors' target hues, each with its own default.
@@ -60,11 +71,11 @@ Switch to the 'logs' tab to watch the installed components start up. On the test
 
 Now switch to the 'control' tab to interact with the cameras and arm. The cell has three cameras: `wrist-cam` (rides the arm's flange), `scene-cam` (a fixed overview), and `side-cam` (a fixed camera at the source table's far end, used to measure the tallest scattered block). Open the `scene-cam` livestream.
 
-You should see three tables in a row. On the right sits the empty source table. In the centre sits the table with the `ur20` arm and its gripper. On the left sits the place table, with six colored pads laid out on it. In the arm's own frame, the source table sits on the arm's negative-x side and the place table on its positive-x side, so you can still orient from a different camera. The eighteen pool blocks aren't on any table yet. They're parked off-cell, on the floor behind the tables, one column per color and one row per pool index, and they stay parked until the first loop scatters them onto the source table. If the tables or arm are missing, something failed during boot. Check the logs tab before continuing.
+You should see three tables in a row. On the right sits the empty source table. In the center sits the table with the `ur20` arm and its gripper. On the left sits the place table, with six colored pads laid out on it. In the arm's own frame, the source table sits on the arm's negative-x side and the place table on its positive-x side, so you can still orient from a different camera. The eighteen pool blocks aren't on any table yet. They're parked off-cell, on the floor behind the tables, one column per color and one row per pool index, and they stay parked until the first loop scatters them onto the source table. If the tables or arm are missing, something failed during boot. Check the logs tab before continuing.
 
 If something goes wrong, the place to debug is the logs tab. To cut down on noise, find the components list on the left-side menu bar and click the `viam_isaac-sim` module (or whatever you named the local module) to filter down the output.
 
-## Put the cell in pick-and-place mode
+## Start the block sorter
 
 Everything from here on happens in the 'control' tab, with no script and no local Python. Find the `block-sorter` generic service in the components list on the left, and open its DoCommand panel.
 
@@ -98,7 +109,7 @@ To stop a run early, send:
 {"command": "stop"}
 ```
 
-which replies `{"ok": true}`. The run doesn't stop instantly: it finishes whatever motion or pass is in flight, then stops at the next safe boundary (between motions, between passes, or between loops) and parks the arm. `status` will read `"state": "idle"` once it has actually stopped.
+which replies `{"ok": true}`. The run doesn't stop instantly: it finishes whatever motion or pass is in flight, then stops at the next safe boundary (between motions, between passes, or between loops) and parks the arm. `status` will read `"state": "idle"` once it has stopped.
 
 ## What a loop looks like
 
@@ -111,7 +122,7 @@ Each loop runs the same sequence, whether it's loop 1 of 1 or loop 40 of a conti
 5. Each block ends the loop as `placed`, `skipped_oversize` (measured over the 75 mm jaw limit), or `failed` (a grasp that failed is retried once before it's given up on).
 6. A loop record is cut, the seed advances for the next loop, and either the next loop starts at step 1 (minus the park, which only happens once per run) or the run reports `"state": "complete"`.
 
-On the test machine, a GPU run of three loops (`{"loops": 3, "seed": 20}`) placed 30 blocks, skipped 4 as oversize, and failed 1, for a `success_rate` of 0.97. A separate seedless continuous soak ran about 31 minutes across three loops before being stopped, so budget on the order of ten minutes per loop as a rough guide, not a guarantee — actual wall time depends on your machine and how crowded the scatter is. During that soak, one loop was lost partway through to a dropped connection between the module and viam-server, and the conductor recorded that loop with an `"error"` field and moved straight on to the next loop's seed rather than failing the whole run. Sending `{"command": "stop"}` mid-loop during that same soak landed the run in `"state": "idle"` cleanly, with whatever blocks hadn't been picked yet left where they were.
+On the test machine, a GPU run of three loops (`{"loops": 3, "seed": 20}`) placed 30 blocks, skipped 4 as oversize, and failed 1, for a `success_rate` of 0.97. A separate seedless continuous soak ran about 31 minutes across three loops before being stopped, so budget on the order of ten minutes per loop as a rough guide, not a guarantee. Actual wall time depends on your machine and how crowded the scatter is. During that soak, one loop was lost partway through to a dropped connection between the module and viam-server. The conductor recorded that loop with an `"error"` field and moved straight on to the next loop's seed rather than failing the whole run. Sending `{"command": "stop"}` mid-loop during that same soak landed the run in `"state": "idle"` cleanly, with whatever blocks hadn't been picked yet left where they were.
 
 ## Reading the results
 
@@ -122,30 +133,12 @@ When you send `{"command": "status"}`, the fields worth looking at first are:
 - `"success_rate"`: `placed / (placed + failed)` across the run, `null` until at least one block has been placed or failed. Oversize skips don't count against it.
 - `"loop_records"`: the most recent loop records, oldest first. Look at the newest one for that loop's `"duration_s"`, `"passes"`, and `"rss_mb"` (the module process's resident memory in MiB, sampled when that loop's record was cut, useful for spotting a memory leak across a long soak).
 
-`"skipped_oversize"` isn't a bug: the default scatter draws each block's size from a `[50, 80]` mm range, but the gripper's jaw tops out at 75 mm, so roughly a sixth of blocks are, by design, too big to grasp safely and get skipped instead of attempted. If you want every block in the scatter to be sortable, override the `block-sorter` service's `size_range_mm` attribute to `[50, 74]` (via a fragment mod in the machine's JSON config) so nothing scattered can exceed the jaw limit.
+`"skipped_oversize"` isn't a bug. The default scatter draws each block's size from a `[50, 80]` mm range, but the gripper's jaw tops out at 75 mm. Roughly a sixth of blocks are, by design, too big to grasp safely and get skipped instead of attempted. If you want every block in the scatter to be sortable, override the `block-sorter` service's `size_range_mm` attribute to `[50, 74]` (via a fragment mod in the machine's JSON config) so nothing scattered can exceed the jaw limit.
 
-The `block-sorter-sensor` component in the control tab mirrors this same status as sensor readings, which is what lets you wire up data capture on it: each loop record is captured at most once, deduplicated so a data-management poll never stores the same loop twice.
+The `block-sorter-sensor` component in the control tab mirrors this same status as sensor readings, which is what lets you wire up data capture on it. Each loop record is captured at most once, deduplicated so a data-management poll never stores the same loop twice.
 
 If a `loop_records` entry carries an `"error"` field, that loop didn't finish sorting. It was lost to a transient failure, for example a dropped connection to viam-server mid-motion, but the run itself kept going with the next loop's seed rather than stopping. Only three such loops in a row will fail the whole run.
 
 ## Optional: the single-pick client
 
-`examples/pick_red_block.py` is a regression tool from before the conductor existed, not the way to operate the cell day to day — it exercises the pick-verify-carry-place pipeline against just the `red` block and `place_pad_red`, without the conductor's scatter, census, or loop management.
-
-Clone this repository on your dev machine, then create the venv it uses:
-
-```
-python3.11 -m venv .venv && .venv/bin/pip install -r requirements-dev.txt
-```
-
-Find your connection details in the web UI's 'connect' tab (select 'Python'), or the 'code sample' tab, which shows a runnable connection snippet with your machine's address and API key filled in.
-
-Then run:
-
-```
-.venv/bin/python examples/pick_red_block.py --address <machine-address> --api-key <key> --api-key-id <key-id> --support-z-mm 750
-```
-
-`--support-z-mm 750` tells the script the block rests 750 mm up, on the table top. Useful flags if you want to poke at it further: `--block` (default `block_red_1`) picks a different pool block by name, `--place-pad` (default `place_pad_red`) targets a different pad, `--no-place` releases at the lift pose instead of placing, and `--randomize-seed <n>` with `--randomize-size-mm <lo,hi>` re-scatter and re-size the named blocks before the pick through the world's `randomize_props` verb, which is a different mechanism from the conductor's pooled `scatter_cell` reset.
-
-On success, the script prints `PLACED_BLOCK_JSON=` with `"placed_on_pad": true`, meaning the arm found the block, picked it up, and set it down on the pad. If the block measures over 75 mm, the script refuses the grasp cleanly and leaves the arm parked instead of attempting a doomed pick, which is correct behavior for an oversize block, not a failure.
+`examples/pick_red_block.py` picks and places one red block with no conductor in the loop. It is a test tool, not the way to operate the cell. The section "The single-pick client" in [`docs/BLOCK_SORTING.md`](docs/BLOCK_SORTING.md) is how to run it.

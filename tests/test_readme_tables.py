@@ -1,17 +1,3 @@
-"""Set-equality check: the README's per-model attribute tables (world / arm /
-gripper / camera) must list exactly the attribute keys the model's own code
-reads - no code key missing from the README, no README key no code reads.
-
-Code keys are found by static regex over ``attrs.get(...)`` / ``attrs[...]``
-/ ``attrs.setdefault(...)`` (and ``self._attrs`` equivalents), scoped to the
-named source files/functions that implement each model's spawn contract:
-SimConfig's own construction (models/world.py), the arm/gripper/camera spawn
-+ mock functions in sim_manager.py, and the shared frame/dependency
-validation in models/utils.py. This is a static approximation, not an
-interpreter, so a few known gaps are carried in ALLOWLIST below rather than
-silenced.
-"""
-
 import ast
 import json
 import re
@@ -21,6 +7,7 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 README = REPO_ROOT / "README.md"
+BLOCK_SORTING = REPO_ROOT / "docs" / "BLOCK_SORTING.md"
 SRC = REPO_ROOT / "src" / "isaac_module"
 
 WORLD_MODEL_FILE = SRC / "models" / "world.py"
@@ -28,8 +15,12 @@ ARM_MODEL_FILE = SRC / "models" / "arm.py"
 GRIPPER_MODEL_FILE = SRC / "models" / "gripper.py"
 CAMERA_MODEL_FILE = SRC / "models" / "camera.py"
 SIM_MANAGER_FILE = SRC / "sim_manager.py"
-UTILS_FILE = SRC / "models" / "utils.py"
-MOCK_CAMERA_FILE = SRC / "mock_camera.py"
+SPATIAL_FILE = SRC / "spatial.py"
+UTILS_FILE = SRC / "models" / "sim_component_validation.py"
+ARM_HANDLE_FILE = SRC / "handles" / "arm.py"
+GRIPPER_HANDLE_FILE = SRC / "handles" / "gripper.py"
+CAMERA_HANDLE_FILE = SRC / "handles" / "camera.py"
+MOCK_CAMERA_FILE = SRC / "handles" / "camera.py"
 CONDUCTOR_MODEL_FILE = SRC / "models" / "conductor.py"
 SORTER_SENSOR_MODEL_FILE = SRC / "models" / "sorter_sensor.py"
 META_JSON = REPO_ROOT / "meta.json"
@@ -92,25 +83,27 @@ WORLD_CODE_KEYS = _keys_from_whole_file(WORLD_MODEL_FILE)
 
 ARM_CODE_KEYS = (
     _keys_from_whole_file(ARM_MODEL_FILE)
-    | _keys_from_defs(
-        SIM_MANAGER_FILE,
-        ["_create_arm_isaac", "spawn_orientation", "_resolve_usd", "MockArmHandle"],
-    )
+    | _keys_from_defs(SIM_MANAGER_FILE, ["_create_arm_isaac", "_resolve_usd"])
+    | _keys_from_defs(SPATIAL_FILE, ["spawn_orientation"])
+    | _keys_from_defs(ARM_HANDLE_FILE, ["MockArmHandle"])
     # arm.py calls validate_sim_component(config) with the default
     # needs_source=True, so every key that function reads (world, asset,
     # usd_path, prim_path, parent_prim) is really read for an arm.
     | _keys_from_defs(UTILS_FILE, ["validate_sim_component"])
 )
 
-GRIPPER_CODE_KEYS = _keys_from_whole_file(GRIPPER_MODEL_FILE) | _keys_from_defs(
-    SIM_MANAGER_FILE, ["create_gripper", "_create_gripper_isaac", "MockGripperHandle"]
+GRIPPER_CODE_KEYS = (
+    _keys_from_whole_file(GRIPPER_MODEL_FILE)
+    | _keys_from_defs(SIM_MANAGER_FILE, ["create_gripper", "_create_gripper_isaac"])
+    | _keys_from_defs(GRIPPER_HANDLE_FILE, ["MockGripperHandle"])
 )
 
 CAMERA_CODE_KEYS = (
     _keys_from_whole_file(CAMERA_MODEL_FILE)
+    | _keys_from_defs(SIM_MANAGER_FILE, ["_create_camera_isaac"])
     | _keys_from_defs(
-        SIM_MANAGER_FILE,
-        ["_camera_prim_path", "_place_camera", "_configure_camera_optics", "_create_camera_isaac"],
+        CAMERA_HANDLE_FILE,
+        ["_camera_prim_path", "_place_camera", "_configure_camera_optics"],
     )
     | _keys_from_whole_file(MOCK_CAMERA_FILE)
     # camera.py calls validate_sim_component(config, needs_source=False), so
@@ -162,7 +155,7 @@ ALLOWLIST: dict[str, set[str]] = {
     },
     "gripper": set(),
     "camera": {
-        # apply_frame_to_attrs() (models/utils.py) derives this from the
+        # apply_frame_to_attrs() (models/component_frame_pose.py) derives this from the
         # standard frame config when parent_prim + frame are both set; it is
         # never a directly user-authored json key (the README documents the
         # frame config itself, not this internal representation).
@@ -177,9 +170,26 @@ SECTION_HEADINGS = {
     "arm": "### arm attributes",
     "gripper": "### gripper attributes",
     "camera": "### camera attributes",
-    "conductor": "### conductor attributes",
-    "sorter-sensor": "### sorter-sensor attributes",
+    "conductor": "## conductor attributes",
+    "sorter-sensor": "## sorter-sensor attributes",
 }
+
+# The demo cell's two models are documented with the cell, not in the README.
+SECTION_DOCS = {
+    "world": README,
+    "arm": README,
+    "gripper": README,
+    "camera": README,
+    "conductor": BLOCK_SORTING,
+    "sorter-sensor": BLOCK_SORTING,
+}
+
+
+def documented_attributes(model: str) -> set[str]:
+    """The attribute names the docs list for one model, read from whichever
+    document owns that model's table."""
+    lines = SECTION_DOCS[model].read_text().splitlines()
+    return _table_keys_for_section(lines, SECTION_HEADINGS[model])
 
 
 def _table_keys_for_section(readme_lines: list[str], heading: str) -> set[str]:
@@ -209,8 +219,8 @@ def readme_lines() -> list[str]:
 @pytest.mark.parametrize(
     "model", ["world", "arm", "gripper", "camera", "conductor", "sorter-sensor"]
 )
-def test_readme_attribute_table_matches_code(readme_lines: list[str], model: str) -> None:
-    documented = _table_keys_for_section(readme_lines, SECTION_HEADINGS[model])
+def test_readme_attribute_table_matches_code(model: str) -> None:
+    documented = documented_attributes(model)
     expected_code_keys = CODE_KEYS[model] - ALLOWLIST[model]
 
     missing_from_readme = expected_code_keys - documented

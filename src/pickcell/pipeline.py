@@ -362,7 +362,7 @@ class PickPipeline:
                     self.tallest_source = "wrist_sweep"
                     return
 
-        lo_mm, hi_mm = self.randomize_size_range_mm
+        _lo_mm, hi_mm = self.randomize_size_range_mm
         print(
             "  WARNING: tallest measurement untrusted from every vantage - falling back to "
             f"the size-range max {hi_mm:.1f} mm as a conservative keep-out ceiling"
@@ -410,7 +410,7 @@ class PickPipeline:
             print(f"step: carry to pre-place (free, keep-out boxed): {_pose_to_dict(pre_place)}")
             try:
                 await self.mover.move_to(pre_place, carry_world_state, False)
-            except Exception as error:
+            except Exception as error:  # noqa: BLE001 - keep-out carry may fail for any reason; fall back to the linear carry
                 print(f"  keep-out carry failed ({error}); falling back to the linear carry")
                 await self._move_or_diagnose(pre_place, held_world_state, linear=True)
         else:
@@ -422,7 +422,7 @@ class PickPipeline:
             print(f"step: carry to pre-place: {_pose_to_dict(pre_place)}")
             try:
                 await self.mover.move_to(pre_place, held_world_state, True)
-            except Exception as error:
+            except Exception as error:  # noqa: BLE001 - linear carry may fail for any reason; replan the carry freely
                 print(f"  linear carry failed ({error}); replanning the carry freely")
                 await self._move_or_diagnose(pre_place, held_world_state)
 
@@ -443,7 +443,7 @@ class PickPipeline:
             print(f"step: move to place ({label}): {_pose_to_dict(pose)}")
             try:
                 await self.mover.move_to(pose, held_world_state, linear)
-            except Exception as error:
+            except Exception as error:  # noqa: BLE001 - any descent attempt may fail; try the next, increasingly permissive descent
                 print(f"  place descent ({label}) failed: {error}")
                 continue
             stage, release_pose = label, pose
@@ -457,7 +457,7 @@ class PickPipeline:
             print("step: retreat after place")
             try:
                 await self.mover.move_to(pre_place, free_world_state, True)
-            except Exception:
+            except Exception:  # noqa: BLE001 - linear retreat may fail for any reason; fall back to a planned retreat
                 await self.mover.move_to(pre_place, free_world_state, False)
         await self._report_placement(pad_x, pad_y, pad_top_z, stage)
         return True

@@ -1,6 +1,3 @@
-"""Unit tests for IsaacArm.move_to_position solving IK over the served
-kinematics and driving the existing joint-move path."""
-
 import asyncio
 import json
 import math

@@ -2,15 +2,18 @@
 
 MoveThroughJointPositions: RDK's motion service executes its planned arm
 trajectories through this RPC, but viam-sdk (through at least 0.80.0) never
-implemented the server-side handler - the generated routing exists and falls
+implemented the server-side handler. The generated routing exists and falls
 through to the UNIMPLEMENTED default, which breaks motion for every python
 modular arm. We add the missing handler to ArmRPCService, mirroring the
-SDK's own handler conventions; it dispatches to the resource's
+SDK's own handler conventions. It dispatches to the resource's
 move_through_joint_positions method (which IsaacArm implements).
 
 Remove once the SDK ships its own handler (it will simply override ours).
 """
 
+from typing import Any
+
+from grpclib.server import Stream
 from viam.components.arm.service import ArmRPCService
 from viam.logging import getLogger
 from viam.proto.component.arm import (
@@ -22,10 +25,16 @@ from viam.utils import struct_to_dict
 LOGGER = getLogger("viam-isaac-sim.patches")
 
 
-async def _move_through_joint_positions(self, stream) -> None:
-    request: MoveThroughJointPositionsRequest = await stream.recv_message()
-    assert request is not None
-    arm = self.get_resource(request.name)
+async def _move_through_joint_positions(
+    self: ArmRPCService,
+    stream: Stream[MoveThroughJointPositionsRequest, MoveThroughJointPositionsResponse],
+) -> None:
+    request = await stream.recv_message()
+    if request is None:
+        raise ValueError("MoveThroughJointPositions: no request on the stream")
+    # the SDK's Arm type lacks this method by definition (that gap is what the
+    # patch fills), so the resource is typed loosely and expected to implement it
+    arm: Any = self.get_resource(request.name)
     timeout = stream.deadline.time_remaining() if stream.deadline else None
     await arm.move_through_joint_positions(
         list(request.positions),
@@ -45,5 +54,5 @@ def apply() -> None:
         if not qualname.startswith(("ArmServiceBase", "UnimplementedArmServiceBase")):
             LOGGER.info("sdk provides MoveThroughJointPositions; not patching")
             return
-    ArmRPCService.MoveThroughJointPositions = _move_through_joint_positions  # type: ignore[method-assign]  # deliberate monkeypatch (see module docstring)
+    ArmRPCService.MoveThroughJointPositions = _move_through_joint_positions  # type: ignore[method-assign, assignment]  # deliberate monkeypatch (see module docstring)
     LOGGER.info("patched ArmRPCService with MoveThroughJointPositions handler")

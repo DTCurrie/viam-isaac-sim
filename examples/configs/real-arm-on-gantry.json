@@ -1,0 +1,30 @@
+{
+  "components": [
+    {
+      "name": "lift-gantry",
+      "api": "rdk:component:gantry",
+      "model": "acme:gantry:vertical",
+      "frame": {
+        "parent": "world",
+        "translation": { "x": 0, "y": 0, "z": 0 }
+      },
+      "attributes": {
+        "length_mm": 900
+      }
+    },
+    {
+      "name": "pick-arm",
+      "api": "rdk:component:arm",
+      "model": "viam:universal-robots:ur5e",
+      "frame": {
+        "parent": "lift-gantry",
+        "translation": { "x": 0, "y": 0, "z": 500 }
+      },
+      "attributes": {
+        "host": "10.1.10.90",
+        "speed_degs_per_sec": 45,
+        "acceleration_degs_per_sec2": 45
+      }
+    }
+  ]
+}

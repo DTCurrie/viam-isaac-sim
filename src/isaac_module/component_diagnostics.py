@@ -11,19 +11,19 @@ matching DoCommand verb.
 from __future__ import annotations
 
 import math
-from typing import Any
+from typing import Any, Protocol
 
+from .length_units import MM_PER_M, to_millimeters
 from .models.gripper import DEFAULT_TCP_OFFSET_M
-from .sim_manager import ArmHandle, GripperHandle, _prim_name
-from .spatial import quat_rotate, quat_to_ov
+from .sim_manager import ArmHandle, GripperHandle
+from .spatial import Quat, Vec3, quat_rotate, quat_to_ov
 
 
-def default_ee_prim_path(attrs: dict[str, Any], name: str) -> str:
-    """The EE prim an arm's prim_pose falls back to when no explicit
-    prim_path is given, matching the normalisation SimManager uses to
-    spawn/mock the arm's prim."""
-    prim_path = attrs.get("prim_path") or f"/World/{_prim_name(name)}"
-    return f"{prim_path}/wrist_3_link"
+class _PrimPoseHandle(Protocol):
+    """Anything the prim_pose verb can read a world pose from: today an
+    ArmHandle or a BaseHandle."""
+
+    def get_prim_world_pose(self, prim_path: str) -> tuple[Vec3, Quat]: ...
 
 
 def joint_state(attrs: dict[str, Any], handle: ArmHandle) -> dict[str, Any]:
@@ -50,12 +50,12 @@ def dof_names(
     return {"dof_names": list(handle.dof_names())}
 
 
-def prim_pose(attrs: dict[str, Any], handle: ArmHandle, prim_path: str) -> dict[str, Any]:
+def prim_pose(attrs: dict[str, Any], handle: _PrimPoseHandle, prim_path: str) -> dict[str, Any]:
     (x, y, z), quat = handle.get_prim_world_pose(prim_path)
     ox, oy, oz, theta = quat_to_ov(quat)
     return {
         "prim_path": prim_path,
-        "position_mm": [x * 1000.0, y * 1000.0, z * 1000.0],
+        "position_mm": [to_millimeters(x), to_millimeters(y), to_millimeters(z)],
         "quaternion_wxyz": list(quat),
         "orientation_vector": {
             "o_x": ox,
@@ -84,7 +84,7 @@ def tcp_pose(attrs: dict[str, Any], handle: GripperHandle) -> dict[str, Any]:
     out: dict[str, Any] = {"jaw_deg": math.degrees(handle.get_jaw())}
     out |= {
         key: {
-            "position_mm": [v * 1000.0 for v in pos],
+            "position_mm": [to_millimeters(v) for v in pos],
             "quaternion_wxyz": list(quat),
         }
         for key, (pos, quat) in poses.items()
@@ -103,14 +103,14 @@ def tcp_pose(attrs: dict[str, Any], handle: GripperHandle) -> dict[str, Any]:
     if left is not None and right is not None:
         origin_mid = tuple((a + b) / 2.0 for a, b in zip(left[0], right[0], strict=True))
         # informational: this asset authors link frames at the base
-        out["inner_finger_origin_offset_mm"] = along_tool(origin_mid) * 1000.0
+        out["inner_finger_origin_offset_mm"] = to_millimeters(along_tool(origin_mid))
 
     bounds = handle.fingertip_world_bounds()
     out["fingertips"] = {
         side: {
-            "min_mm": [v * 1000.0 for v in low],
-            "max_mm": [v * 1000.0 for v in high],
-            "center_mm": [(a + b) * 500.0 for a, b in zip(low, high, strict=True)],
+            "min_mm": [to_millimeters(v) for v in low],
+            "max_mm": [to_millimeters(v) for v in high],
+            "center_mm": [(a + b) / 2.0 * MM_PER_M for a, b in zip(low, high, strict=True)],
         }
         for side, (low, high) in bounds.items()
     }
@@ -133,12 +133,12 @@ def tcp_pose(attrs: dict[str, Any], handle: GripperHandle) -> dict[str, Any]:
         )
     ]
     measured = along_tool(pad_mid)
-    out["pad_center_midpoint_mm"] = [v * 1000.0 for v in pad_mid]
-    out["fingertip_reach_mm"] = max(along_tool(c) for c in corners) * 1000.0
-    out["jaw_gap_mm"] = (
-        math.dist(centers[0], centers[1]) * 1000.0
-    )  # pad-centre to pad-centre, across the jaw
-    out["measured_tcp_offset_mm"] = measured * 1000.0
-    out["configured_tcp_offset_mm"] = tcp_offset_m * 1000.0
-    out["delta_mm"] = (measured - tcp_offset_m) * 1000.0
+    out["pad_center_midpoint_mm"] = [to_millimeters(v) for v in pad_mid]
+    out["fingertip_reach_mm"] = to_millimeters(max(along_tool(c) for c in corners))
+    out["jaw_gap_mm"] = to_millimeters(
+        math.dist(centers[0], centers[1])
+    )  # pad-center to pad-center, across the jaw
+    out["measured_tcp_offset_mm"] = to_millimeters(measured)
+    out["configured_tcp_offset_mm"] = to_millimeters(tcp_offset_m)
+    out["delta_mm"] = to_millimeters(measured - tcp_offset_m)
     return out

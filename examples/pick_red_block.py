@@ -97,7 +97,7 @@ from viam.services.vision import VisionClient
 # repo's src/ on sys.path before pickcell is importable; pytest already adds
 # it (pyproject pythonpath = ["src"]), so this is a no-op there.
 try:
-    import pickcell  # noqa: F401
+    import pickcell
 except ImportError:
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
@@ -190,7 +190,7 @@ _FORWARDED_ATTRS: dict[str, Any] = {
 }
 
 
-class _ForwardingModule(type(sys.modules[__name__])):
+class _ForwardingModule(type(sys.modules[__name__])):  # type: ignore[misc] # base is the runtime type of this module object, which mypy cannot resolve statically
     def __setattr__(self, name: str, value: Any) -> None:
         object.__setattr__(self, name, value)
         target = _FORWARDED_ATTRS.get(name)
@@ -321,7 +321,7 @@ async def _grab_diagnostics(
             "is_holding_something": status.is_holding_something,
             "meta": status.meta,
         }
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001 - diagnostics never mask the grab failure
         report["holding_error"] = repr(exc)
     try:
         prim_path = f"/World/{block_name.replace('-', '_')}"
@@ -330,7 +330,7 @@ async def _grab_diagnostics(
                 {"command": "prim_pose", "name": arm.name, "prim_path": prim_path}
             )
         )
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001 - diagnostics never mask the grab failure
         report["block_prim_pose_error"] = repr(exc)
     return report
 
@@ -547,7 +547,7 @@ class MockDetector:
                     "height_mm": None,
                     "size_mm": measured[0],
                 }
-                if measured is not None
+                if measured is not None and footprint_mm is not None
                 else None
             )
         return pose
@@ -702,7 +702,9 @@ def _parse_randomize_size_mm(value: str) -> tuple[float, float]:
     try:
         lo, hi = (float(part) for part in parts)
     except ValueError:
-        raise argparse.ArgumentTypeError(f"--randomize-size-mm wants two numbers, got {value!r}")
+        raise argparse.ArgumentTypeError(
+            f"--randomize-size-mm wants two numbers, got {value!r}"
+        ) from None
     if not (lo > 0 and hi > 0 and lo <= hi):
         raise argparse.ArgumentTypeError(f"--randomize-size-mm wants 0 < lo <= hi, got {value!r}")
     return (lo, hi)
@@ -717,7 +719,9 @@ def _parse_randomize_region_mm(value: str) -> tuple[float, float, float, float]:
     try:
         x0, y0, x1, y1 = (float(part) for part in parts)
     except ValueError:
-        raise argparse.ArgumentTypeError(f"--randomize-region wants four numbers, got {value!r}")
+        raise argparse.ArgumentTypeError(
+            f"--randomize-region wants four numbers, got {value!r}"
+        ) from None
     if not (x0 < x1 and y0 < y1):
         raise argparse.ArgumentTypeError(
             f"--randomize-region wants x0 < x1 and y0 < y1, got {value!r}"

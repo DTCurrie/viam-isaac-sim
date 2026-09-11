@@ -1,5 +1,3 @@
-"""Tests for the mock camera scene (FINDINGS CAM-14, slice 2b)."""
-
 from __future__ import annotations
 
 import time
@@ -8,7 +6,7 @@ import numpy as np
 import pytest
 
 from isaac_module.encoding import depth_to_xyz, intrinsics_from_fov
-from isaac_module.mock_camera import (
+from isaac_module.handles.camera import (
     FLOOR_FAR_M,
     FLOOR_NEAR_M,
     MOCK_RED_BLOCK_CENTER_M,
@@ -67,8 +65,8 @@ def test_red_cluster_centroid_matches_analytic_center() -> None:
     red_points = xyz[red_selector]
 
     expected = np.array(handle.red_block_center_m, dtype=np.float32)
-    # A centred block would have produced (0, 0, 0.40); the block is
-    # deliberately off-centre so this comparison is non-degenerate.
+    # A centered block would have produced (0, 0, 0.40); the block is
+    # deliberately off-center so this comparison is non-degenerate.
     assert not np.allclose(expected[:2], [0.0, 0.0])
     # float32 mean-of-8000-identical-values accumulation error dominates over
     # the 1e-5 m analytic tolerance; use float64 accumulation to honor it.
@@ -80,13 +78,13 @@ def test_red_cluster_centroid_matches_analytic_center() -> None:
     )
 
 
-def test_default_center_is_off_centre_both_ways() -> None:
+def test_default_center_is_off_center_both_ways() -> None:
     assert MOCK_RED_BLOCK_CENTER_M[0] > 0.05
     assert MOCK_RED_BLOCK_CENTER_M[1] > 0
     assert MOCK_RED_BLOCK_CENTER_M[2] == RED_BLOCK_DEPTH_M
 
 
-def test_lower_resolution_handle_has_different_x_centre() -> None:
+def test_lower_resolution_handle_has_different_x_center() -> None:
     # The block is defined by fixed pixel offsets from the principal point,
     # not scaled with resolution, while fx scales with width. So the same
     # pixel offset maps to a different metric x at a different resolution.
@@ -135,7 +133,7 @@ def test_block_size_mm_back_projects_to_configured_size(size_mm: float) -> None:
     assert abs(height_m * 1000 - size_mm) <= one_px_v_mm
 
 
-def test_block_size_mm_center_matches_sized_bounds_and_is_off_centre() -> None:
+def test_block_size_mm_center_matches_sized_bounds_and_is_off_center() -> None:
     handle = make_handle(depth=True, block_size_mm=45)
     rgb = handle.get_rgb()
     depth = handle.get_depth()

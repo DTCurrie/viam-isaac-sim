@@ -6,7 +6,7 @@ from viam.utils import dict_to_struct
 
 from isaac_module.models.arm import IsaacArm
 from isaac_module.models.camera import IsaacCamera
-from isaac_module.models.utils import apply_frame_to_attrs, frame_pose
+from isaac_module.models.component_frame_pose import apply_frame_to_attrs, frame_pose
 from isaac_module.spatial import quat_rotate
 
 
@@ -81,7 +81,7 @@ def test_validate_frame_parent_unset_ok():
 
 def test_validate_frame_parent_other_rejected():
     cfg = _config("a", {"world": "isaac-world", "asset": "ur20"}, parent="table")
-    with pytest.raises(ValueError, match="frame.parent"):
+    with pytest.raises(ValueError, match=r"frame\.parent"):
         IsaacArm.validate_config(cfg)
 
 
@@ -141,10 +141,23 @@ def test_validate_parent_prim_with_link_frame_parent_ok():
     cfg = _config(
         "a",
         {"world": "isaac-world", "parent_prim": "/World/pick_arm/wrist_3_link"},
-        parent="pick-arm:ee_link",
+        parent="pick-arm:wrist_3_link",
     )
     deps, _ = IsaacCamera.validate_config(cfg)
     assert list(deps) == ["isaac-world", "pick-arm"]
+
+
+def test_validate_parent_prim_link_mismatch_rejected():
+    # frame.parent names wrist_1_link while parent_prim ends in wrist_3_link: Viam and
+    # the sim would disagree about which joint the mount rides.
+    cfg = _config(
+        "a",
+        {"world": "isaac-world", "parent_prim": "/World/pick_arm/wrist_3_link"},
+        parent="pick-arm:wrist_1_link",
+    )
+    with pytest.raises(ValueError, match="wrist_1_link") as exc:
+        IsaacCamera.validate_config(cfg)
+    assert "wrist_3_link" in str(exc.value)
 
 
 def test_validate_parent_prim_wrong_owner_rejected():
@@ -170,7 +183,7 @@ def test_validate_parent_prim_with_world_parent_rejected():
 
 def test_validate_parent_prim_without_frame_rejected():
     cfg = _config("a", {"world": "isaac-world", "parent_prim": "/World/pick_arm"})
-    with pytest.raises(ValueError, match="frame.parent"):
+    with pytest.raises(ValueError, match=r"frame\.parent"):
         IsaacCamera.validate_config(cfg)
 
 

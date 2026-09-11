@@ -1,5 +1,3 @@
-"""XC-5: a post-reset hook registry fires at every world-reset chokepoint."""
-
 import inspect
 import threading
 
@@ -95,7 +93,7 @@ def test_boot_stores_lighting_and_fires_pre_registered_hook():
 
 
 # ----------------------------------------------------------------------
-# XC-4: unregister_post_reset(owner) / release_handle(name) scoping
+# unregister_post_reset(owner) / release_handle(name) scoping
 # ----------------------------------------------------------------------
 
 

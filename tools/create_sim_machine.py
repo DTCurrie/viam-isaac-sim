@@ -2,7 +2,7 @@
 """Create a sim machine for a real machine's config, end to end.
 
 Usage: `create_sim_machine.py <real-config.json> --name NAME --location-id ID
-[--org-id ID] [--project P] [--zone Z] [--machine-type T] [--image-family F]
+[--project P] [--zone Z] [--machine-type T] [--image-family F]
 [--allow-unmatched] [--dry-run]`
 
 Steps, in order: resolve the real config into the sim machine's config with
@@ -12,8 +12,9 @@ cloud credentials file; launch a GCP GPU instance from the image family with
 a startup script that installs that file at `/etc/viam.json` and restarts
 viam-agent; wait until the part reports online; push the resolved config to
 the part. `--dry-run` performs the resolve and prints every remote call it
-would make, verbatim, without making any. Exit 0 on success, 2 for unmatched
-hardware, 3 when the part never comes online, 1 for any other error.
+would make, verbatim, without making any. Exit `EXIT_UNMATCHED_HARDWARE` for
+unmatched hardware, `EXIT_NEVER_ONLINE` when the part never comes online,
+`EXIT_ERROR` for any other error, 0 on success.
 
 Authentication: `VIAM_API_KEY` and `VIAM_API_KEY_ID` in the environment for the
 app API, and the active `gcloud` login for the instance.
@@ -46,6 +47,9 @@ DEFAULT_IMAGE_FAMILY = "viam-isaac-sim"
 APP_ADDRESS = "https://app.viam.com:443"
 ONLINE_TIMEOUT_S = 900.0
 ONLINE_POLL_S = 10.0
+EXIT_ERROR = 1
+EXIT_UNMATCHED_HARDWARE = 2
+EXIT_NEVER_ONLINE = 3
 
 
 @dataclass(frozen=True)
@@ -96,7 +100,7 @@ def build_plan(args: Any, resolved_config: dict[str, Any], part_id: str, secret:
     )
     project = getattr(args, "project", None)
     if project:
-        gcloud_args = gcloud_args + ("--image-project", project, "--project", project)
+        gcloud_args = (*gcloud_args, "--image-project", project, "--project", project)
     return Plan(
         machine_name=args.name,
         resolved_config=resolved_config,
@@ -111,18 +115,38 @@ def _build_parser() -> Any:
     )
     parser.add_argument("config", help="path to the real machine's config JSON")
     parser.add_argument("--name", required=True, help="name of the sim machine to create")
-    parser.add_argument("--location-id", required=True)
-    parser.add_argument("--org-id", default=None)
+    parser.add_argument(
+        "--location-id", required=True, help="ID of the location to create the sim machine in"
+    )
     parser.add_argument(
         "--project",
         default=None,
         help=f"GCP project for the instance (default: {DEFAULT_PROJECT_HINT})",
     )
-    parser.add_argument("--zone", default=DEFAULT_ZONE)
-    parser.add_argument("--machine-type", default=DEFAULT_MACHINE_TYPE)
-    parser.add_argument("--image-family", default=DEFAULT_IMAGE_FAMILY)
-    parser.add_argument("--allow-unmatched", action="store_true")
-    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument(
+        "--zone", default=DEFAULT_ZONE, help=f"GCP zone for the instance (default: {DEFAULT_ZONE})"
+    )
+    parser.add_argument(
+        "--machine-type",
+        default=DEFAULT_MACHINE_TYPE,
+        help=f"GCP machine type for the instance (default: {DEFAULT_MACHINE_TYPE})",
+    )
+    parser.add_argument(
+        "--image-family",
+        default=DEFAULT_IMAGE_FAMILY,
+        help=f"GCP image family to launch the instance from (default: {DEFAULT_IMAGE_FAMILY})",
+    )
+    parser.add_argument(
+        "--allow-unmatched",
+        action="store_true",
+        help="keep the real entry for a hardware component with no simulates.json row"
+        " instead of failing",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="print every remote call this run would make, without making any",
+    )
     return parser
 
 
@@ -138,10 +162,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         resolution = resolve(config, table, world_fragment, allow_unmatched=args.allow_unmatched)
     except UnmatchedHardwareError as exc:
         print(str(exc), file=sys.stderr)
-        return 2
+        return EXIT_UNMATCHED_HARDWARE
     except Exception as exc:  # noqa: BLE001 - CLI boundary, reported as a one-line error
         print(str(exc), file=sys.stderr)
-        return 1
+        return EXIT_ERROR
 
     if args.dry_run:
         _print_dry_run(args, resolution)
@@ -151,7 +175,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _create_and_launch(args, resolution)
     except Exception as exc:  # noqa: BLE001 - CLI boundary, reported as a one-line error
         print(str(exc), file=sys.stderr)
-        return 1
+        return EXIT_ERROR
 
 
 def _print_dry_run(args: Any, resolution: Any) -> None:
@@ -184,7 +208,7 @@ async def _create_and_launch_async(args: Any, resolution: Any) -> int:
         main_part = await _main_part(app, robot_id)
         plan = build_plan(args, resolution.config, main_part.id, main_part.secret)
         _write_startup_script(plan)
-        subprocess.run(plan.gcloud_args, check=True)
+        await asyncio.to_thread(subprocess.run, plan.gcloud_args, check=True)
 
         deadline = time.monotonic() + ONLINE_TIMEOUT_S
         while True:
@@ -193,10 +217,14 @@ async def _create_and_launch_async(args: Any, resolution: Any) -> int:
                 break
             if time.monotonic() >= deadline:
                 print(f"part {main_part.id} never came online", file=sys.stderr)
-                return 3
+                return EXIT_NEVER_ONLINE
             await asyncio.sleep(ONLINE_POLL_S)
 
-        await app.update_robot_part(main_part.id, main_part.name, resolution.config)
+        await app.update_robot_part(
+            main_part.id,
+            main_part.name,
+            robot_config_json=json.dumps(resolution.config, indent=2),
+        )
         print(f"{APP_ADDRESS}/machine/{robot_id}")
         print("livestream: open the machine's isaac-world component in the app's CONTROL tab")
         return 0

@@ -32,7 +32,7 @@ Tri = tuple[Vec, Vec, Vec]
 
 def _box_tris(lo: Vec, hi: Vec) -> list[Tri]:
     (x0, y0, z0), (x1, y1, z1) = lo, hi
-    c = [
+    corners = [
         (x0, y0, z0),
         (x1, y0, z0),
         (x1, y1, z0),
@@ -53,8 +53,8 @@ def _box_tris(lo: Vec, hi: Vec) -> list[Tri]:
     ]
     tris: list[Tri] = []
     for a, b, d, e in quads:
-        tris.append((c[a], c[b], c[d]))
-        tris.append((c[a], c[d], c[e]))
+        tris.append((corners[a], corners[b], corners[d]))
+        tris.append((corners[a], corners[d], corners[e]))
     return tris
 
 

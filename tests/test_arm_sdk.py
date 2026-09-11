@@ -1,9 +1,11 @@
 import asyncio
 import importlib.metadata
+import inspect
 import re
 from pathlib import Path
 from unittest.mock import AsyncMock
 
+from viam.components.arm.service import ArmRPCService
 from viam.proto.component.arm import (
     MoveOptions,
     MoveThroughJointPositionsRequest,
@@ -86,6 +88,18 @@ def test_move_through_joint_positions_forwards_none_options_when_unset():
     arm.move_through_joint_positions.assert_awaited_once()
     _, kwargs = arm.move_through_joint_positions.call_args
     assert kwargs["options"] is None
+
+
+def test_sdk_still_lacks_move_through_joint_positions_handler():
+    """Guards the sdk_patches monkeypatch. Fails the day viam-sdk ships its own
+    MoveThroughJointPositions handler, which is the signal to delete the patch."""
+    # read the SDK's source rather than the live attribute, which the module's
+    # own monkeypatch replaces as soon as main.py is imported in the same process
+    sdk_source = inspect.getsource(ArmRPCService)
+    assert "def MoveThroughJointPositions" not in sdk_source, (
+        "viam-sdk now provides its own MoveThroughJointPositions handler; "
+        "remove the sdk_patches monkeypatch"
+    )
 
 
 def test_viam_sdk_version_satisfies_floor():

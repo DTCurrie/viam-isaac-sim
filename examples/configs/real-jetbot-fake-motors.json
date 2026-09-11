@@ -1,0 +1,34 @@
+{
+  "components": [
+    {
+      "name": "rover-base",
+      "api": "rdk:component:base",
+      "model": "rdk:builtin:wheeled",
+      "frame": {
+        "parent": "world"
+      },
+      "attributes": {
+        "left": ["left-motor"],
+        "right": ["right-motor"],
+        "width_mm": 300,
+        "wheel_circumference_mm": 217
+      }
+    },
+    {
+      "name": "left-motor",
+      "api": "rdk:component:motor",
+      "model": "rdk:builtin:fake",
+      "attributes": {
+        "max_rpm": 200
+      }
+    },
+    {
+      "name": "right-motor",
+      "api": "rdk:component:motor",
+      "model": "rdk:builtin:fake",
+      "attributes": {
+        "max_rpm": 200
+      }
+    }
+  ]
+}

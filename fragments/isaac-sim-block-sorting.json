@@ -4,7 +4,7 @@
       "type": "registry",
       "name": "viam_isaac-sim-devin",
       "module_id": "viam:isaac-sim-devin",
-      "version": "latest-with-prerelease"
+      "version": "0.4.1"
     },
     {
       "type": "registry",

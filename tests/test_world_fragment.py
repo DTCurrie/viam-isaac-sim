@@ -1,6 +1,3 @@
-"""The public world fragment is the one thing a fresh machine must add: exactly
-one module entry and the `isaac-world` component, nothing cell-specific."""
-
 import json
 import re
 from pathlib import Path
@@ -12,12 +9,24 @@ from isaac_module import DEFAULT_WORLD_NAME, FAMILY, NAMESPACE
 from isaac_module.models.world import IsaacWorld
 
 FRAGMENT_PATH = Path(__file__).resolve().parent.parent / "fragments" / "isaac-sim-world.json"
+BLOCK_SORTING_FRAGMENT_PATH = (
+    Path(__file__).resolve().parent.parent / "fragments" / "isaac-sim-block-sorting.json"
+)
 VERSION_PATTERN = re.compile(r"^\d+\.\d+\.\d+$")
 API_PATTERN = re.compile(r"^rdk:component:[a-z_]+$")
 
 
 def _fragment() -> dict:
     return json.loads(FRAGMENT_PATH.read_text())
+
+
+def _block_sorting_fragment() -> dict:
+    return json.loads(BLOCK_SORTING_FRAGMENT_PATH.read_text())
+
+
+def _module_version(fragment: dict) -> str:
+    (module,) = [m for m in fragment["modules"] if m["module_id"] == f"{NAMESPACE}:{FAMILY}"]
+    return module["version"]
 
 
 def _resolve_variables(node):
@@ -100,6 +109,19 @@ def test_component_validates_in_mock() -> None:
     component = fragment["components"][0]
     config = _component_config(component)
     IsaacWorld.validate_config(config)
+
+
+def test_both_fragments_pin_the_same_released_module_version() -> None:
+    """config_resolver._with_module_entry copies the world fragment's module
+    entry into every resolved config, so the world and block-sorting
+    fragments must pin the same released version, not a channel name like
+    "latest-with-prerelease" - the pin moves when the module is republished
+    after this phase."""
+    world_version = _module_version(_fragment())
+    sorting_version = _module_version(_block_sorting_fragment())
+    assert VERSION_PATTERN.match(world_version), world_version
+    assert VERSION_PATTERN.match(sorting_version), sorting_version
+    assert world_version == sorting_version
 
 
 def test_livestream_public_ip_is_a_fragment_variable_defaulting_to_auto_detect() -> None:

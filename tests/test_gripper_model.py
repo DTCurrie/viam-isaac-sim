@@ -1,15 +1,16 @@
-"""Unit tests for IsaacGripper's Viam-facing contract in mock mode."""
-
 import asyncio
 import json
+import math
+import time
 
 import pytest
 from grpclib import Status
 from viam.components.gripper import Gripper
+from viam.errors import MethodNotImplementedError
 from viam.proto.app.robot import ComponentConfig
 from viam.utils import dict_to_struct
 
-from isaac_module.models.gripper import IsaacGripper
+from isaac_module.models.gripper import GripperMoveTimeoutError, IsaacGripper
 from isaac_module.sim_manager import SimManager
 
 _ABSTRACT_METHODS = {
@@ -57,7 +58,7 @@ def test_validate_config_frame_parent_must_be_arm():
         attributes=dict_to_struct({"world": "isaac-world", "arm": "my-arm"}),
     )
     config.frame.parent = "not-my-arm"
-    with pytest.raises(ValueError, match="frame.parent"):
+    with pytest.raises(ValueError, match=r"frame\.parent"):
         IsaacGripper.validate_config(config)
 
 
@@ -103,6 +104,107 @@ def test_grab_with_no_object_returns_false(world):
     asyncio.run(scenario())
 
 
+def test_grab_short_timeout_raises_within_the_deadline(world):
+    """The close here naturally takes well over the timeout below to settle
+    (grab_timeout_sec defaults to 5s); an explicit timeout= shorter than that
+    must cut the wait off and raise, not block for the default budget."""
+    _make_arm(world, "grab-arm-timeout")
+    gripper = _make_gripper(
+        world, "grab-arm-timeout", "grab-gripper-timeout", {"mock_object_width_m": 0.05}
+    )
+
+    async def scenario():
+        start = time.monotonic()
+        with pytest.raises(GripperMoveTimeoutError) as excinfo:
+            await gripper.grab(timeout=0.05)
+        elapsed = time.monotonic() - start
+        assert excinfo.value.grpc_code == Status.DEADLINE_EXCEEDED
+        assert elapsed < 0.5
+
+    asyncio.run(scenario())
+
+
+def test_grab_cancelled_holds_jaw_position(world):
+    """A dropped RPC (task cancellation) must stop the jaw where it is,
+    not leave it closing unwatched."""
+    _make_arm(world, "grab-arm-cancel")
+    gripper = _make_gripper(
+        world, "grab-arm-cancel", "grab-gripper-cancel", {"mock_object_width_m": 0.05}
+    )
+
+    async def scenario():
+        grab_task = asyncio.ensure_future(gripper.grab())
+        await asyncio.sleep(0.05)
+        grab_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await grab_task
+        assert await gripper.is_moving() is False
+
+    asyncio.run(scenario())
+
+
+class _FakeGripperHandle:
+    """Enough of GripperHandle to drive grab()'s poll loops. Tracks whether
+    each iteration went through poll_state (one to_thread hop) or one of the
+    old per-field reads (is_moving/is_holding/get_jaw), which should never
+    be called from grab() any more."""
+
+    def __init__(self, states: list[tuple[float, bool, bool]], closed_rad: float) -> None:
+        self._states = iter(states)
+        self._closed_rad = closed_rad
+        self.poll_state_calls = 0
+        self.unbatched_read_calls = 0
+
+    def close(self) -> None:
+        pass
+
+    def stop(self) -> None:
+        pass
+
+    def jaw_limits(self) -> tuple[float, float]:
+        return (0.0, self._closed_rad)
+
+    def poll_state(self) -> tuple[float, bool, bool]:
+        self.poll_state_calls += 1
+        return next(self._states)
+
+    def is_moving(self) -> bool:
+        self.unbatched_read_calls += 1
+        return False
+
+    def is_holding(self) -> bool:
+        self.unbatched_read_calls += 1
+        return False
+
+    def get_jaw(self) -> float:
+        self.unbatched_read_calls += 1
+        return 0.0
+
+
+def test_grab_batches_reads_into_one_to_thread_call_per_poll():
+    closed_rad = math.radians(47.0)
+    states = [
+        (math.radians(5.0), True, False),  # loop 1: still moving
+        (math.radians(15.0), True, False),  # loop 1: still moving
+        (math.radians(20.0), False, False),  # loop 1: settled -> break
+        (math.radians(20.0), False, False),  # loop 2: not holding, not closed
+        (math.radians(20.0), False, False),  # loop 2: not holding, not closed
+        (math.radians(20.0), False, True),  # loop 2: holding -> return True
+    ]
+    handle = _FakeGripperHandle(states, closed_rad)
+    gripper = IsaacGripper("gripper-batched-poll")
+    gripper._handle = handle
+    gripper._grab_timeout = 5.0
+
+    async def scenario() -> None:
+        assert await gripper.grab() is True
+
+    asyncio.run(scenario())
+
+    assert handle.poll_state_calls == len(states)
+    assert handle.unbatched_read_calls == 0
+
+
 def test_go_to_inputs_and_get_current_inputs_round_trip(world):
     _make_arm(world, "inputs-arm")
     gripper = _make_gripper(world, "inputs-arm", "inputs-gripper")
@@ -139,6 +241,18 @@ def test_go_to_inputs_wrong_length_raises(world):
     asyncio.run(scenario())
 
 
+def test_do_command_raises_method_not_implemented(world):
+    _make_arm(world, "inputs-arm-do-command")
+    gripper = _make_gripper(world, "inputs-arm-do-command", "inputs-gripper-do-command")
+
+    async def scenario():
+        with pytest.raises(MethodNotImplementedError) as excinfo:
+            await gripper.do_command({"command": "not-a-real-command"})
+        assert excinfo.value.grpc_code == Status.UNIMPLEMENTED
+
+    asyncio.run(scenario())
+
+
 def test_get_kinematics_is_one_link_zero_joints(world):
     _make_arm(world, "kinematics-arm")
     gripper = _make_gripper(world, "kinematics-arm", "kinematics-gripper")
@@ -155,7 +269,7 @@ def test_get_kinematics_is_one_link_zero_joints(world):
         assert link["parent"] == "world"
         geometry = link["geometry"]
         assert (geometry["x"], geometry["y"], geometry["z"]) == (36, 146, 153)
-        # flange -> fingertips: centre 57.5 mm behind the TCP, so the box never
+        # flange -> fingertips: center 57.5 mm behind the TCP, so the box never
         # extends below the pads (a floor-level grasp would read as a collision)
         assert geometry["translation"]["z"] == pytest.approx(-57.5)
 

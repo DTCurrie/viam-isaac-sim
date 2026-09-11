@@ -56,5 +56,5 @@ def test_kinematics_known_asset_download(sim):
     assert parsed["name"].lower() == "ur20"
     assert parsed["kinematic_param_type"] == "SVA"
     # cached: second call returns identical bytes
-    fmt2, data2 = asyncio.run(arm.get_kinematics())
+    _fmt2, data2 = asyncio.run(arm.get_kinematics())
     assert data2 == data

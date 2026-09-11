@@ -46,7 +46,8 @@
       },
       "attributes": {
         "world": "isaac-world",
-        "asset": "ur5e"
+        "asset": "ur5e",
+        "max_vel_degs_per_sec": 60
       }
     },
     {

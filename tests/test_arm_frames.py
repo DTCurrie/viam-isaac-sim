@@ -1,6 +1,3 @@
-"""Base-frame correction on spawn and base-frame end pose reporting
-(FINDINGS XC-1, ARM-10)."""
-
 import asyncio
 import math
 

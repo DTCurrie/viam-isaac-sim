@@ -6,10 +6,10 @@
   "schema": {
     "rows[].real_model": "model string of the real driver this row stands in for, or \"*\" for the catch-all row",
     "rows[].api": "the Viam API both the real model and the sim model serve, or \"*\" on the catch-all row, which matches any hardware API with no row",
-    "rows[].sim_model": "the sim model constructed in the real one's place; rdk:builtin:fake on the catch-all row, a placeholder generic component",
-    "rows[].template": "attributes of the swapped resource; the resolver adds world_attribute set to the simulator field's value; a string value starting with \"$\" copies that field of the real resource's config (\"$frame.parent\" is the frame parent's name)",
-    "rows[].carry": "map from an attribute name on the real resource to the sim attribute it becomes; the resolver copies the value unchanged when the real entry has it and skips it otherwise; {} when nothing carries",
-    "rows[].verified": "true when real_model was read from the real module's manifest, README or the Viam docs on the date in rows[].source; false when it follows the module's naming pattern but was not found in its published model list",
+    "rows[].sim_model": "the sim model constructed in the real one's place. On the catch-all row it is rdk:builtin:fake, a placeholder generic component",
+    "rows[].template": "attributes of the swapped resource. The resolver adds world_attribute set to the simulator field's value. A string value starting with \"$\" copies that field of the real resource's config (\"$frame.parent\" is the frame parent's name)",
+    "rows[].carry": "map from an attribute name on the real resource to the sim attribute it becomes. The resolver copies the value unchanged when the real entry has it and skips it otherwise. {} when nothing carries",
+    "rows[].verified": "true when real_model was read from the real module's manifest, README or the Viam docs on the date in rows[].source. False when it follows the module's naming pattern but was not found in its published model list",
     "rows[].source": "where real_model was read, and when",
     "rows[].note": "optional, anything the resolver or a reader should know about the row"
   },
@@ -21,7 +21,7 @@
       "template": {
         "asset": "ur3e"
       },
-      "carry": {},
+      "carry": {"speed_degs_per_sec": "max_vel_degs_per_sec"},
       "verified": true,
       "source": "https://github.com/viam-modules/universal-robots meta.json.in and README model list, read 2026-09-08"
     },
@@ -32,42 +32,21 @@
       "template": {
         "asset": "ur5e"
       },
-      "carry": {},
+      "carry": {"speed_degs_per_sec": "max_vel_degs_per_sec"},
       "verified": true,
       "source": "https://github.com/viam-modules/universal-robots meta.json.in and README model list, read 2026-09-08"
     },
     {
-      "real_model": "viam:universal-robots:ur10",
+      "real_model": "viam:universal-robots:ur7e",
       "api": "rdk:component:arm",
       "sim_model": "viam:isaac-sim-devin:arm",
       "template": {
-        "asset": "ur10"
+        "asset": "ur7e"
       },
-      "carry": {},
-      "verified": false,
-      "source": "naming pattern of https://github.com/viam-modules/universal-robots; its meta.json.in read 2026-09-08 lists ur3e, ur5e, ur7e and ur20 only (CB-series UR10 unsupported by that module)"
-    },
-    {
-      "real_model": "viam:universal-robots:ur10e",
-      "api": "rdk:component:arm",
-      "sim_model": "viam:isaac-sim-devin:arm",
-      "template": {
-        "asset": "ur10e"
-      },
-      "carry": {},
-      "verified": false,
-      "source": "naming pattern of https://github.com/viam-modules/universal-robots; its meta.json.in read 2026-09-08 lists ur3e, ur5e, ur7e and ur20 only"
-    },
-    {
-      "real_model": "viam:universal-robots:ur16e",
-      "api": "rdk:component:arm",
-      "sim_model": "viam:isaac-sim-devin:arm",
-      "template": {
-        "asset": "ur16e"
-      },
-      "carry": {},
-      "verified": false,
-      "source": "naming pattern of https://github.com/viam-modules/universal-robots; its meta.json.in read 2026-09-08 lists ur3e, ur5e, ur7e and ur20 only"
+      "carry": {"speed_degs_per_sec": "max_vel_degs_per_sec"},
+      "verified": true,
+      "source": "https://github.com/viam-modules/universal-robots meta.json.in and README model list, read 2026-09-08",
+      "note": "Isaac Sim 5.0 ships no distinct ur7e USD, checked directly against the assets root's UniversalRobots folder listing on 2026-09-10, so the ur7e asset spawns the ur5e mesh as a geometry stand-in with the real ur7e's kinematics"
     },
     {
       "real_model": "viam:universal-robots:ur20",
@@ -76,7 +55,7 @@
       "template": {
         "asset": "ur20"
       },
-      "carry": {},
+      "carry": {"speed_degs_per_sec": "max_vel_degs_per_sec"},
       "verified": true,
       "source": "https://github.com/viam-modules/universal-robots meta.json.in and README model list, read 2026-09-08"
     },
@@ -88,8 +67,9 @@
         "asset": "franka"
       },
       "carry": {},
-      "verified": true,
-      "source": "https://github.com/viam-modules/viam-franka-arm meta.json, read 2026-09-08"
+      "verified": false,
+      "source": "https://github.com/viam-modules/viam-franka-arm meta.json, read 2026-09-08 (the real model triple is confirmed)",
+      "note": "flagged unverified because viam-franka-arm publishes no kinematics file for the franka asset to carry, unlike the UR module, so a resolved Franka arm cannot answer GetKinematics, GetEndPosition or MoveToPosition"
     },
     {
       "real_model": "viam:robotiq:2f-grippers",
@@ -102,7 +82,7 @@
       "carry": {},
       "verified": true,
       "source": "https://github.com/viam-modules/robotiq meta.json, read 2026-09-08",
-      "note": "the sim gripper needs the arm it is bolted to; the real entry carries that only as its frame parent, so the template copies it from there"
+      "note": "the sim gripper needs the arm it is bolted to. The real entry carries that only as its frame parent, so the template copies it from there. The real model also covers the 2F-140, which differs from the 2F-85 in stroke and TCP offset, and nothing in the real entry's config distinguishes the two, so every resolved gripper becomes a 2F-85 with the 2F-85's measured TCP offset"
     },
     {
       "real_model": "rdk:builtin:wheeled",
@@ -111,10 +91,10 @@
       "template": {
         "asset": "jetbot"
       },
-      "carry": {},
+      "carry": {"width_mm": "width_mm", "wheel_circumference_mm": "wheel_circumference_mm"},
       "verified": true,
       "source": "https://docs.viam.com/operate/reference/components/base/wheeled/, read 2026-09-08",
-      "note": "a jetbot is a wheeled base over two motors; the motors have no sim row and are left as they are, so a machine-level swap of a jetbot still needs them removed or faked"
+      "note": "a jetbot is a wheeled base over two motors. The motors have no sim row and are left as they are, so a machine-level swap of a jetbot still needs them removed or faked"
     },
     {
       "real_model": "viam:camera:realsense",
@@ -127,7 +107,7 @@
       },
       "verified": true,
       "source": "https://github.com/viam-modules/viam-camera-realsense meta.json and README, read 2026-09-08",
-      "note": "the frame is carried over unchanged and places the sim camera; width_px and height_px carry to the sim camera's width and height; a depth stream requested through the sensors list becomes depth: true by a resolver rule, since that is a transform, not a copy"
+      "note": "the frame is carried over unchanged and places the sim camera. width_px and height_px carry to the sim camera's width and height. A depth stream requested through the sensors list becomes depth: true by a resolver rule, since that is a transform, not a copy"
     },
     {
       "real_model": "*",
@@ -137,7 +117,7 @@
       "carry": {},
       "verified": true,
       "source": "catch-all row, nothing to verify",
-      "note": "any hardware component with no row becomes a placeholder generic component (api rdk:component:generic, model rdk:builtin:fake) with its name, frame and depends_on kept and no attributes, so the sim machine's config loads; the one row where api changes; allow_unmatched keeps the real entry instead"
+      "note": "any hardware component with no row becomes a placeholder on its own api with model rdk:builtin:fake, keeping its name, frame and depends_on and dropping its attributes, so the sim machine's config loads and dependents that resolve by api keep working. pose_tracker is the one api that changes, to rdk:component:generic, since no fake pose_tracker model exists. allow_unmatched keeps the real entry instead"
     }
   ]
 }

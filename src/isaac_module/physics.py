@@ -1,4 +1,4 @@
-"""Prop and grasp physics (FINDINGS SCN-6, ARM-16, W27, W28; R-22, R-23).
+"""Prop and grasp physics for the pick cell.
 
 Per-prop physics keys on the world component's ``props`` entries:
 
@@ -11,20 +11,21 @@ the initial ``world.reset()``.
 
 Explicit beats implicit: a prop that names none of these keys keeps Isaac's
 authored defaults (friction 0.2/1.0, mass 0.02 kg, contact_offset 0.1 m),
-which R-22/R-23 flag as wrong for a 50 mm block - so the shipped pick cell
-sets them in the fragment, using the named constants below.
+which are wrong for a 50 mm block, so the shipped pick cell sets them in the
+fragment, using the named constants below.
 """
 
 from __future__ import annotations
 
-from logging import getLogger
 from typing import Any
 
-LOGGER = getLogger("viam-isaac-sim")
+from viam.logging import getLogger
+
+LOGGER = getLogger(__name__)
 
 PROP_PHYSICS_KEYS = ("mass", "friction", "restitution", "contact_offset", "rest_offset")
 
-# W27: block/table material for the pick cell.
+# Block/table material for the pick cell.
 PICK_CELL_BLOCK_PHYSICS: dict[str, float] = {
     "mass": 0.05,
     "friction": 0.7,
@@ -33,15 +34,15 @@ PICK_CELL_BLOCK_PHYSICS: dict[str, float] = {
 }
 FRICTION_COMBINE_MODE = "max"
 
-# W28 / DEC-9: step rates for the pick cell (doc floor for a 2F-85 grasp is
-# >= 80 physics steps/s); rendering stays at 1/60 so camera cadence is
-# unchanged. Consumed by the shipped fragment and its test (SCN-10 / ARM-7).
+# Step rates for the pick cell. The doc floor for a 2F-85 grasp is at least 80
+# physics steps/s. Rendering stays at 1/60 so camera cadence is unchanged.
+# Consumed by the shipped fragment and its test.
 PICK_CELL_PHYSICS_DT = 1.0 / 120.0
 PICK_CELL_RENDERING_DT = 1.0 / 60.0
 
-# W28: the 2F-85 asset asks for 64 solver position iterations; the UR asset
-# authors 32. Re-applied to the arm after every reset (ARM-15/ARM-16 via the
-# XC-5 post-reset hook in sim_manager).
+# The 2F-85 asset asks for 64 solver position iterations, the UR asset
+# authors 32. Re-applied to the arm after every reset, through the
+# post-reset hook in sim_manager.
 ARM_SOLVER_POSITION_ITERATIONS = 64
 
 

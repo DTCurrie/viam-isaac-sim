@@ -1,5 +1,3 @@
-"""Golden-byte and round-trip tests for isaac_module.encoding (FINDINGS CAM-7)."""
-
 from __future__ import annotations
 
 import struct
@@ -21,8 +19,7 @@ from isaac_module.encoding import (
 
 def test_intrinsics_from_fov() -> None:
     # fx = fy = W / (2*tan(hfov/2)) per the encoding.py docstring formula;
-    # 848 / (2*tan(radians(90.5/2))) == 420.3159532922707 (see Deviations in
-    # the slice report re: the brief's stated ~420.1 / FINDINGS W18 value).
+    # 848 / (2*tan(radians(90.5/2))) == 420.3159532922707.
     k = intrinsics_from_fov(848, 480, 90.5)
     assert k.fx == k.fy
     assert 420.25 <= k.fx <= 420.4
@@ -71,7 +68,7 @@ def test_dep_round_trip_through_viam_sdk() -> None:
     assert decoded == [[1, 500, 1000], [0, 0, 0]]
 
 
-def test_pcd_golden_bytes_coloured() -> None:
+def test_pcd_golden_bytes_colored() -> None:
     xyz = np.array([[1, 2, 3], [-0.5, 0.25, 0.125]], dtype=np.float32)
     rgb = np.array([[255, 0, 0], [0, 128, 64]], dtype=np.uint8)
 
@@ -108,7 +105,7 @@ def test_pcd_golden_bytes_coloured() -> None:
     assert len(payload) == 32
 
 
-def test_pcd_uncoloured() -> None:
+def test_pcd_uncolored() -> None:
     xyz = np.array([[1, 2, 3], [-0.5, 0.25, 0.125]], dtype=np.float32)
 
     encoded = xyz_rgb_to_pcd(xyz, None)

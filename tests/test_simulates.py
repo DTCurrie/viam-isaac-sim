@@ -1,9 +1,3 @@
-"""`simulates.json` is the contract a resolver uses to swap a real driver's
-model for its sim stand-in. Every row must name a model this module actually
-registers, a template that validates once the world default applies, and an
-asset this module actually knows how to spawn, or the resolver produces a
-config the sim rejects at runtime."""
-
 import json
 import re
 from pathlib import Path
@@ -19,11 +13,11 @@ from isaac_module.models.base import IsaacBase
 from isaac_module.models.camera import IsaacCamera
 from isaac_module.models.gripper import IsaacGripper
 from isaac_module.sim_manager import KNOWN_ASSETS
-from test_readme_tables import SECTION_HEADINGS, _table_keys_for_section
+from test_readme_tables import documented_attributes
 
 SIMULATES_PATH = Path(__file__).resolve().parent.parent / "simulates.json"
 META_PATH = Path(__file__).resolve().parent.parent / "meta.json"
-README_PATH = Path(__file__).resolve().parent.parent / "README.md"
+SIMULATION_DOC_PATH = Path(__file__).resolve().parent.parent / "docs" / "SIMULATION.md"
 
 SIM_MODEL_CLASSES = (IsaacArm, IsaacGripper, IsaacBase, IsaacCamera)
 
@@ -51,8 +45,6 @@ def _sim_row_ids() -> list[str]:
 
 
 FRAME_PARENT_PLACEHOLDER = "pick-arm"
-
-README_LINES = README_PATH.read_text().splitlines()
 
 
 def _simulates() -> dict[str, Any]:
@@ -82,6 +74,14 @@ def test_world_attribute_is_world() -> None:
 
 def test_default_world_matches_the_module_default() -> None:
     assert _simulates()["default_world"] == DEFAULT_WORLD_NAME
+
+
+def test_no_semicolon_separator_in_schema_or_note_strings() -> None:
+    simulates = _simulates()
+    strings = list(simulates["schema"].values())
+    strings += [row["note"] for row in simulates["rows"] if "note" in row]
+    for value in strings:
+        assert "; " not in value, value
 
 
 @pytest.mark.parametrize("row", _rows(), ids=_row_ids())
@@ -125,7 +125,7 @@ def test_carry_sim_side_names_are_documented_attributes(row: dict[str, Any]) -> 
     short_name = _sim_model_short_name(row)
     if short_name == "base":
         pytest.skip("the base model has no README attribute table today")
-    documented = _table_keys_for_section(README_LINES, SECTION_HEADINGS[short_name])
+    documented = documented_attributes(short_name)
     for sim_key in row["carry"].values():
         assert sim_key in documented, (
             f"row {row['real_model']!r} carries into {sim_key!r}, which is not in "
@@ -200,6 +200,28 @@ def test_every_known_asset_is_used_by_some_row() -> None:
     assert set(KNOWN_ASSETS.keys()) <= used
 
 
+def _verified_arm_rows() -> list[dict[str, Any]]:
+    return [row for row in _rows() if row["api"] == "rdk:component:arm" and row["verified"]]
+
+
+@pytest.mark.parametrize(
+    "row", _verified_arm_rows(), ids=[row["real_model"] for row in _verified_arm_rows()]
+)
+def test_every_verified_arm_rows_asset_carries_kinematics_and_ee_prim(
+    row: dict[str, Any],
+) -> None:
+    asset = row["template"]["asset"]
+    meta = KNOWN_ASSETS[asset]
+    assert meta.get("kinematics"), (
+        f"row {row['real_model']!r} is verified but its asset {asset!r} carries no "
+        "kinematics, so GetKinematics/MoveToPosition would fail on a resolved arm"
+    )
+    assert meta.get("ee_prim"), (
+        f"row {row['real_model']!r} is verified but its asset {asset!r} carries no "
+        "ee_prim, so GetEndPosition would fail on a resolved arm"
+    )
+
+
 def _resolve_template(row: dict[str, Any]) -> tuple[dict[str, Any], bool]:
     resolved: dict[str, Any] = {}
     frame_parent_referenced = False
@@ -216,6 +238,60 @@ def _resolve_template(row: dict[str, Any]) -> tuple[dict[str, Any], bool]:
         else:
             resolved[key] = value
     return resolved, frame_parent_referenced
+
+
+SUBSTITUTION_TABLE_HEADER = "| Real model | API | Sim model | Template | Carry | Verified |"
+CATCH_ALL_TABLE_SUFFIX = " (catch-all)"
+CARRY_ARROW = "→"
+
+
+def _unquote(cell: str) -> str:
+    return cell.removesuffix(CATCH_ALL_TABLE_SUFFIX).strip().strip("`")
+
+
+def _carry_from_cell(cell: str) -> dict[str, str]:
+    if _unquote(cell) == "{}":
+        return {}
+    carry: dict[str, str] = {}
+    for pair in cell.split(","):
+        real_key, sim_key = pair.split(CARRY_ARROW)
+        carry[_unquote(real_key)] = _unquote(sim_key)
+    return carry
+
+
+def _documented_rows() -> list[dict[str, Any]]:
+    lines = SIMULATION_DOC_PATH.read_text().splitlines()
+    start = lines.index(SUBSTITUTION_TABLE_HEADER)
+    rows: list[dict[str, Any]] = []
+    for line in lines[start + 2 :]:
+        if not line.startswith("|"):
+            break
+        cells = [cell.strip() for cell in line.split("|")[1:-1]]
+        real_model, api, sim_model, template, carry, verified = cells
+        rows.append(
+            {
+                "real_model": _unquote(real_model),
+                "api": _unquote(api),
+                "sim_model": _unquote(sim_model),
+                "template": json.loads(_unquote(template)),
+                "carry": _carry_from_cell(carry),
+                "verified": {"yes": True, "no": False}[verified],
+            }
+        )
+    return rows
+
+
+def test_simulation_doc_table_mirrors_simulates_json_row_for_row() -> None:
+    documented = _documented_rows()
+    shipped = [
+        {field: row[field] for field in ("real_model", "api", "sim_model", "template", "carry")}
+        | {"verified": row["verified"]}
+        for row in _rows()
+    ]
+    assert documented == shipped, (
+        f"docs/SIMULATION.md's substitution table and {SIMULATES_PATH.name} disagree. "
+        "The table mirrors the file row for row, in the file's order."
+    )
 
 
 @pytest.mark.parametrize("row", _sim_rows(), ids=_sim_row_ids())

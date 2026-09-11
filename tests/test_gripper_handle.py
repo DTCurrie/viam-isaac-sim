@@ -1,14 +1,10 @@
-"""Mock gripper handle contract (FINDINGS ARM-2, ARM-3, ARM-4, ARM-8): the jaw
-interpolates like MockArmHandle, an object in the jaws stalls the close short
-of closed_rad and eventually reports is_holding(), and jaw_limits()/dof_names()
-follow the asset/attrs contract."""
-
 import math
 import time
 
 import pytest
 
-from isaac_module.sim_manager import GRIPPER_OPEN_WIDTH_M, MockArmHandle
+from isaac_module.handles.gripper import GRIPPER_OPEN_WIDTH_M
+from isaac_module.sim_manager import MockArmHandle
 
 SETTLE_POLLS = 400
 SETTLE_POLL_S = 0.01
@@ -120,5 +116,37 @@ def test_create_gripper_is_cached_per_name(sim):
 
 def test_mock_arm_speed_constant_used_by_gripper_interpolation():
     # sanity: the gripper's interpolation speed comes from the same constant
-    # the arm mock uses (FINDINGS ARM-2's shared-pattern requirement).
+    # the arm mock uses (the shared-pattern requirement).
     assert MockArmHandle.SPEED == 1.0
+
+
+def test_poll_state_reports_moving_and_not_holding_mid_travel(sim):
+    sim.create_arm("gripper-arm-h", {"world": "isaac-world", "asset": "ur5e"})
+    gripper = sim.create_gripper(
+        "gripper-h",
+        {"world": "isaac-world", "arm": "gripper-arm-h", "mock_object_width_m": 0.05},
+    )
+
+    gripper.close()
+    time.sleep(0.05)  # still travelling toward the contact angle
+
+    jaw, moving, holding = gripper.poll_state()
+    assert math.radians(0.0) < jaw < math.radians(47.0)
+    assert moving is True
+    assert holding is False
+
+
+def test_poll_state_reports_holding_once_stalled_on_an_object(sim):
+    sim.create_arm("gripper-arm-i", {"world": "isaac-world", "asset": "ur5e"})
+    gripper = sim.create_gripper(
+        "gripper-i",
+        {"world": "isaac-world", "arm": "gripper-arm-i", "mock_object_width_m": 0.05},
+    )
+
+    gripper.close()
+    assert _wait_until(gripper.is_holding)
+
+    jaw, moving, holding = gripper.poll_state()
+    assert jaw == pytest.approx(gripper.get_jaw(), abs=1e-3)
+    assert moving is False
+    assert holding is True

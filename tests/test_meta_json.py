@@ -1,9 +1,3 @@
-"""`meta.json` is the registry's view of this module: every model the module
-registers must be listed there with the API it actually serves, or the
-registry entry advertises a stale model set (phase 6 added the conductor and
-the sorter sensor). The set is checked in both directions so a model removed
-from the code cannot linger in the manifest either."""
-
 import json
 from pathlib import Path
 
@@ -30,6 +24,12 @@ REGISTERED_MODEL_CLASSES = (
 )
 
 
+# The models array and its short_description field are a contested surface (recorded
+# 2026-09-09 by the Viam audit). The published module.schema.json at
+# https://dl.viam.dev/module.schema.json names the per-model field description, not
+# short_description. The module reference at docs.viam.com documents short_description
+# and marks the models array itself deprecated. This fixture pins the shape this module
+# actually uploads, not a surface Viam has settled on.
 @pytest.fixture(scope="module")
 def manifest_models() -> dict[str, str]:
     meta = json.loads(META_PATH.read_text())

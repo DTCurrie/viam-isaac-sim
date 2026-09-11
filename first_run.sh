@@ -1,20 +1,10 @@
 #!/usr/bin/env bash
-# One-time machine setup, run automatically by viam-server when the module is
-# first installed (meta.json "first_run").
-#
-# Turns a standard Ubuntu 22.04/24.04 x86_64 machine into one that can run
-# Isaac Sim:
-#   - system libraries kit needs (vulkan, GL)
-#   - NVIDIA driver if none is present (a reboot may be needed after)
-#   - the python version Isaac Sim requires (deadsnakes PPA on 24.04)
-#   - Isaac Sim itself, pip-installed into a venv under the module data dir
-#   - this module's python deps into the same venv
-#
-# run.sh finds the result via the marker file written at the end, so no
-# ISAAC_SIM_PATH / ISAAC_PYTHON configuration is needed.
-#
-# The isaacsim download is large (10GB+); if it exceeds viam-server's default
-# first_run timeout, set "first_run_timeout": "2h0m0s" on the module config.
+# viam-server's meta.json "first_run" entry point, run once when the module
+# is installed. Writes the python interpreter path it installs to
+# $VIAM_MODULE_DATA/isaac_python, the marker run.sh reads instead of needing
+# ISAAC_SIM_PATH / ISAAC_PYTHON set. The isaacsim download is large (10GB+);
+# if it exceeds viam-server's default first_run timeout, set
+# "first_run_timeout": "2h0m0s" on the module config.
 set -uo pipefail
 
 log() { echo "viam-isaac-sim first_run: $*"; }
@@ -41,9 +31,7 @@ if [ -x "$VENV/bin/python" ] && "$VENV/bin/python" -c "import isaacsim" >/dev/nu
     exit 0
 fi
 
-# ---------------------------------------------------------------------------
 # pick isaac sim version by ubuntu release (it dictates the python version)
-# ---------------------------------------------------------------------------
 . /etc/os-release 2>/dev/null || true
 UBUNTU="${VERSION_ID:-unknown}"
 NEED_DEADSNAKES=0

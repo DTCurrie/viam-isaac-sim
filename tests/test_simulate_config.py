@@ -1,8 +1,3 @@
-"""The tool's output for the real UR5e cell example is the committed sim
-twin, byte for byte, and the resolver's contract holds on synthetic
-configs: idempotence, unmatched-hardware failure, `--only`, and mock
-validation of every component it produces."""
-
 import copy
 import json
 import subprocess
@@ -13,18 +8,21 @@ from typing import Any
 import pytest
 
 from isaac_module import DEFAULT_WORLD_NAME
-from isaac_module.component_diagnostics import default_ee_prim_path
-from isaac_module.config_resolver import (
-    UnmatchedHardwareError,
-    main,
-    resolve,
-)
+from isaac_module.config_resolver import UnmatchedHardwareError, resolve
+from isaac_module.prim_paths import default_ee_prim_path
 from test_fragment import MODELS, _component_config
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO_ROOT / "tools"))
+
+import simulate_config as sim_cli  # noqa: E402
+
 EXAMPLES_DIR = REPO_ROOT / "examples" / "configs"
 REAL_CONFIG_PATH = EXAMPLES_DIR / "real-ur5e-cell.json"
 SIM_CONFIG_PATH = EXAMPLES_DIR / "sim-ur5e-cell.json"
+JETBOT_FAKE_MOTORS_CONFIG_PATH = EXAMPLES_DIR / "real-jetbot-fake-motors.json"
+ROVER_MOTORS_BOARD_CONFIG_PATH = EXAMPLES_DIR / "real-rover-motors-board.json"
+ARM_ON_GANTRY_CONFIG_PATH = EXAMPLES_DIR / "real-arm-on-gantry.json"
 TABLE_PATH = REPO_ROOT / "simulates.json"
 WORLD_FRAGMENT_PATH = REPO_ROOT / "fragments" / "isaac-sim-world.json"
 
@@ -131,19 +129,85 @@ def _motor() -> dict[str, Any]:
     }
 
 
-def test_unmatched_hardware_becomes_a_placeholder_generic_component() -> None:
+def test_unmatched_hardware_becomes_a_placeholder_on_its_own_api() -> None:
     real_config = _load(REAL_CONFIG_PATH)
     real_config["components"].append(_motor())
 
     resolution = resolve(real_config, _table(), _world_fragment())
     placeholder = _by_name(resolution.config["components"])["stray-motor"]
 
-    assert placeholder["api"] == "rdk:component:generic"
+    assert placeholder["api"] == "rdk:component:motor"
     assert placeholder["model"] == "rdk:builtin:fake"
     assert placeholder["attributes"] == {}
     assert placeholder["depends_on"] == ["pick-arm"]
     assert resolution.placeholders == ("stray-motor",)
     assert "stray-motor" not in resolution.swapped
+
+
+def test_unmatched_pose_tracker_placeholder_falls_back_to_generic_api() -> None:
+    real_config = _load(REAL_CONFIG_PATH)
+    real_config["components"].append(
+        {
+            "name": "stray-pose-tracker",
+            "api": "rdk:component:pose_tracker",
+            "model": "acme:tracking:real",
+            "attributes": {"resolution": "1080p"},
+        }
+    )
+
+    resolution = resolve(real_config, _table(), _world_fragment())
+    placeholder = _by_name(resolution.config["components"])["stray-pose-tracker"]
+
+    assert placeholder["api"] == "rdk:component:generic"
+    assert placeholder["model"] == "rdk:builtin:fake"
+    assert placeholder["attributes"] == {}
+    assert resolution.placeholders == ("stray-pose-tracker",)
+
+
+def test_component_already_on_the_fake_model_passes_through_untouched() -> None:
+    real_config = _load(REAL_CONFIG_PATH)
+    fake_motor = {
+        "name": "placeholder-motor",
+        "api": "rdk:component:motor",
+        "model": "rdk:builtin:fake",
+        "attributes": {"max_rpm": 200},
+    }
+    real_config["components"].append(dict(fake_motor))
+
+    resolution = resolve(real_config, _table(), _world_fragment())
+    resolved_by_name = _by_name(resolution.config["components"])
+
+    assert resolved_by_name["placeholder-motor"] == fake_motor
+    assert "placeholder-motor" in resolution.passed_through
+    assert "placeholder-motor" not in resolution.swapped
+    assert "placeholder-motor" not in resolution.placeholders
+
+
+def test_audio_in_and_audio_out_are_recognized_as_hardware_apis() -> None:
+    real_config = _load(REAL_CONFIG_PATH)
+    real_config["components"].append(
+        {
+            "name": "stray-mic",
+            "api": "rdk:component:audio_in",
+            "model": "acme:audio:real",
+            "attributes": {},
+        }
+    )
+    real_config["components"].append(
+        {
+            "name": "stray-speaker",
+            "api": "rdk:component:audio_out",
+            "model": "acme:audio:real",
+            "attributes": {},
+        }
+    )
+
+    resolution = resolve(real_config, _table(), _world_fragment())
+    resolved_by_name = _by_name(resolution.config["components"])
+
+    assert set(resolution.placeholders) >= {"stray-mic", "stray-speaker"}
+    assert resolved_by_name["stray-mic"]["api"] == "rdk:component:audio_in"
+    assert resolved_by_name["stray-speaker"]["api"] == "rdk:component:audio_out"
 
 
 def test_unmatched_hardware_raises_when_the_table_has_no_catch_all() -> None:
@@ -216,7 +280,7 @@ def test_swapped_components_validate_in_mock_and_depend_on_the_world() -> None:
 
 def test_main_writes_matching_bytes_and_exits_zero(tmp_path: Path) -> None:
     out_path = tmp_path / "sim.json"
-    exit_code = main(
+    exit_code = sim_cli.main(
         [
             str(REAL_CONFIG_PATH),
             "--table",
@@ -242,7 +306,7 @@ def test_main_exits_two_on_unmatched_hardware(tmp_path: Path) -> None:
     table_path = tmp_path / "table.json"
     table_path.write_text(json.dumps(table))
 
-    exit_code = main(
+    exit_code = sim_cli.main(
         [
             str(bad_config_path),
             "--table",
@@ -272,3 +336,139 @@ def test_inserted_world_component_has_fragment_variables_resolved_to_defaults() 
     world = next(c for c in resolution.config["components"] if c["name"] == DEFAULT_WORLD_NAME)
     assert world["attributes"]["livestream_public_ip"] == ""
     assert "$variable" not in json.dumps(world)
+
+
+def test_fragment_variable_without_default_value_is_left_unresolved_and_reported() -> None:
+    world_fragment = {
+        "components": [
+            {
+                "name": "isaac-world",
+                "api": "rdk:component:generic",
+                "model": "viam:isaac-sim-devin:world",
+                "attributes": {"world": "isaac-world"},
+            },
+            {
+                "name": "extra-sensor",
+                "api": "rdk:component:sensor",
+                "model": "viam:isaac-sim-devin:sensor",
+                "attributes": {"reading_rate_hz": {"$variable": {"name": "reading-rate"}}},
+            },
+        ]
+    }
+
+    resolution = resolve({"components": []}, _table(), world_fragment)
+    extra_sensor = _by_name(resolution.config["components"])["extra-sensor"]
+
+    assert resolution.unresolved_variables == ("reading-rate",)
+    assert extra_sensor["attributes"]["reading_rate_hz"] == {"$variable": {"name": "reading-rate"}}
+    assert "$variable" in json.dumps(extra_sensor)
+
+
+def test_realsense_without_sensors_key_defaults_to_depth_true() -> None:
+    real_config = _load(REAL_CONFIG_PATH)
+    wrist_cam = _by_name(real_config["components"])["wrist-cam"]
+    del wrist_cam["attributes"]["sensors"]
+
+    resolution = resolve(real_config, _table(), _world_fragment())
+    wrist_cam_resolved = _by_name(resolution.config["components"])["wrist-cam"]
+
+    assert wrist_cam_resolved["attributes"]["depth"] is True
+
+
+def test_realsense_sensors_without_depth_does_not_turn_depth_on() -> None:
+    real_config = _load(REAL_CONFIG_PATH)
+    wrist_cam = _by_name(real_config["components"])["wrist-cam"]
+    wrist_cam["attributes"]["sensors"] = ["color"]
+
+    resolution = resolve(real_config, _table(), _world_fragment())
+    wrist_cam_resolved = _by_name(resolution.config["components"])["wrist-cam"]
+
+    assert "depth" not in wrist_cam_resolved["attributes"]
+
+
+def test_pruned_modules_drops_entries_no_remaining_model_uses() -> None:
+    real_config = _load(REAL_CONFIG_PATH)
+    real_config["modules"] = [
+        {
+            "type": "registry",
+            "name": "universal_robots",
+            "module_id": "viam:universal-robots",
+            "version": "1.2.3",
+        },
+        {"type": "registry", "name": "orphan", "module_id": "acme:unrelated", "version": "0.0.1"},
+        {"type": "local", "name": "custom", "executable_path": "/bin/custom"},
+    ]
+
+    resolution = resolve(real_config, _table(), _world_fragment())
+    kept_ids = {m.get("module_id") for m in resolution.config["modules"]}
+
+    assert set(resolution.pruned_modules) == {"viam:universal-robots", "acme:unrelated"}
+    assert "viam:universal-robots" not in kept_ids
+    assert "acme:unrelated" not in kept_ids
+    assert "viam:isaac-sim-devin" in kept_ids
+    assert any(m.get("name") == "custom" for m in resolution.config["modules"])
+
+
+def test_jetbot_fake_motors_swaps_the_base_and_passes_the_motors_through() -> None:
+    real_config = _load(JETBOT_FAKE_MOTORS_CONFIG_PATH)
+    resolution = resolve(real_config, _table(), _world_fragment())
+    resolved_by_name = _by_name(resolution.config["components"])
+
+    assert "rover-base" in resolution.swapped
+    base = resolved_by_name["rover-base"]
+    assert base["model"] == "viam:isaac-sim-devin:base"
+    assert base["attributes"]["asset"] == "jetbot"
+
+    for motor_name in ("left-motor", "right-motor"):
+        assert motor_name in resolution.passed_through
+        assert resolved_by_name[motor_name] == _by_name(real_config["components"])[motor_name]
+
+    short_name = base["model"].split(":")[-1]
+    deps, _opt_deps = MODELS[short_name].validate_config(_component_config(base))
+    assert DEFAULT_WORLD_NAME in deps
+
+
+def test_rover_motors_and_board_with_no_rows_become_placeholders() -> None:
+    real_config = _load(ROVER_MOTORS_BOARD_CONFIG_PATH)
+    resolution = resolve(real_config, _table(), _world_fragment())
+    resolved_by_name = _by_name(resolution.config["components"])
+    real_by_name = _by_name(real_config["components"])
+
+    expected_placeholders = {"rover-base", "left-motor", "right-motor", "power-board"}
+    assert set(resolution.placeholders) == expected_placeholders
+    for name in resolution.placeholders:
+        placeholder = resolved_by_name[name]
+        assert placeholder["api"] == real_by_name[name]["api"]
+        assert placeholder["model"] == "rdk:builtin:fake"
+        assert placeholder["attributes"] == {}
+        assert placeholder["name"] == name
+
+
+def test_arm_on_a_non_world_frame_parent_fails_at_resolve_time() -> None:
+    # An arm whose frame.parent names another component now fails here, at resolve
+    # time, naming the remedy, rather than resolving to a config that only fails once
+    # it reaches the GPU host, after create_sim_machine.py has already made a machine.
+    real_config = _load(ARM_ON_GANTRY_CONFIG_PATH)
+
+    with pytest.raises(ValueError, match="pick-arm") as exc_info:
+        resolve(real_config, _table(), _world_fragment())
+
+    message = str(exc_info.value)
+    assert "lift-gantry" in message
+    assert "allow_unmatched" in message
+
+
+def test_arm_on_a_non_world_frame_parent_passes_through_with_allow_unmatched() -> None:
+    real_config = _load(ARM_ON_GANTRY_CONFIG_PATH)
+    real_by_name = _by_name(real_config["components"])
+
+    resolution = resolve(real_config, _table(), _world_fragment(), allow_unmatched=True)
+    resolved_by_name = _by_name(resolution.config["components"])
+
+    assert "pick-arm" in resolution.swapped
+    arm = resolved_by_name["pick-arm"]
+    assert arm["frame"] == real_by_name["pick-arm"]["frame"]
+    assert arm["frame"]["parent"] == "lift-gantry"
+
+    assert "lift-gantry" in resolution.passed_through
+    assert resolved_by_name["lift-gantry"] == real_by_name["lift-gantry"]

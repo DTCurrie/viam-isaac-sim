@@ -1,19 +1,18 @@
-"""Phase-3 GPU checklist probes for the Robotiq 2F-85 gripper asset.
+"""GPU checklist probe for the Robotiq 2F-85 gripper asset.
 
-Item 1 (FINDINGS R-4 / OQ-4): does ``Robotiq_2F_85_edit.usd`` compose with pad
-prims that carry ``PhysicsCollisionAPI`` on this Isaac install, and which
-asset hosts do its references pull from? The module refuses to attach the
-gripper when the pads have no collision, so this probe answers the question
-without viam-server in the loop.
+Checks whether ``Robotiq_2F_85_edit.usd`` composes with pad prims that carry
+``PhysicsCollisionAPI`` on this Isaac install, and which asset hosts its
+references pull from. The module refuses to attach the gripper when the
+pads have no collision, so this probe answers the question without
+viam-server in the loop.
 
 Runs INSIDE Isaac Sim's python (it boots a headless ``SimulationApp`` to get
 the asset resolver and ``omni.client``), e.g. on the GPU machine::
 
-    ~/isaacsim/python.sh examples/gpu_checklist_gripper_asset.py            # item 1, default asset
+    ~/isaacsim/python.sh examples/gpu_checklist_gripper_asset.py
     ~/isaacsim/python.sh examples/gpu_checklist_gripper_asset.py --usd omniverse://.../Robotiq_2F_85_edit.usd
 
-Prints one PASS/FAIL line per item plus the raw observations to paste into
-``.claude/plans/pick-place-mvp/phase-3-grasp-and-lift.md`` Notes.
+Prints one PASS/FAIL line plus the raw observations.
 
 The pure helpers at the top take plain records so they are unit-tested on a
 laptop (see tests/test_gpu_checklist_gripper_asset.py).
@@ -28,7 +27,7 @@ from dataclasses import dataclass
 
 DEFAULT_ASSET_REL = "/Isaac/Robots/Robotiq/2F-85/Robotiq_2F_85_edit.usd"
 UNRESOLVABLE_ASSET_HOST = "isaac-dev"
-# the 5.0 asset has no `*_pad` links; its fingertip geometry is the
+# the 5.0 asset has no `*_pad` links. Its fingertip geometry is the
 # `..._fingertipsstep_..` mesh under `left/right_inner_finger`
 PAD_NAME_FRAGMENTS = ("pad", "fingertip", "inner_finger")
 SAMPLE_PRIM_PATHS = 60
@@ -81,7 +80,7 @@ def pad_reports(records: Iterable[PrimRecord]) -> list[PadReport]:
 
 def unresolvable_references(records: Iterable[PrimRecord]) -> list[str]:
     """Reference/payload asset paths that point at the host that is NXDOMAIN
-    outside NVIDIA (R-4)."""
+    outside NVIDIA."""
     return [
         asset_path
         for record in records
@@ -90,8 +89,10 @@ def unresolvable_references(records: Iterable[PrimRecord]) -> list[str]:
     ]
 
 
-def item1_verdict(reports: Sequence[PadReport], unresolved: Sequence[str]) -> tuple[str, str]:
-    """PASS when at least one pad has collision in its subtree; FAIL with the
+def pad_collision_verdict(
+    reports: Sequence[PadReport], unresolved: Sequence[str]
+) -> tuple[str, str]:
+    """PASS when at least one pad has collision in its subtree. FAIL with the
     most likely cause otherwise."""
     if any(report.has_collision_in_subtree for report in reports):
         return (
@@ -106,7 +107,7 @@ def item1_verdict(reports: Sequence[PadReport], unresolved: Sequence[str]) -> tu
     if unresolved:
         return "FAIL", (
             f"{len(reports)} pad prim(s) without collision; {len(unresolved)} reference(s) on "
-            f"{UNRESOLVABLE_ASSET_HOST} - R-4 confirmed, fall back per R-2"
+            f"{UNRESOLVABLE_ASSET_HOST}, the likely cause"
         )
     return "FAIL", (
         f"{len(reports)} pad prim(s) without collision and no {UNRESOLVABLE_ASSET_HOST} "
@@ -114,9 +115,7 @@ def item1_verdict(reports: Sequence[PadReport], unresolved: Sequence[str]) -> tu
     )
 
 
-# ----------------------------------------------------------------------
 # Isaac-side collection (only runs inside Isaac's python)
-# ----------------------------------------------------------------------
 
 
 def _prim_range(usd, root_prim):
@@ -133,7 +132,8 @@ def _collect_records(stage, usd, usd_physics) -> list[PrimRecord]:
             try:
                 list_op = prim.GetMetadata(key)
                 items = list_op.GetAddedOrExplicitItems() if list_op is not None else []
-            except Exception:
+            except Exception:  # noqa: BLE001 - a malformed metadata op on one prim must not
+                # abort the whole probe; treat it as no references authored on that prim
                 items = []
             asset_paths.extend(
                 str(item.assetPath) for item in items if getattr(item, "assetPath", "")
@@ -148,7 +148,7 @@ def _collect_records(stage, usd, usd_physics) -> list[PrimRecord]:
     return records
 
 
-def run_item1(usd_path: str | None) -> int:
+def check_pad_collision(usd_path: str | None) -> int:
     from isaacsim import SimulationApp  # only importable inside Isaac Sim's python
 
     app = SimulationApp({"headless": True})
@@ -162,13 +162,13 @@ def run_item1(usd_path: str | None) -> int:
                 from omni.isaac.core.utils.nucleus import get_assets_root_path
             root = get_assets_root_path()
             if root is None:
-                print("item 1: FAIL - could not reach the isaac assets server")
+                print("FAIL: could not reach the isaac assets server")
                 return 2
             usd_path = root + DEFAULT_ASSET_REL
         print(f"asset: {usd_path}")
         stage = Usd.Stage.Open(usd_path)
         if stage is None:
-            print("item 1: FAIL - Usd.Stage.Open returned None (asset path did not resolve)")
+            print("FAIL: Usd.Stage.Open returned None (asset path did not resolve)")
             return 2
         layer = stage.GetRootLayer()
         root_prims = [str(spec.path) for spec in layer.rootPrims]
@@ -183,8 +183,8 @@ def run_item1(usd_path: str | None) -> int:
             print(f"    {record.path}{'  [collision]' if record.has_collision_api else ''}")
         reports = pad_reports(records)
         unresolved = unresolvable_references(records)
-        verdict, detail = item1_verdict(reports, unresolved)
-        print(f"item 1 (R-4/OQ-4 pad collision): {verdict} - {detail}")
+        verdict, detail = pad_collision_verdict(reports, unresolved)
+        print(f"pad collision: {verdict} - {detail}")
         for report in reports:
             print(
                 f"  pad {report.path}: collision on self={report.has_collision_on_self} "
@@ -208,7 +208,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--usd", default=None, help="asset to probe (default: the 2F-85 under the assets root)"
     )
     args = parser.parse_args(argv)
-    return run_item1(args.usd)
+    return check_pad_collision(args.usd)
 
 
 if __name__ == "__main__":

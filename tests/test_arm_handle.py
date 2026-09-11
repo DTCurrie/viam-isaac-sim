@@ -1,13 +1,3 @@
-"""DOF-index-aware joint I/O on the arm handles (FINDINGS ARM-1; R-3):
-ArmHandle.dof_names() exposes the full articulation, while
-get_joint_positions/set_joint_targets/is_moving/stop operate on exactly the
-arm's named joints, selected by index rather than position - so attaching a
-gripper later cannot shift or truncate arm joints.
-
-Also covers the Isaac-side ARM-12/ARM-15/ARM-16/XC-4 physics-callback settle,
-post-reset re-tune, and handle release, against a fake articulation/world
-harness (no real Isaac Sim needed)."""
-
 import asyncio
 import threading
 import time
@@ -16,15 +6,15 @@ import pytest
 from viam.proto.app.robot import ComponentConfig
 from viam.utils import dict_to_struct
 
-from isaac_module.models.arm import IsaacArm
-from isaac_module.sim_manager import (
+from isaac_module.handles.arm import (
     SETTLE_WINDOW_STEPS,
     STALL_NO_PROGRESS_STEPS,
-    UR_JOINT_NAMES,
     IsaacArmHandle,
     SettleOutcome,
     resolve_joint_indices,
 )
+from isaac_module.models.arm import IsaacArm
+from isaac_module.sim_manager import UR_JOINT_NAMES
 
 SETTLE_POLLS = 200
 SETTLE_POLL_S = 0.01
@@ -124,7 +114,7 @@ def test_resolve_joint_indices_raises_naming_missing_joint():
 
 
 # ----------------------------------------------------------------------
-# ARM-12/ARM-15/ARM-16/XC-4: IsaacArmHandle against a fake articulation/world
+# IsaacArmHandle against a fake articulation/world
 # (no real Isaac Sim). FakeSim.run(fn) calls fn() inline - the tests drive
 # the registered physics callback directly from a helper thread to simulate
 # the sim thread stepping while wait_for_settle blocks the caller thread.
@@ -154,6 +144,28 @@ class FakeArticulationController:
         self.set_gains_calls.append((kps, kds))
 
 
+class FakeArticulationView:
+    """Stands in for SingleArticulation._articulation_view, the batched view
+    5.0 actually defines set_max_joint_velocities / get_joint_max_velocities
+    on (SingleArticulation itself has neither)."""
+
+    def __init__(self, dof_count: int, authored_max: float = 5.0) -> None:
+        self.max_velocities = [authored_max] * dof_count
+        self.set_calls: list[tuple[list[float], list[int] | None]] = []
+        self.get_calls: list[list[int] | None] = []
+
+    def set_max_joint_velocities(self, velocities, joint_indices=None) -> None:
+        indices = range(len(self.max_velocities)) if joint_indices is None else joint_indices
+        for i, v in zip(indices, velocities, strict=True):
+            self.max_velocities[i] = float(v)
+        self.set_calls.append(([float(v) for v in velocities], joint_indices))
+
+    def get_joint_max_velocities(self, joint_indices=None):
+        indices = range(len(self.max_velocities)) if joint_indices is None else joint_indices
+        self.get_calls.append(joint_indices)
+        return [self.max_velocities[i] for i in indices]
+
+
 class FakeArticulation:
     def __init__(self, name: str, dof_names: list[str]) -> None:
         self.name = name
@@ -165,6 +177,7 @@ class FakeArticulation:
         self.solver_iteration_calls: list[int] = []
         self.applied_actions: list[FakeArticulationAction] = []
         self.state_write_log: list[tuple[str, list[float]]] = []
+        self._articulation_view = FakeArticulationView(dof_count)
 
     def get_articulation_controller(self):
         return self._controller
@@ -259,6 +272,20 @@ def _wait_until(predicate, polls: int = CALLBACK_WAIT_POLLS, poll_s: float = CAL
     return predicate()
 
 
+def test_isaac_velocity_cap_is_set_and_restored_via_the_articulation_view():
+    handle, art, _sim = _make_handle()
+    view = art._articulation_view
+
+    handle.set_joint_targets([0.2, 0.3], max_vel_rad_s=1.0)
+
+    assert view.set_calls[-1] == ([1.0, 1.0], None)
+    assert view.get_calls  # the pre-cap authored limits were read to snapshot for restore
+
+    handle.set_joint_targets([0.4, 0.5])  # max_vel_rad_s=None -> restore
+
+    assert view.set_calls[-1] == ([5.0, 5.0], None)
+
+
 def test_isaac_settle_reaches_after_window_not_before():
     handle, art, sim = _make_handle()
     handle._targets = [0.0, 0.0]
@@ -334,7 +361,7 @@ def test_isaac_settle_times_out_while_still_converging():
 
 
 def test_isaac_arm_post_reset_reapplies_solver_gains_and_targets():
-    handle, art, sim = _make_handle()
+    handle, art, _sim = _make_handle()
     handle._solver_iterations = 64
     handle._gains = ([2.0, 2.0], [3.0, 3.0])
     handle._targets = [0.4, 0.5]
@@ -354,7 +381,7 @@ def test_isaac_arm_post_reset_teleports_joints_to_targets_before_the_hold_action
     scene (the scatter_cell rescale-reset "freak out"). post_reset must
     restore the joint STATE to the targets, zero the velocities, and only
     then apply the hold action."""
-    handle, art, sim = _make_handle()
+    handle, art, _sim = _make_handle()
     handle._targets = [0.4, 0.5]
     # the reset's damage: default pose, residual velocity
     art.positions = [0.0, 0.0]
@@ -384,7 +411,7 @@ def test_isaac_arm_release_removes_settle_callback_and_registry_entry():
 
 
 def test_mock_is_moving_true_while_stalled_and_false_after_stop():
-    """ARM-12 / R-7: IsMoving unifies the two "arrived" notions. A stalled arm
+    """IsMoving unifies the two "arrived" notions. A stalled arm
     (velocity ~0 but commanded != measured) still reports moving; stop()
     re-targets the current position so both terms agree and it reports still."""
     from isaac_module.sim_manager import MockArmHandle, SettleOutcome
@@ -416,7 +443,7 @@ def test_replace_articulation_retakes_gains_and_dofs_from_the_new_topology():
 
 
 def test_isaac_settle_reaches_despite_residual_velocity_jitter():
-    """GPU run 11: a 12-DOF PhysX articulation idles with ~1e-3 rad/s of jitter
+    """A 12-DOF PhysX articulation idles with ~1e-3 rad/s of jitter
     and never reads exactly still. Holding within tolerance for the window IS
     settled - a velocity-gated REACHED would time out forever."""
     handle, art, sim = _make_handle()
@@ -450,7 +477,7 @@ def test_isaac_is_moving_ignores_jitter_but_not_motion():
 
 
 def test_isaac_settle_stalls_on_no_progress_even_while_vibrating():
-    """GPU run 15: pinned against a block the joints vibrate above VEL_EPS and
+    """Pinned against a block the joints vibrate above VEL_EPS and
     never read still, so the old stall rule let the arm push for the whole
     deadline. A worst-error that stops improving is a stall too."""
     handle, art, sim = _make_handle()

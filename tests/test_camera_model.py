@@ -1,6 +1,3 @@
-"""Contract tests for IsaacCamera against the mock sim backend (FINDINGS
-CAM-5, CAM-6, CAM-8, CAM-15, CAM-16, CAM-18)."""
-
 import asyncio
 
 import numpy as np
@@ -11,10 +8,9 @@ from viam.media.video import CameraMimeType, ViamImage
 from viam.proto.app.robot import ComponentConfig
 from viam.utils import dict_to_struct
 
-from isaac_module.camera_base import NoFrameYetError
 from isaac_module.encoding import intrinsics_from_fov
 from isaac_module.errors import SimTimeoutError
-from isaac_module.mock_camera import MOCK_RED_BLOCK_CENTER_M, RED_BLOCK_RGB
+from isaac_module.handles.camera import MOCK_RED_BLOCK_CENTER_M, RED_BLOCK_RGB, NoFrameYetError
 from isaac_module.models.camera import IsaacCamera
 
 
@@ -118,7 +114,7 @@ def test_depth_image_round_trip(world):
         assert len(arr) == 480
         assert len(arr[0]) == 848
 
-        # block centre pixel: derive from the handle's intrinsics + mock's
+        # block center pixel: derive from the handle's intrinsics + mock's
         # known offsets (BLOCK_LEFT/RIGHT/TOP/BOTTOM_OFFSET_PX in mock_camera)
         # rather than hardcoding indices twice; use the frame's rgb mask.
         frame = cam._h().get_frame()
@@ -156,8 +152,8 @@ def test_point_cloud_red_cluster_centroid(world):
         red_points = payload[payload["rgb"] == packed]
         assert len(red_points) == 8000
 
-        # a centred block would read (0, 0, 0.40); this is deliberately
-        # off-centre so a sign/axis bug in back-projection is caught.
+        # a centered block would read (0, 0, 0.40); this is deliberately
+        # off-center so a sign/axis bug in back-projection is caught.
         centroid = (
             float(np.mean(red_points["x"].astype(np.float64))),
             float(np.mean(red_points["y"].astype(np.float64))),
@@ -213,8 +209,9 @@ def test_do_command_sample_color(world):
         with pytest.raises(ValueError):
             await cam.do_command({"command": "sample_color", "region": [0, 0, 10000, 10000]})
 
-        with pytest.raises(ValueError):
+        with pytest.raises(ViamGRPCError) as excinfo:
             await cam.do_command({"command": "bogus"})
+        assert excinfo.value.grpc_code == Status.INVALID_ARGUMENT
 
     asyncio.run(scenario())
 
@@ -273,10 +270,15 @@ def test_validate_config_accepts_wrist_cam_attrs():
     deps, _ = IsaacCamera.validate_config(
         _config(
             "wrist-cam",
-            {"world": "isaac-world", "depth": True, "image_format": "png", "frequency": 30},
+            {"world": "isaac-world", "depth": True, "image_format": "png"},
         )
     )
     assert list(deps) == ["isaac-world"]
+
+
+def test_validate_config_rejects_frequency():
+    with pytest.raises(ValueError, match="rateLimitFrequency"):
+        IsaacCamera.validate_config(_config("c", {"world": "isaac-world", "frequency": 30}))
 
 
 def test_frame_derived_orientation_is_marked_ros_axes(world):

@@ -87,10 +87,10 @@ class _FakePhysxMaterialAPI:
         self.prim = prim
         self.combine_mode: Any = None
 
-    def CreateFrictionCombineModeAttr(self):  # noqa: N802 - matches pxr API naming
+    def CreateFrictionCombineModeAttr(self):  # matches pxr API naming
         return self
 
-    def Set(self, value):  # noqa: N802 - matches pxr API naming
+    def Set(self, value):  # matches pxr API naming
         self.combine_mode = value
 
 
@@ -98,7 +98,7 @@ class _FakePhysxSchemaAPI:
     def __init__(self):
         self.applied: list[_FakePhysxMaterialAPI] = []
 
-    def Apply(self, prim):  # noqa: N802 - matches pxr API naming
+    def Apply(self, prim):  # matches pxr API naming
         api = _FakePhysxMaterialAPI(prim)
         self.applied.append(api)
         return api

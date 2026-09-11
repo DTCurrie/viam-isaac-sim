@@ -1,15 +1,3 @@
-"""_create_camera_isaac survives a cold renderer.
-
-Observed on the first boot of a fresh install (GPU bring-up, 2026-09-02):
-``Camera.initialize()`` died with
-``KeyError('/Render/PostProcess/SDGPipeline/Replicator_01_LdrColorSDhostPtr')``
-because the render product's SDG pipeline node only materializes after render
-ticks, and the failed create left the broken render product behind, so every
-5 s resource rebuild failed identically. initialize() is therefore retried
-with render ticks stepped between attempts, and a camera that never
-initializes is destroyed so the next build starts clean.
-"""
-
 import pytest
 
 from isaac_module.errors import CameraInitError

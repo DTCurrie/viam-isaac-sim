@@ -1,7 +1,3 @@
-"""End-to-end test of the module in mock mode: boots the SimManager on a
-background thread (standing in for the process main thread) and exercises
-the viam component models against it."""
-
 import asyncio
 import math
 
@@ -60,7 +56,7 @@ def test_arm_moves(world):
         await arm.move_to_joint_positions(target)
         # move_to_joint_positions returns once within 0.5 deg of the target while the
         # mock's is_moving() uses a 1e-9 tolerance, so the last few ms of travel can
-        # still read as "moving" (FINDINGS R-7; unified in ARM-12, phase 3). Assert
+        # still read as "moving". Assert
         # that the arm settles, bounded, rather than that it is instantly still.
         for _ in range(SETTLE_POLLS):
             if not await arm.is_moving():
@@ -70,8 +66,8 @@ def test_arm_moves(world):
         end = await arm.get_joint_positions()
         assert end.values == pytest.approx([10, -20, 30, 0, 5, -5], abs=0.5)
 
-        # the mock's fixed end pose is defined in the arm base frame
-        # (FINDINGS ARM-10), not world - see test_arm_frames.py
+        # the mock's fixed end pose is defined in the arm base frame,
+        # not world - see test_arm_frames.py
         pose = await arm.get_end_position()
         assert pose.x == pytest.approx(300.0)
         assert pose.o_z == pytest.approx(1.0)

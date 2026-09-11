@@ -1,14 +1,13 @@
-"""Phase-4 GPU checklist probes for the running world (R-27, OQ-9, OQ-10, OQ-15,
-SCN-7): scene-randomization determinism, sim-time/wall-time step rate, runtime
-spawn/teleport/reset without a Kit restart, and the two items phase 4 marks not
-applicable.
+"""GPU checklist probes for the running world: scene-randomization
+determinism, sim-time/wall-time step rate, and runtime spawn/teleport/reset
+without a Kit restart.
 
-Runs against either a live Viam machine or, with ``--mock``, an in-process mock
-boot of the module - the item runners below only need something that duck-types
-the world component's ``do_command`` (a ``Generic`` client in real mode, the
-``IsaacWorld`` model itself in mock). Depends only on the stdlib and viam-sdk;
-``isaac_module`` is imported lazily, only inside the ``--mock`` code path, same
-as ``examples/pick_red_block.py``.
+Runs against either a live Viam machine or, with ``--mock``, an in-process
+mock boot of the module. The checks below only need something that
+duck-types the world component's ``do_command`` (a ``Generic`` client in
+real mode, the ``IsaacWorld`` model itself in mock). Depends only on the
+stdlib and viam-sdk. ``isaac_module`` is imported lazily, only inside the
+``--mock`` code path, same as ``examples/pick_red_block.py``.
 
 Usage (real machine)::
 
@@ -19,10 +18,9 @@ Usage (in-process mock, no GPU, no running machine)::
 
     PYTHONPATH=src python examples/gpu_checklist_world.py --mock
 
-Prints one report line per item plus the raw observations to paste into
-``.claude/plans/pick-place-mvp/phase-4-*.md`` Notes. The pure/async helpers at
-the top take a duck-typed world so they are unit-tested on a laptop against the
-mock world (see tests/test_gpu_checklist_world.py).
+Prints one report line per check plus the raw observations. The pure/async
+helpers at the top take a duck-typed world so they are unit-tested on a
+laptop against the mock world (see tests/test_gpu_checklist_world.py).
 """
 
 from __future__ import annotations
@@ -42,20 +40,22 @@ DEFAULT_PROP_NAME = "gpu_checklist_world_cube"
 DEFAULT_CUBE_SIZE_M = 0.05
 DEFAULT_SPAWN_POSITION_MM = (500.0, 0.0, 100.0)
 DEFAULT_TELEPORT_POSITION_MM = (700.0, 200.0, 150.0)
-# x/y scatter rectangle for item 1; the z here is only the no-props fallback -
-# item1_scene_defaults replaces it with the live face height the blocks rest on
+# x/y scatter rectangle for the randomization-determinism check. The z here
+# is only the no-props fallback: scene_randomization_defaults replaces it
+# with the live face height the blocks rest on.
 DEFAULT_RANDOMIZE_REGION_MM = ((300.0, -300.0, 50.0), (900.0, 300.0, 50.0))
-DEFAULT_SEED_A = 1
-DEFAULT_SEED_B = 2
+DEFAULT_DETERMINISM_SEED = 1
+DEFAULT_ALTERNATE_SEED = 2
 PICK_COMMAND_TEMPLATE = (
     "python examples/pick_red_block.py --address <machine-address> "
     "--api-key <key> --api-key-id <key-id> --randomize-seed {seed}"
 )
 
-ITEM4_NOTE = "not applicable (DEC-5 cube table)"
-ITEM5_NOTE = "not applicable (XC-9 deferred)"
+MESH_TABLE_NOT_APPLICABLE_NOTE = "not applicable: the scene uses a cube table, not a mesh table"
+EXECUTOR_CHECK_DEFERRED_NOTE = "not applicable: the action executor check was deferred"
 
-# prim poses round-trip through float32; run 3 showed ~0.012 mm of noise
+# prim poses round-trip through float32. One measured run of the pose read
+# showed about 0.012 mm of noise from that alone.
 POSE_TOLERANCE_MM = 0.1
 XY_TOLERANCE_MM = 0.5
 TUMBLE_AXIS_TOLERANCE = 0.02
@@ -66,9 +66,9 @@ def resting_at_commanded(
     pose_mm: Mapping[str, float] | None, commanded_mm: Sequence[float]
 ) -> bool:
     """True when a prop sits where a pose command put it, allowing for the
-    free fall a playing sim adds between the command and the read (GPU runs
-    3-4): x/y at the commanded spot, z no higher than commanded, and no
-    tumble (orientation still identity)."""
+    free fall a playing sim adds between the command and the read: x/y at
+    the commanded spot, z no higher than commanded, and no tumble
+    (orientation still identity)."""
     if pose_mm is None:
         return False
     if abs(pose_mm["x"] - commanded_mm[0]) > XY_TOLERANCE_MM:
@@ -88,14 +88,10 @@ class WorldApi(Protocol):
     async def do_command(self, command: Mapping[str, Any]) -> Mapping[str, Any]: ...
 
 
-# ----------------------------------------------------------------------
 # pure helpers
-# ----------------------------------------------------------------------
 
 
-def prop_pose_mm(
-    geometries: Sequence[Mapping[str, Any]], name: str
-) -> Mapping[str, float] | None:
+def prop_pose_mm(geometries: Sequence[Mapping[str, Any]], name: str) -> Mapping[str, float] | None:
     """The ``pose_in_world_mm`` entry for ``name`` out of a ``prop_geometries``
     response's ``geometries`` list, or None when it is not (yet) registered."""
     for geometry in geometries:
@@ -110,18 +106,17 @@ def pose_close(
     return all(abs(a[axis] - b[axis]) <= tolerance_mm for axis in ("x", "y", "z"))
 
 
-# ----------------------------------------------------------------------
-# item 1 (R-27 half, drives examples/pick_red_block.py --randomize-seed)
-# ----------------------------------------------------------------------
+# scene-randomization determinism (drives examples/pick_red_block.py --randomize-seed)
 
 
-def item1_scene_defaults(
+def scene_randomization_defaults(
     geometries: Sequence[Mapping[str, Any]],
 ) -> tuple[list[str], tuple[list[float], list[float]]]:
-    """Item 1 inputs derived from the live scene: every movable prop with a
-    known box, scattered over DEFAULT_RANDOMIZE_REGION_MM's x/y rectangle at
-    the height the movable props actually rest on (min over their box
-    bottoms). The current fragment has no table, so that face is the floor."""
+    """Randomization-determinism inputs derived from the live scene: every
+    movable prop with a known box, scattered over DEFAULT_RANDOMIZE_REGION_MM's
+    x/y rectangle at the height the movable props actually rest on (min over
+    their box bottoms). The current fragment has no table, so that face is
+    the floor."""
     movable = [g for g in geometries if not g["fixed"] and any(d > 0 for d in g["box_dims_mm"])]
     names = [g["name"] for g in movable]
     (x0, y0, z0), (x1, y1, z1) = DEFAULT_RANDOMIZE_REGION_MM
@@ -131,18 +126,18 @@ def item1_scene_defaults(
     return names, ([x0, y0, face_z], [x1, y1, face_z])
 
 
-async def run_item1(
+async def run_randomize_props_determinism(
     world: WorldApi,
     names: Sequence[str],
     region_mm: tuple[Sequence[float], Sequence[float]] = DEFAULT_RANDOMIZE_REGION_MM,
-    seed_a: int = DEFAULT_SEED_A,
-    seed_b: int = DEFAULT_SEED_B,
+    seed_a: int = DEFAULT_DETERMINISM_SEED,
+    seed_b: int = DEFAULT_ALTERNATE_SEED,
 ) -> dict[str, Any]:
-    """Item 1's scene half: randomize twice with ``seed_a`` and assert the
-    positions are identical, then once more with ``seed_b`` to report a
-    different layout. ``prop_geometries`` is captured before and after so a
-    human can see the props actually moved. The pick half - two consecutive
-    picks against the re-randomized scene - is driven separately by
+    """Randomizes twice with ``seed_a`` and asserts the positions are
+    identical, then once more with ``seed_b`` to report a different layout.
+    ``prop_geometries`` is captured before and after so a human can see the
+    props actually moved. The pick half, two consecutive picks against the
+    re-randomized scene, is driven separately by
     ``examples/pick_red_block.py --randomize-seed``."""
     before = (await world.do_command({"command": "prop_geometries"}))["geometries"]
 
@@ -172,9 +167,7 @@ async def run_item1(
     }
 
 
-# ----------------------------------------------------------------------
-# item 2 (OQ-10: step-rate measurement)
-# ----------------------------------------------------------------------
+# step-rate measurement
 
 
 async def _sample_step_rate(
@@ -202,27 +195,26 @@ async def _sample_step_rate(
     return {"wall_s": wall_s, "sim_delta_s": sim_delta_s, "sim_time_ratio": ratio}
 
 
-async def run_item2(
+async def run_step_rate_measurement(
     world: WorldApi,
     window_s: float = DEFAULT_WINDOW_S,
     camera_activity: Mapping[str, Callable[[], Awaitable[None]]] | None = None,
 ) -> dict[str, Any]:
-    """OQ-10: baseline sim-time/wall-time ratio over ``window_s``, then the
-    same measurement again once per entry in ``camera_activity`` (e.g. "rgb"
+    """Baseline sim-time/wall-time ratio over ``window_s``, then the same
+    measurement again once per entry in ``camera_activity`` (e.g. "rgb"
     grabbing frames from both cameras, "rgb_depth" grabbing depth too) so
-    depth-on vs depth-off cost is visible. Reports numbers; decides nothing."""
+    depth-on vs depth-off cost is visible. Reports numbers. Decides
+    nothing."""
     report: dict[str, Any] = {"baseline": await _sample_step_rate(world, window_s)}
     for label, activity in (camera_activity or {}).items():
         report[label] = await _sample_step_rate(world, window_s, activity)
     return report
 
 
-# ----------------------------------------------------------------------
-# item 3 (R-27: spawn_prop + set_prop_pose at runtime, no Kit restart)
-# ----------------------------------------------------------------------
+# spawn_prop + set_prop_pose at runtime, no Kit restart
 
 
-async def run_item3(
+async def run_spawn_teleport_reset(
     world: WorldApi,
     prop_name: str = DEFAULT_PROP_NAME,
     spawn_position_mm: Sequence[float] = DEFAULT_SPAWN_POSITION_MM,
@@ -231,8 +223,8 @@ async def run_item3(
 ) -> dict[str, Any]:
     """Spawn a uniquely-named cube via DoCommand, verify it appears in
     ``prop_geometries``, teleport it with ``set_prop_pose`` and verify the
-    pose moved, then ``reset`` and verify it returned to its spawn pose -
-    all without a Kit restart."""
+    pose moved, then ``reset`` and verify it returned to its spawn pose, all
+    without a Kit restart."""
     spawn_position_m = [value / MM_PER_M for value in spawn_position_mm]
     try:
         await world.do_command(
@@ -249,7 +241,7 @@ async def run_item3(
         reused_existing = False
     except Exception as error:
         # a second checklist run against the same Kit session finds the prop
-        # already in the scene; teleport/reset checks still mean the same
+        # already in the scene. Teleport/reset checks still mean the same
         if "already exists" not in str(error):
             raise
         reused_existing = True
@@ -279,9 +271,7 @@ async def run_item3(
     }
 
 
-# ----------------------------------------------------------------------
-# soft-reset demo (SCN-7 on real hardware)
-# ----------------------------------------------------------------------
+# soft-reset demo
 
 
 async def run_soft_reset_demo(
@@ -290,11 +280,11 @@ async def run_soft_reset_demo(
     teleport_position_mm: Sequence[float] = DEFAULT_TELEPORT_POSITION_MM,
     spawn_position_mm: Sequence[float] = DEFAULT_SPAWN_POSITION_MM,
 ) -> dict[str, Any]:
-    """``set_prop_pose`` then ``reset {"soft": true}``. SCN-7: a soft reset is
-    pose-only and restores the SPAWN pose - checked with resting_at_commanded,
-    since a playing sim drops the cube between each command and its read. A
-    paused sim is no alternative: pose writes are not visible to reads until
-    a step happens (GPU run 4)."""
+    """``set_prop_pose`` then ``reset {"soft": true}``. A soft reset is
+    pose-only and restores the spawn pose, checked with
+    ``resting_at_commanded`` since a playing sim drops the cube between each
+    command and its read. A paused sim is no alternative: pose writes are
+    not visible to reads until a step happens."""
 
     async def _current_pose() -> Mapping[str, float] | None:
         geometries = (await world.do_command({"command": "prop_geometries"}))["geometries"]
@@ -323,29 +313,23 @@ async def run_soft_reset_demo(
     }
 
 
-# ----------------------------------------------------------------------
-# item 4 / item 5 (not applicable this phase)
-# ----------------------------------------------------------------------
+# checks this phase marks not applicable
 
 
-def run_item4() -> str:
-    """OQ-9 mesh-table check: not applicable under DEC-5 (cube table)."""
-    return ITEM4_NOTE
+def run_mesh_table_check() -> str:
+    return MESH_TABLE_NOT_APPLICABLE_NOTE
 
 
-def run_item5() -> str:
-    """OQ-15 XC-9 executor check: XC-9 was deferred this phase."""
-    return ITEM5_NOTE
+def run_executor_check() -> str:
+    return EXECUTOR_CHECK_DEFERRED_NOTE
 
 
-# ----------------------------------------------------------------------
-# real/mock connection + CLI
-# ----------------------------------------------------------------------
+# real/mock connection and CLI
 
 
 async def _camera_frame_activity(camera: Any, *, depth: bool) -> None:
-    # get_images is the API the module serves (and phase 2 verified on the GPU);
-    # CameraClient has no get_image in viam-sdk 0.80
+    # get_images is the API the module serves, verified against a running
+    # camera on the GPU. CameraClient has no get_image in viam-sdk 0.80
     if depth:
         await camera.get_images()
     else:
@@ -365,28 +349,30 @@ def _ensure_mock_sim_booted() -> Any:
     return manager
 
 
-async def _run(world: WorldApi, camera_activity: Mapping[str, Callable[[], Awaitable[None]]]) -> None:
-    print("item 1 (R-27 scene half - determinism, prop_geometries before/after):")
+async def _run(
+    world: WorldApi, camera_activity: Mapping[str, Callable[[], Awaitable[None]]]
+) -> None:
+    print("scene-randomization determinism (prop_geometries before/after):")
     scene = (await world.do_command({"command": "prop_geometries"}))["geometries"]
-    item1_names, item1_region = item1_scene_defaults(scene)
-    if item1_names:
-        item1 = await run_item1(world, names=item1_names, region_mm=item1_region)
-        print(f"  {json.dumps(item1, default=str, sort_keys=True)}")
+    names, region = scene_randomization_defaults(scene)
+    if names:
+        determinism = await run_randomize_props_determinism(world, names=names, region_mm=region)
+        print(f"  {json.dumps(determinism, default=str, sort_keys=True)}")
     else:
         print("  skipped: no movable props in the scene (configure at least one non-fixed prop)")
 
-    print(f"item 2 (OQ-10 step-rate over {DEFAULT_WINDOW_S:.0f} s windows):")
-    item2 = await run_item2(world, camera_activity=camera_activity)
-    print(f"  {json.dumps(item2, default=str, sort_keys=True)}")
+    print(f"step-rate measurement over {DEFAULT_WINDOW_S:.0f} s windows:")
+    step_rate = await run_step_rate_measurement(world, camera_activity=camera_activity)
+    print(f"  {json.dumps(step_rate, default=str, sort_keys=True)}")
 
-    print("item 3 (R-27 spawn_prop/set_prop_pose/reset at runtime):")
-    item3 = await run_item3(world)
-    print(f"  {json.dumps(item3, default=str, sort_keys=True)}")
+    print("spawn_prop/set_prop_pose/reset at runtime:")
+    spawn_teleport_reset = await run_spawn_teleport_reset(world)
+    print(f"  {json.dumps(spawn_teleport_reset, default=str, sort_keys=True)}")
 
-    print(f"item 4 (OQ-9 mesh table): {run_item4()}")
-    print(f"item 5 (OQ-15 XC-9 executor): {run_item5()}")
+    print(f"mesh table check: {run_mesh_table_check()}")
+    print(f"executor check: {run_executor_check()}")
 
-    print("soft-reset demo (SCN-7):")
+    print("soft-reset demo:")
     soft_reset = await run_soft_reset_demo(world)
     print(f"  {json.dumps(soft_reset, default=str, sort_keys=True)}")
 
@@ -423,8 +409,9 @@ async def _run_mock(args: argparse.Namespace) -> None:
         return ComponentConfig(name=name, attributes=dict_to_struct(attrs))
 
     _ensure_mock_sim_booted()
-    world = IsaacWorld.new(config("gpu-checklist-phase4-world", {"mock": True}), {})
-    # the mock world boots without props; give item 1 two movable blocks
+    world = IsaacWorld.new(config("gpu-checklist-mock-world", {"mock": True}), {})
+    # the mock world boots without props. Give the randomization-determinism
+    # check two movable blocks
     for name, y_m in (("mock_block_a", 0.1), ("mock_block_b", -0.1)):
         await world.do_command(
             {
@@ -436,8 +423,8 @@ async def _run_mock(args: argparse.Namespace) -> None:
 
     camera = IsaacCamera.new(
         config(
-            "gpu-checklist-phase4-cam",
-            {"world": "gpu-checklist-phase4-world", "width": 320, "height": 240, "depth": True},
+            "gpu-checklist-mock-cam",
+            {"world": "gpu-checklist-mock-world", "width": 320, "height": 240, "depth": True},
         ),
         {},
     )
@@ -451,7 +438,9 @@ async def _run_mock(args: argparse.Namespace) -> None:
 
 
 def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     parser.add_argument(
         "--mock", action="store_true", help="run in-process against the module's mock backend"
     )
@@ -462,9 +451,9 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     parser.add_argument(
         "--camera",
         default="wrist-cam",
-        help="the camera item 2 grabs RGB/depth load from - the fragment's wrist-cam"
-        " is the depth-enabled one (scene-cam is RGB-only); pass another name for"
-        " other cells, or an empty string to skip camera load",
+        help="the camera the step-rate check grabs RGB/depth load from - the fragment's"
+        " wrist-cam is the depth-enabled one (scene-cam is RGB-only). Pass another name"
+        " for other cells, or an empty string to skip camera load",
     )
     return parser.parse_args(argv)
 

@@ -37,6 +37,20 @@ POOL_NAMES = [
     for index in range(1, cell_layout.POOL_BLOCKS_PER_COLOR + 1)
 ]
 
+# scatter_cell/clear_cell take their names, region and park grid from the
+# DoCommand payload (the world component knows no cell): the conductor
+# builds these from its own copy of cell_layout, and this throwaway handle
+# needs the same values to reproduce the conductor's scatter for a seed.
+NAMES_BY_COLOR = {
+    color: [
+        cell_layout.pool_block_name(color, index)
+        for index in range(1, cell_layout.POOL_BLOCKS_PER_COLOR + 1)
+    ]
+    for color in cell_layout.BLOCK_COLORS
+}
+SCATTER_REGION_M = cell_layout.scatter_region_m()
+PARK_POSITIONS_M = cell_layout.park_positions_m()
+
 
 def _pool_block(name: str) -> dict[str, Any]:
     x, y = cell_layout.park_positions_m()[name]
@@ -59,7 +73,14 @@ def _expected_positions_mm(
     but only when called with the same size_range_m the conductor's default
     size_range_mm ([50, 80], DEFAULT_SIZE_RANGE_MM) converts to (the seeded
     draw order changes once a size range asks it to redraw sizes too)."""
-    result = _mock_world_handle().scatter_cell(seed, size_range_m=(0.05, 0.08), counts=counts)
+    result = _mock_world_handle().scatter_cell(
+        NAMES_BY_COLOR,
+        SCATTER_REGION_M,
+        PARK_POSITIONS_M,
+        seed,
+        size_range_m=(0.05, 0.08),
+        counts=counts,
+    )
     return {name: tuple(v * MM_PER_M for v in pos) for name, pos in result.positions_m.items()}
 
 
@@ -78,8 +99,22 @@ class _MockWorldApi:
             size_range_m = (
                 tuple(v / MM_PER_M for v in size_range_mm) if size_range_mm is not None else None
             )
+            (x0, y0, z0), (x1, y1, z1) = command["region"]
+            region_m = (
+                (x0 / MM_PER_M, y0 / MM_PER_M, z0 / MM_PER_M),
+                (x1 / MM_PER_M, y1 / MM_PER_M, z1 / MM_PER_M),
+            )
+            park_positions_m = {
+                name: (x / MM_PER_M, y / MM_PER_M)
+                for name, (x, y) in command["park_positions_mm"].items()
+            }
             result = self._handle.scatter_cell(
-                command["seed"], size_range_m=size_range_m, counts=command.get("counts")
+                command["names_by_color"],
+                region_m,
+                park_positions_m,
+                command["seed"],
+                size_range_m=size_range_m,
+                counts=command.get("counts"),
             )
             return {
                 "seed": result.seed,
@@ -116,7 +151,11 @@ class _MockWorldApi:
         if cmd == "ignore_props":
             return {"ignored": command.get("names", [])}
         if cmd == "clear_cell":
-            cleared = self._handle.clear_cell()
+            park_positions_m = {
+                name: (x / MM_PER_M, y / MM_PER_M)
+                for name, (x, y) in command["park_positions_mm"].items()
+            }
+            cleared = self._handle.clear_cell(command["names_by_color"], park_positions_m)
             return {"parked": cleared.parked}
         raise ValueError(f"unsupported mock world command: {cmd!r}")
 

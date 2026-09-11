@@ -10,21 +10,23 @@ reads or writes `simulates.json`.
 
 ## The pattern
 
-Simulation is hardware, and this module reaches that goal two ways. One ships now.
+Simulation is hardware. This module reaches that goal two ways.
 
 Substitution: this module's models (arm, camera, gripper, base) implement the same Viam component
 API a real driver serves, backed by Isaac physics and rendering, and stand in for the real driver's
-model in a derived config (see "The switch"). It works today for every asset this module ships and
-needs no driver to change. Parity is its bar: a client cannot tell a sim resource from a real one
-by behavior. [`docs/PARITY.md`](PARITY.md) tracks that method by method and is the ledger.
+model in a derived config (see "The switch"). It works for every asset this module ships and needs no
+driver to change. Parity is its bar: a client cannot tell a sim resource from a real one
+by behavior. [`docs/PARITY.md`](PARITY.md) tracks that method by method and is the ledger. One
+documented deviation stands. The arm API defines `MoveToPosition` as a straight line in
+Cartesian space, and the sim solves IK and drives a joint-space path between the same two
+endpoints.
 
 Integration: a real driver accepts a `world` attribute and sends its own commands to the world
 service over a simulation API instead of to hardware, reusing all of its own logic. That API does
-not exist yet, and no driver in this repo builds it. What this plan keeps ready for it: the world
-component is the one resource that knows it is a sim (see "The one sim-only resource"), our models
-reach it only through the handle interface in `sim_manager.py` (the `create_arm`, `create_camera`,
-and similar methods), and that interface is the surface the simulation API gets cut from, with our
-models as its first clients.
+not exist yet. What keeps the door open: the world component is the one resource that knows it is
+a sim (see "The one sim-only resource"), the models reach it only through the handle interface in
+`src/isaac_module/handles/`, and that interface is the surface a simulation API would be cut from,
+with these models as its first clients.
 
 Everything above the component API, motion, vision, the frame system, data management, clients,
 the app, stays untouched under either pattern. It answers gRPC calls with the same shapes whether
@@ -40,12 +42,7 @@ real entry. The module entry and an `isaac-world` component are added. `name`, `
 `depends_on`, and every service stay byte-identical, so a client script pointed at the sim machine
 runs unchanged. The real config is never touched.
 
-An earlier draft of this contract added a per-resource field that named which world a resource
-should run against and resolved it in place, on the same machine. That field is dropped, because
-the sim machine is a separate machine, produced whole by the resolver rather than edited resource
-by resource.
-
-The example below is the real `pick-arm` entry a user's config carries today, beside the entry the
+The example below is the real `pick-arm` entry from a user's config, beside the entry the
 resolver writes for it in the sim machine's config.
 
 ```json
@@ -91,11 +88,7 @@ the control path a real machine would also run. A pipeline that reads a block's 
 world instead of from the camera has stopped predicting what the real machine would do, because
 the real machine has no such shortcut. The pick pipeline already keeps this rule: it uses vision to
 find a block and a point cloud to measure it, the same as it would against a camera bolted to a
-real arm. This contract makes that a rule for every future pipeline, not just an accident of how
-the pick pipeline happens to be written.
-
-If twin mode is ever built, it is the one inversion of this rule: the real hardware becomes the
-truth and the sim follows it. See "Twin mode" below.
+real arm. That is the rule for every pipeline.
 
 ## The one sim-only resource
 
@@ -106,9 +99,9 @@ running the livestream.
 
 Nothing else in this module ever grows a verb a real component could not have. A sim arm answers
 the same gRPC calls a real arm answers and nothing more. `scatter_cell` and `clear_cell` on the
-world are scenario verbs scoped to the shipped block-sorting cell, not general scene tools, and
-they are recorded debt: they will move out of the world component or generalize later, but they do
-not set a precedent for adding scenario logic to a component that represents a piece of hardware.
+world are scene verbs that take their prop names, region and park grid from the command, so they
+serve any scene. They set no precedent for adding scenario logic to a component that represents a
+piece of hardware.
 
 ## Granularity
 
@@ -120,22 +113,11 @@ the resolver's output is, for that reason, already the sim host.
 Per-resource simulation, hardware in the loop, applies the same resolver to a subset of a
 machine's resources with the sim machine standing in as a remote of the real machine, so
 co-location still holds for whichever resources move there. It stays possible under this contract.
-This plan does not build it.
 
 Integration is what removes the co-location constraint for drivers, once a driver reaches the
 world over the simulation API instead of running inside the module that hosts the world.
 
-Recommendation: machine-level simulation, on a machine created for it.
-
-## Twin mode (deferred)
-
-A sim component that mirrors a real resource which keeps running, so a user can compare real
-hardware and its simulated twin side by side, is a known future ask. It is not in this plan. The
-design and the constraints this contract keeps open for it live in
-[deferred-twin-mode.md](../.claude/plans/sim-platform/deferred-twin-mode.md): a sim component may
-depend on another component of the same API by name, the same asset table that serves
-substitution also serves a twin, and the `world` pointer stays a plain component name in both
-modes.
+The default is machine-level simulation, on a machine created for it.
 
 ## Substitution table
 
@@ -146,15 +128,13 @@ over unchanged.
 
 | Real model | API | Sim model | Template | Carry | Verified |
 |---|---|---|---|---|---|
-| `viam:universal-robots:ur3e` | `rdk:component:arm` | `viam:isaac-sim-devin:arm` | `{"asset": "ur3e"}` | `{}` | yes |
-| `viam:universal-robots:ur5e` | `rdk:component:arm` | `viam:isaac-sim-devin:arm` | `{"asset": "ur5e"}` | `{}` | yes |
-| `viam:universal-robots:ur10` | `rdk:component:arm` | `viam:isaac-sim-devin:arm` | `{"asset": "ur10"}` | `{}` | no |
-| `viam:universal-robots:ur10e` | `rdk:component:arm` | `viam:isaac-sim-devin:arm` | `{"asset": "ur10e"}` | `{}` | no |
-| `viam:universal-robots:ur16e` | `rdk:component:arm` | `viam:isaac-sim-devin:arm` | `{"asset": "ur16e"}` | `{}` | no |
-| `viam:universal-robots:ur20` | `rdk:component:arm` | `viam:isaac-sim-devin:arm` | `{"asset": "ur20"}` | `{}` | yes |
-| `viam:franka:panda` | `rdk:component:arm` | `viam:isaac-sim-devin:arm` | `{"asset": "franka"}` | `{}` | yes |
+| `viam:universal-robots:ur3e` | `rdk:component:arm` | `viam:isaac-sim-devin:arm` | `{"asset": "ur3e"}` | `speed_degs_per_sec` → `max_vel_degs_per_sec` | yes |
+| `viam:universal-robots:ur5e` | `rdk:component:arm` | `viam:isaac-sim-devin:arm` | `{"asset": "ur5e"}` | `speed_degs_per_sec` → `max_vel_degs_per_sec` | yes |
+| `viam:universal-robots:ur7e` | `rdk:component:arm` | `viam:isaac-sim-devin:arm` | `{"asset": "ur7e"}` | `speed_degs_per_sec` → `max_vel_degs_per_sec` | yes |
+| `viam:universal-robots:ur20` | `rdk:component:arm` | `viam:isaac-sim-devin:arm` | `{"asset": "ur20"}` | `speed_degs_per_sec` → `max_vel_degs_per_sec` | yes |
+| `viam:franka:panda` | `rdk:component:arm` | `viam:isaac-sim-devin:arm` | `{"asset": "franka"}` | `{}` | no |
 | `viam:robotiq:2f-grippers` | `rdk:component:gripper` | `viam:isaac-sim-devin:gripper` | `{"asset": "robotiq_2f_85", "arm": "$frame.parent"}` | `{}` | yes |
-| `rdk:builtin:wheeled` | `rdk:component:base` | `viam:isaac-sim-devin:base` | `{"asset": "jetbot"}` | `{}` | yes |
+| `rdk:builtin:wheeled` | `rdk:component:base` | `viam:isaac-sim-devin:base` | `{"asset": "jetbot"}` | `width_mm` → `width_mm`, `wheel_circumference_mm` → `wheel_circumference_mm` | yes |
 | `viam:camera:realsense` | `rdk:component:camera` | `viam:isaac-sim-devin:camera` | `{}` | `width_px` → `width`, `height_px` → `height` | yes |
 | `*` (catch-all) | `*` | `rdk:builtin:fake` | `{}` | `{}` | yes |
 
@@ -166,82 +146,71 @@ A row's `verified: false` means the real model string follows its module's namin
 not confirmed against that module's published manifest or model list on the date recorded in
 `simulates.json`. Ship it, but flag it, rather than guessing silently. A template value starting
 with `$` copies a field off the real resource's own config instead of a literal. The gripper row's
-`"arm": "$frame.parent"` is the only one today: the real gripper entry carries which arm it is
+`"arm": "$frame.parent"` is the only one: the real gripper entry carries which arm it is
 bolted to only as its frame's parent, so the resolver reads that value from the real entry and
 writes it into the sim gripper's attributes.
 
 `carry` is a flat copy from a real attribute name to the sim attribute it becomes, never a
-transform. The camera row is the one row that uses it: a RealSense's `width_px` and `height_px`
-carry unchanged into the sim camera's `width` and `height`. A carry only fires when the real entry
-has the attribute, and every other row's `carry` is empty because nothing on that real driver needs
-to survive the swap this way.
+transform. The camera row carries a RealSense's `width_px` and `height_px` unchanged into the sim
+camera's `width` and `height`. The four UR rows carry `speed_degs_per_sec` into the sim arm's
+`max_vel_degs_per_sec`, so a real speed limit tuned in degrees per second still applies after the
+swap. The wheeled row carries `width_mm` and `wheel_circumference_mm` into the sim base's
+attributes of the same names, which derive the sim's wheel geometry in meters, since a flat copy
+cannot do the mm-to-m conversion itself. A carry only fires when the real entry has the attribute,
+and every other row's `carry` is empty because nothing on that real driver needs to survive the
+swap this way.
 
-Every row serves two futures with one asset name. Today it tells the resolver what to swap in for
-substitution. If twin mode is built, the same asset tells a twin component what to spawn to mirror
-the real resource, so a row never needs to be forked between the two modes.
+Every row names one asset, and that name is what the resolver swaps in for substitution.
 
-## Owned elsewhere
+## Scope
 
-Honoring a real config by producing its sim twin is not this module's job to run automatically. It
-can be an app-side button, or a viam-server flag, that reproduces what the resolver in this repo
-does, and this contract does not decide which. Also owned elsewhere: the simulation API protos
-that "The pattern" describes for integration, and every driver's work to adopt them, provisioning
-the GPU host beyond what this repo's create-sim-machine script covers, and the network transport a
-remote-sim path would need.
+Producing a sim machine from a real config is a tool in this repo, `tools/simulate_config.py`, not
+something the module runs on its own. An app-side flow or a viam-server flag could reproduce what
+the resolver does. The simulation API protos that "The pattern" describes for integration, each
+driver's work to adopt them, GPU host provisioning beyond `provisioning/`, and the network transport
+a remote-sim path would need are all outside this module.
 
-What that other work can rely on from this module: the model strings `viam:isaac-sim-devin:*` for
-as long as the module carries the suffix, `simulates.json` as the machine-readable substitution
-table, API parity tracked in `docs/PARITY.md` once a later phase
-writes it, the `isaac-sim-world-devin` fragment as the one place a config gains `isaac-world`, and the
-resolver in this repo as the reference behavior for how a real config becomes a sim machine's
-config.
+Four things here are stable for that other work to rely on. The model strings
+`viam:isaac-sim-devin:*`. `simulates.json`, the machine-readable substitution table, with
+[`PARITY.md`](PARITY.md) tracking API parity method by method. The `isaac-sim-world-devin` fragment,
+the one place a config gains `isaac-world`. And the resolver, the reference behavior for how a real
+config becomes a sim machine's config.
 
-## Open questions
+## Row notes
 
-**Where the simulation API protos for integration will live.** Default: drafted from the handle
-interface in `sim_manager.py` in this repo, once the first driver wants to integrate rather than
-substitute.
+**`viam:franka:panda` is flagged `verified: false` for a capability gap.** The model triple is
+confirmed against `viam-modules/viam-franka-arm`'s `meta.json`, but that module ships no kinematics
+file the `franka` asset could carry, so a resolved Franka arm cannot answer `GetKinematics`,
+`GetEndPosition` or `MoveToPosition`. The row ships anyway, flagged, rather than dropping simulation
+of a supported arm.
 
-**How two worlds on one machine are named.** Default: one world component per module process.
-Another simulator's module names its own world component under its own convention, and
-`isaac-world` is this one's.
+**`ur7e` has no Isaac Sim 5.0 USD of its own.** The assets root's `UniversalRobots` folder lists
+`ur10`, `ur10e`, `ur16e`, `ur20`, `ur3`, `ur30`, `ur3e`, `ur5` and `ur5e`. The `ur7e` asset spawns
+the `ur5e` mesh as a geometry stand-in, paired with the real `ur7e` kinematics from
+`viam-modules/universal-robots`, so `MoveToPosition` and joint limits are the `ur7e`'s even though
+the arm looks like a `ur5e`.
 
-**The `ur10`, `ur10e`, and `ur16e` real model strings are unverified.** They follow the naming
-pattern of `viam-modules/universal-robots`, but that module's manifest lists only `ur3e`, `ur5e`,
-`ur7e`, and `ur20`. Default: ship the rows anyway, flagged `verified: false` in `simulates.json`,
-rather than omitting arms this module can otherwise simulate.
-
-**A wheeled base's motors have no sim row.** `simulates.json`'s `wheeled` row swaps the base, but a
-jetbot is a wheeled base built over two motors, and no motor row exists to swap alongside it.
-Default: the motors become placeholder generic components through the catch-all row, visible in the
-config as the thing to remove or replace with `fake` motors.
+**A wheeled base's motors have no sim row.** The `wheeled` row swaps the base, but a jetbot is a
+wheeled base built over two motors, and no motor row exists. The motors become placeholder
+`rdk:builtin:fake` motors through the catch-all row, visible in the config as the thing to remove
+or replace.
 
 **The catch-all row turns unknown hardware into a placeholder.** A hardware component with no row
-becomes a generic component on `rdk:builtin:fake`, keeping its name, frame and `depends_on` and
-carrying no attributes, so the sim machine's config loads and the gap is visible in the app rather
-than failing the resolver. It is the one row where the API changes. Default: placeholder, with
-`--allow-unmatched` keeping the real entry for anyone who wants the failure to show at
-construction instead.
+keeps its own api and is pointed at `rdk:builtin:fake`, keeping its name, frame and `depends_on`
+and carrying no attributes, so the sim machine's config loads and the gap is visible in the app.
+`pose_tracker` is the one api that changes, to `rdk:component:generic`, since no fake
+`pose_tracker` model exists. `--allow-unmatched` keeps the real entry instead, for anyone who wants
+the failure to show at construction. A real driver on `rdk:component:generic` is not treated as
+hardware, because the world component itself is generic: it keeps its real model, and a user who
+wants it simulated writes that row by hand.
 
-**The RealSense row keeps the frame and resolution and drops the real optics.** The resolved sim
-camera keeps the real camera's frame and carried resolution so it appears in the same place at the
-same size, and a `depth` sensor in the RealSense `sensors` list becomes `depth: true`, but the lens
-takes the sim model's defaults. Default: sim optics, correct placement and resolution, mismatched
-field of view.
+**The RealSense row keeps the frame and resolution and drops the real optics.** The sim camera
+keeps the real camera's frame and carried resolution, and a `depth` sensor in the RealSense
+`sensors` list (or an absent list, the driver's default) becomes `depth: true`, but the lens takes
+the sim model's defaults, so the field of view differs.
 
-**The `$frame.parent` reference syntax in templates is the only reference form today.** It is
-enough for the one row that needs it, the gripper's arm. Default: keep it as the only reference
-form until a second template needs a different field, rather than designing a general reference
-syntax against one use.
-
-**Whether the conductor service also defaults its world attribute to `isaac-world`.** The
-conductor is not a Viam component API, it is this module's own orchestration service, but it
-points at a world the same way every other model does. Default: yes, for symmetry with every other
-model's default.
-
-An earlier draft of this contract left open whether the sim machine and the real machine were the
-same machine or two separate ones. That question is settled: the sim machine is a second machine,
-produced by the resolver and never the machine the real config was written for.
+**`$frame.parent` is the only template reference form.** It serves the one row that needs it, the
+gripper's arm, and a second reference form waits for a second template that needs one.
 
 ## Trying it
 

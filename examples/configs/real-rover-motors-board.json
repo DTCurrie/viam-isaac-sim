@@ -1,0 +1,42 @@
+{
+  "components": [
+    {
+      "name": "rover-base",
+      "api": "rdk:component:base",
+      "model": "acme:rover:treads",
+      "frame": {
+        "parent": "world"
+      },
+      "attributes": {
+        "left": ["left-motor"],
+        "right": ["right-motor"]
+      }
+    },
+    {
+      "name": "left-motor",
+      "api": "rdk:component:motor",
+      "model": "acme:motors:brushless",
+      "attributes": {
+        "max_rpm": 300,
+        "pins": { "a": 11, "b": 12, "pwm": 13 }
+      }
+    },
+    {
+      "name": "right-motor",
+      "api": "rdk:component:motor",
+      "model": "acme:motors:brushless",
+      "attributes": {
+        "max_rpm": 300,
+        "pins": { "a": 15, "b": 16, "pwm": 18 }
+      }
+    },
+    {
+      "name": "power-board",
+      "api": "rdk:component:board",
+      "model": "acme:boards:mini",
+      "attributes": {
+        "i2cs": [{ "name": "bus0", "bus": "1" }]
+      }
+    }
+  ]
+}

@@ -22,7 +22,7 @@ def test_identity_quat():
 def test_flip_about_x():
     # 180 deg about X: z-axis points down
     q = quat_from_axis_angle((1, 0, 0), math.pi)
-    ox, oy, oz, theta = quat_to_ov(q)
+    ox, oy, oz, _theta = quat_to_ov(q)
     assert (ox, oy, oz) == pytest.approx((0.0, 0.0, -1.0), abs=1e-9)
 
 

@@ -21,7 +21,7 @@ import pytest
 from viam.proto.common import Pose
 
 from isaac_module.encoding import xyz_rgb_to_pcd
-from isaac_module.mock_camera import MockCameraHandle
+from isaac_module.handles.camera import MockCameraHandle
 from isaac_module.sim_manager import SimManager
 
 _MODULE_PATH = Path(__file__).resolve().parent.parent / "examples" / "pick_red_block.py"
@@ -1565,7 +1565,7 @@ def test_pre_grasp_move_is_linear_and_skips_the_waypoint_after_a_focus(monkeypat
     asyncio.run(pipeline.run())
 
     assert len(look_calls) == 2  # scan, then the one-shot focus
-    scan_pose, scan_linear, scan_ws = look_calls[0]
+    _scan_pose, scan_linear, scan_ws = look_calls[0]
     assert scan_linear is False
     assert _contains_keepout(scan_ws)  # boxed out of the blocks' airspace
     focus_pose, focus_linear, focus_ws = look_calls[1]
@@ -1633,7 +1633,7 @@ def test_pre_grasp_waypoint_move_runs_first_when_detection_ends_elsewhere(monkey
     assert waypoint_linear is False  # free (fast) BECAUSE the keep-out is present
     assert _contains_keepout(waypoint_ws)
 
-    pre_grasp_pose, pre_grasp_linear, pre_grasp_ws = moves[1]
+    _pre_grasp_pose, pre_grasp_linear, pre_grasp_ws = moves[1]
     assert pre_grasp_linear is True
     assert not _contains_keepout(pre_grasp_ws)
 

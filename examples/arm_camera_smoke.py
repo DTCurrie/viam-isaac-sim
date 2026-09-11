@@ -50,7 +50,9 @@ class Args:
 
 
 def _parse_args(argv: list[str] | None = None) -> Args:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     parser.add_argument("--address", required=True)
     parser.add_argument("--api-key")
     parser.add_argument("--api-key-id")

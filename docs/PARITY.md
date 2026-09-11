@@ -1,7 +1,7 @@
 # Parity ledger
 
 Every method a real driver implements, the sim model implements with the same semantics. This
-ledger is the audit behind that rule. One section per sim model. One row per method of the Viam
+ledger is the record of that rule. One section per sim model. One row per method of the Viam
 component API that model serves, plus one row per `DoCommand` verb either side implements.
 
 Columns: `Method` is the API method or `DoCommand: <verb>`. `Real driver` is what the named real
@@ -29,8 +29,8 @@ SDK abstract methods: 7 (`get_end_position`, `get_joint_positions`, `get_kinemat
 | `get_joint_positions` | Reads joint positions from `current_state_` and converts radians to degrees (`ur_arm.cpp:436`). | Reads joint positions from the sim handle, converts to degrees, then snaps any value within `_JOINT_LIMIT_TOLERANCE_DEG` of an SVA limit onto that limit (`arm.py:397`). | Sim clamps reported values that drift micro-degrees past a declared joint limit back onto the limit. The real driver reports the raw value with no such clamp. |
 | `get_kinematics` | Synthesizes an SVA JSON document from calibrated DH parameters fetched from the physical controller at configure time (`ur_arm.cpp:675`). | Fetches a static SVA or URDF kinematics file from `kinematics_url`, or a per-asset URL for known models, and caches it to disk (`arm.py:465`). | Sim serves a static, pre-published kinematics file. The real driver serves kinematics calibrated live from the connected controller. A sim arm with no `kinematics_url` and no known asset raises `NotImplementedError` (`arm.py:432`), where the real driver always has calibration data once connected. |
 | `is_moving` | Delegates to `current_state_->is_moving()` (`ur_arm.cpp:658`). | Delegates to the sim handle's `is_moving()` (`arm.py:417`). | Not read: the real driver's `is_moving()` body inside `state_` was not traced past the header declaration. |
-| `move_to_joint_positions` | Converts degrees to radians and calls `move_joint_space_` with a default `MoveOptions{}`, which plans a TOTG trajectory and blocks until the controller finishes it (`ur_arm.cpp:448`, `ur_arm.cpp:901`). No joint-limit check appears in this path. | Validates the joint count, clamps or raises `JointTargetOutOfLimitsError` (`INVALID_ARGUMENT`) against SVA-declared limits with a 0.01 deg tolerance, commands the move, then polls settle and raises `ArmMoveStalledError` (`ABORTED`) or `ArmMoveTimeoutError` (`DEADLINE_EXCEEDED`) (`arm.py:286`). | The sim raises three distinct, typed gRPC errors for out-of-limits, stall, and timeout. The real driver's move path throws generic `std::runtime_error` / `std::invalid_argument` for planner failures, and this file does no explicit joint-limit check at all (the firmware or trajectory planner enforces it). See "Rulings needed" (c). |
-| `move_to_position` | Forwards the target pose to `move_tool_space_`, which skips the move if already within 1 mm / ~0.06 deg of the target, otherwise hands the pose to the controller to solve and blocks until done (`ur_arm.cpp:668`, `ur_arm.cpp:844`). No IK is computed in this module. | Skips the move under the same 1 mm / 0.06 deg tolerance. Otherwise solves inverse kinematics against the served kinematics file from the arm's current joints (`ChainSVA.ik`/`ChainURDF.ik`, `kinematics.py`) and drives the joint path through `move_to_joint_positions`, so settle, stall and timeout behave as a joint move does (`move_to_position`, `arm.py`). | The real driver hands the pose to the controller to solve. The sim solves against the file it serves through `GetKinematics`, so `GetEndPosition`, the frame system and the motion service agree with the sim by construction, which the real driver has no equivalent guarantee for. |
+| `move_to_joint_positions` | Converts degrees to radians and calls `move_joint_space_` with a default `MoveOptions{}`, which plans a TOTG trajectory and blocks until the controller finishes it (`ur_arm.cpp:448`, `ur_arm.cpp:901`). No joint-limit check appears in this path. | Validates the joint count, clamps or raises `JointTargetOutOfLimitsError` (`INVALID_ARGUMENT`) against SVA-declared limits with a 0.01 deg tolerance, commands the move, then polls settle and raises `ArmMoveStalledError` (`ABORTED`) or `ArmMoveTimeoutError` (`DEADLINE_EXCEEDED`) (`arm.py:286`). | The sim raises three distinct, typed gRPC errors for out-of-limits, stall, and timeout. The real driver's move path throws generic `std::runtime_error` / `std::invalid_argument` for planner failures, and this file does no explicit joint-limit check at all (the firmware or trajectory planner enforces it). See the `MoveToPosition` bullet under "Rulings". |
+| `move_to_position` | Forwards the target pose to `move_tool_space_`, which skips the move if already within 1 mm / ~0.06 deg of the target, otherwise hands the pose to the controller to solve and blocks until done (`ur_arm.cpp:668`, `ur_arm.cpp:844`). No IK is computed in this module. | Skips the move under the same 1 mm / 0.06 deg tolerance. Otherwise solves inverse kinematics against the served kinematics file from the arm's current joints (`ChainSVA.ik`/`ChainURDF.ik`, `kinematics.py`) and drives the joint path through `move_to_joint_positions`, so settle, stall and timeout behave as a joint move does (`move_to_position`, `arm.py`). | The real driver hands the pose to the controller to solve. The sim solves against the file it serves through `GetKinematics`, so `GetEndPosition`, the frame system and the motion service agree with the sim by construction, which the real driver has no equivalent guarantee for. Documented deviation: the arm API defines this method as a straight line in Cartesian space, and the sim drives a joint-space path between the same two endpoints. |
 | `stop` | Calls the private `stop_(rlock)` helper after confirming the arm is configured (`ur_arm.cpp:723`). | Calls the sim handle's `stop()` (`arm.py:414`). | Not read: `stop_()`'s internal behavior was not traced. |
 | `DoCommand: set_vel` | Sets `speed_degs_per_sec` joint velocity limits from a value in deg/s (`ur_arm.cpp:740`, `ur_arm.cpp:776`). | Not implemented. | real-only |
 | `DoCommand: set_vel_degs_per_sec` | Same handler as `set_vel` (`ur_arm.cpp:742`, `ur_arm.cpp:776`). | Not implemented. | real-only |
@@ -38,7 +38,7 @@ SDK abstract methods: 7 (`get_end_position`, `get_joint_positions`, `get_kinemat
 | `DoCommand: set_accel_degs_per_sec2` | Same handler as `set_acc` (`ur_arm.cpp:743`, `ur_arm.cpp:780`). | Not implemented. | real-only |
 | `DoCommand: get_tcp_forces_base` | Returns the last TCP force/torque reading in the robot base frame (`ur_arm.cpp:744`, `ur_arm.cpp:784`). | Not implemented. | real-only |
 | `DoCommand: get_tcp_forces_tool` | Returns the last TCP force/torque reading rotated into the tool frame (`ur_arm.cpp:745`, `ur_arm.cpp:797`). | Not implemented. | real-only |
-| `DoCommand: clear_pstop` | Clears an active protective stop, or errors if none is active or the arm is disconnected (`ur_arm.cpp:746`, `ur_arm.cpp:810`, `ur_readme.md:164` in scratch). | Not implemented. | real-only |
+| `DoCommand: clear_pstop` | Clears an active protective stop, or errors if none is active or the arm is disconnected (`ur_arm.cpp:746`, `ur_arm.cpp:810`). | Not implemented. | real-only |
 | `DoCommand: zero_ftsensor` | Zeroes the force-torque sensor bias (`ur_arm.cpp:747`, `ur_arm.cpp:813`). | Not implemented. | real-only |
 | `DoCommand: is_controllable_state` | Reports whether the arm's current connection state accepts motion commands (`ur_arm.cpp:748`, `ur_arm.cpp:816`). | Not implemented. | real-only |
 | `DoCommand: get_state_description` | Returns a human-readable description of the current connection state (`ur_arm.cpp:749`, `ur_arm.cpp:822`). | Not implemented. | real-only |
@@ -84,7 +84,7 @@ SDK abstract methods: 3 (`get_images`, `get_point_cloud`, `get_properties`).
 | --- | --- | --- | --- |
 | `get_images` | Grabs the latest synchronized frameset from the librealsense pipeline, optionally aligns depth to color, encodes the sensors named in `filter_source_names` (or all configured sensors), and raises if the camera is in DFU/recovery mode or no frameset has arrived yet (`realsense.hpp:551`). | Grabs the latest rendered frame from the sim handle, encodes color to PNG or JPEG and, when `depth` is enabled, encodes depth to `VIAM_RAW_DEPTH`, filtered by `filter_source_names` (`camera.py:146`). | The real driver has hardware-fault paths (DFU mode, stale USB connection) with no sim equivalent, since the sim always has a rendered frame once the camera is attached. |
 | `get_point_cloud` | Requires both a fresh color and depth frame (raises on staleness via `throwIfTooOld`), deprojects through the device's point-cloud filter, and raises if the encoded data exceeds the gRPC message size limit (`realsense.hpp:719`). | Raises `MethodNotImplementedError` immediately if the camera's `depth` attribute is false. Otherwise deprojects the rendered depth frame using cached intrinsics into a PCD, and raises `ValueError` if the encoded cloud exceeds `MAX_POINT_CLOUD_BYTES` (32 MiB), the same guard the RealSense module applies (`get_point_cloud`, `camera.py`). | No gap found in this pass. |
-| `get_properties` | Reports `supports_pcd = true` unconditionally once a device is streaming, regardless of whether depth is actually part of the active profile, and fills intrinsics and distortion from the live color or depth stream (`realsense.hpp:800`). | Reports `supports_pcd = handle.depth_enabled`, sets `mime_types` to the color mime plus depth and PCD mimes when depth is on, and computes `frame_rate` from the configured `frequency` or the render step (`camera.py:199`). | The real driver's `supports_pcd` does not depend on whether depth is configured. The sim's does. Not read: the C++ SDK's `Camera::properties` struct definition was not fetched, so whether the real driver populates `mime_types` or `frame_rate` through a different path is not read. |
+| `get_properties` | Reports `supports_pcd = true` unconditionally once a device is streaming, regardless of whether depth is part of the active profile, and fills intrinsics and distortion from the live color or depth stream (`realsense.hpp:800`). | Reports `supports_pcd = handle.depth_enabled`, sets `mime_types` to the color mime plus depth and PCD mimes when depth is on, and computes `frame_rate` from the configured `frequency` or the render step (`camera.py:199`). | The real driver's `supports_pcd` does not depend on whether depth is configured. The sim's does. Not read: the C++ SDK's `Camera::properties` struct definition was not fetched, so whether the real driver populates `mime_types` or `frame_rate` through a different path is not read. |
 | `DoCommand: update_firmware` | Applies a firmware update image to the connected device (`realsense.hpp:492`). | Not implemented. | real-only |
 | `DoCommand: set_laser_power` | Sets the depth sensor's laser power option (`realsense.hpp:399`). | Not implemented. | real-only |
 | `DoCommand: set_depth_emitter` | Enables or disables the depth emitter (`realsense.hpp:406`). | Not implemented. | real-only |
@@ -114,33 +114,28 @@ Neither side implements any `DoCommand` verb for the base, so this section has n
 | `is_moving` | Returns `true` if any underlying motor's `IsPowered` reports powered (`wheeled_base.go:539`). | Delegates to the sim handle's physical `is_moving()` (`base.py:122`). | Not read: the sim handle's `is_moving()` body was not traced beyond `base.py`. |
 | `get_properties` | Returns `TurningRadiusMeters: 0`, and width and wheel circumference converted from the configured millimeter attributes (`wheeled_base.go:557`). | Returns `turning_radius_meters=0.0`, and width and wheel circumference computed from the sim handle's wheel base and wheel radius (`base.py:130`). | No gap found in this pass. |
 
-## Rulings
+## Documented deviations
 
-Decisions taken on the audit's open questions. Each names the cost if wrong.
+Where the sim departs from a real driver on purpose, and why.
 
-- The arm's five sim-only `DoCommand` verbs (`joint_state`, `prim_world_pose`,
-  `get_joint_positions_radians`, `dof_names`, `all_dof_names`) and the gripper's three
-  (`dof_names`, `jaw_deg`, `tcp_pose`) move to the world's `DoCommand`, keyed by component name,
-  with the radians duplicate dropped and `all_dof_names` folded into `dof_names` with `all`. The camera's `sample_color` stays on the camera, since a real camera module
-  could carry it. Cost if wrong: every caller of those eight verbs, three example scripts and
-  three test files, moves back.
-- `MoveOptions` acceleration fields and `max_tcp_speed` stay logged and not honored. The UR
-  module honors them through its trajectory planner, which the sim does not have. Cost if wrong:
-  a motion profile rehearsed against the sim does not transfer.
-- `MoveToPosition` is implemented, over the audit's leave-it-unimplemented default, because
-  parity with real hardware was ruled the requirement and the real UR driver implements it. An
-  unreachable target raises `INVALID_ARGUMENT`, and a solution outside joint limits raises the
-  existing `JointTargetOutOfLimitsError`. The real driver's status for the same failures was not
-  read. Cost if wrong: one status code.
-- Gripper `open()` blocks until the jaw settles or stalls, like `grab()` and like the real
-  robotiq driver. `is_holding_something` metadata, `get_current_inputs`, `go_to_inputs`, and the
-  sim's gripper kinematics stay as documented gaps. Cost if wrong: a caller relying on a
-  non-blocking `open()` waits a fraction of a second longer.
-- Base `move_straight` and `spin` adopt the wheeled base's zero-velocity and near-zero-angle
-  semantics. Camera `get_point_cloud` gains the real driver's message-size guard.
-  `get_properties.supports_pcd` keeps following the depth config, an honest gap. Cost if wrong:
-  a caller relying on the sim's prior raise-on-zero-velocity behavior sees a silent stop instead.
-- `get_kinematics` stays a static file. The sim has no controller to calibrate against. Cost if
-  wrong: sim kinematics drift from a specific real robot's calibrated geometry, so IK and
-  collision checks in the sim reproduce only the nominal model, not a particular arm's
-  calibration.
+- Sim-only `DoCommand` verbs live on the world's `DoCommand`, keyed by component name, never on
+  the component that stands in for hardware. For the arm: `joint_state`, `dof_names` with an
+  optional `all`, and `prim_pose`. For the gripper: `dof_names`, `jaw_deg` and `tcp_pose`. The
+  camera's `sample_color` stays on the camera, since a real camera module could carry it.
+- `MoveOptions` acceleration fields and `max_tcp_speed` are logged and not honored. The UR module
+  honors them through its trajectory planner, which the sim does not have.
+- The sim arm takes a config-level `max_vel_degs_per_sec`, carried from a real UR's
+  `speed_degs_per_sec`, as the velocity cap for a move that carries no `MoveOptions` cap of its
+  own. `acceleration_degs_per_sec2` has no sim counterpart: the sim arm honors no config-level
+  acceleration limit.
+- `MoveToPosition` solves IK against the served kinematics and drives a joint path where the API
+  defines a Cartesian straight line. An unreachable target raises `INVALID_ARGUMENT`, and a
+  solution outside joint limits raises `JointTargetOutOfLimitsError`.
+- Gripper `open()` blocks until the jaw settles or stalls, like `grab()` and like the real robotiq
+  driver. `is_holding_something` metadata, `get_current_inputs`, `go_to_inputs` and the sim's
+  gripper kinematics are the gaps the table above names.
+- Base `move_straight` and `spin` follow the wheeled base's zero-velocity and near-zero-angle
+  semantics. Camera `get_point_cloud` carries the real driver's message-size guard.
+  `get_properties.supports_pcd` follows the depth config.
+- `get_kinematics` serves a static file. The sim has no controller to calibrate against, so IK and
+  collision checks reproduce the nominal model, not a particular arm's calibration.

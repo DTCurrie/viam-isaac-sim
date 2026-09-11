@@ -14,7 +14,8 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - run: pip install -r requirements-dev.txt
-      - run: python -m ruff check src tests
-      - run: python -m ruff format --check src tests
-      - run: python -m mypy
-      - run: python -m pytest tests/
+      - run: make fmt-check PY=python
+      - run: make lint PY=python
+      - run: make typecheck PY=python
+      - run: make test PY=python
+      - run: make module.tar.gz && tar tzf module.tar.gz

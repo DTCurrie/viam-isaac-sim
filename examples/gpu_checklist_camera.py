@@ -1,13 +1,12 @@
-"""Phase-2 GPU acceptance checklist for the Isaac Sim wrist camera.
+"""GPU acceptance checklist for the Isaac Sim wrist camera.
 
 Connects to a running Viam machine (the module running on the Isaac GPU
-box) and walks the six phase-2 GPU checklist items from
-`.claude/plans/pick-place-mvp/phase-2-see-red-block.md`, printing PASS/FAIL/SKIP
-and raw numbers for each so the results can be pasted back into that plan's
-Notes.
+box) and checks the camera's color and depth images, the depth-vs-color
+block location, and the running Isaac install's reported version. Prints
+PASS/FAIL/SKIP and the raw numbers for each check.
 
-Depends only on the stdlib, viam-sdk and Pillow: it runs on a laptop against a
-remote machine, not inside the module process.
+Depends only on the stdlib, viam-sdk, and Pillow. It runs on a laptop against
+a remote machine, not inside the module process.
 
 Usage::
 
@@ -31,9 +30,7 @@ from viam.proto.common import Pose, PoseInFrame
 from viam.robot.client import RobotClient
 from viam.services.vision import VisionClient
 
-# ----------------------------------------------------------------------
-# pure helpers - unit-testable without a robot (see tests/test_gpu_checklist_camera.py)
-# ----------------------------------------------------------------------
+# pure helpers, unit-tested without a robot in tests/test_gpu_checklist_camera.py
 
 RgbPixel = tuple[int, int, int]
 Bbox = tuple[int, int, int, int]  # (x0, y0, x1, y1), exclusive upper bounds
@@ -86,7 +83,7 @@ def raised_bbox(
     """Bounding box (x0, y0, x1, y1), exclusive upper bounds, of the pixels that
     sit at least `min_rise_mm` closer to the camera than the floor (taken as the
     deepest valid reading). None when fewer than MIN_RED_PIXELS qualify or there
-    is no valid depth. Locates the block from geometry, independent of colour."""
+    is no valid depth. Locates the block from geometry, independent of color."""
     valid = [d for row in rows for d in row if d > 0]
     if not valid:
         return None
@@ -151,9 +148,7 @@ def skip(name: str, detail: str) -> str:
     return f"[SKIP] {name}: {detail}"
 
 
-# ----------------------------------------------------------------------
 # checklist items
-# ----------------------------------------------------------------------
 
 DEPTH_MIN_MM = 100
 DEPTH_MAX_MM = 2000
@@ -174,7 +169,9 @@ class Args:
 
 
 def _parse_args() -> Args:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     parser.add_argument("--address", required=True)
     parser.add_argument("--api-key")
     parser.add_argument("--api-key-id")
@@ -214,7 +211,7 @@ async def _fetch_depth_rows(cam: Camera) -> list[list[int]]:
     """Decoded depth rows (mm), or [] when the camera serves no depth image."""
     try:
         imgs, _ = await cam.get_images(filter_source_names=["depth"])
-    except Exception:  # noqa: BLE001 - item 1 reports depth problems itself
+    except Exception:  # noqa: BLE001 - the depth check reports depth problems itself
         return []
     if len(imgs) != 1:
         return []
@@ -227,7 +224,7 @@ async def _check_sample_color(
     imgs, _ = await cam.get_images(filter_source_names=["color"])
     if len(imgs) != 1:
         line = verdict(
-            "3. sample_color on the block", False, f"expected 1 color image, got {len(imgs)}"
+            "sample_color on the block", False, f"expected 1 color image, got {len(imgs)}"
         )
         print(line)
         return line, False, None
@@ -241,12 +238,12 @@ async def _check_sample_color(
         bbox, located_by = depth_bbox, f"depth (pixels >= {MIN_RISE_MM} mm above the floor)"
     else:
         bbox = red_bbox(list(image.getdata()), width, height, args.red_threshold)
-        located_by = "colour (red threshold)"
+        located_by = "color (red threshold)"
     if bbox is None:
         line = verdict(
-            "3. sample_color on the block",
+            "sample_color on the block",
             False,
-            "block not found: no raised region in depth and no red region in colour",
+            "block not found: no raised region in depth and no red region in color",
         )
         print(line)
         return line, False, None
@@ -261,12 +258,10 @@ async def _check_sample_color(
     print(f"  detect_color = {srgb_hex}")
     if not ok:
         print(
-            "  FINDING (OQ-8): the block region does not read as red under the shipping lighting; "
-            "record this hex and revisit the lighting/material before trusting color_detector"
+            "  FINDING: the block region does not read as red under the shipping lighting. "
+            "Record this hex and revisit the lighting/material before trusting color_detector"
         )
-    line = verdict(
-        "3. sample_color on the block (OQ-8, sets detect_color/W31)", ok, f"mean_rgb={mean_rgb}"
-    )
+    line = verdict("sample_color on the block", ok, f"mean_rgb={mean_rgb}")
     print(line)
     return line, ok, bbox
 
@@ -296,7 +291,7 @@ async def _check_depth(cam: Camera, bbox: Bbox | None) -> tuple[str, bool]:
         cy = min(cy, len(rows) - 1)
         cx = min(cx, len(rows[0]) - 1)
         check_mm = rows[cy][cx]
-        print(f"  depth at block-region centre ({cx},{cy}): {check_mm} mm")
+        print(f"  depth at block-region center ({cx},{cy}): {check_mm} mm")
 
     ok = (
         props.supports_pcd
@@ -304,12 +299,9 @@ async def _check_depth(cam: Camera, bbox: Bbox | None) -> tuple[str, bool]:
         and got_one_depth_image
         and DEPTH_MIN_MM <= check_mm <= DEPTH_MAX_MM
     )
-    print(
-        "  reminder: check the module logs for "
-        f"'camera {cam.name} clipping range (0.05, 10.0)' (OQ-11)"
-    )
+    print(f"  reminder: check the module logs for 'camera {cam.name} clipping range (0.05, 10.0)'")
     line = verdict(
-        "1. depth image sees the block (OQ-11)",
+        "depth image sees the block",
         ok,
         f"supports_pcd={props.supports_pcd} fx={intr.focal_x_px} depth_mm={check_mm}",
     )
@@ -337,20 +329,19 @@ async def _check_get_images_filter(cam: Camera) -> tuple[str, bool]:
 
     ok = no_filter_ok and depth_only_ok and color_only_ok and bogus_ok
     print(
-        f"  reminder: check the module logs for 'camera {cam.name} get_images "
-        "filter_source_names=' (OQ-16)"
+        f"  reminder: check the module logs for 'camera {cam.name} get_images filter_source_names='"
     )
-    line = verdict("4. GetImages honours filter_source_names (OQ-16)", ok, f"details ok={ok}")
+    line = verdict("GetImages honors filter_source_names", ok, f"details ok={ok}")
     print(line)
     return line, ok
 
 
 async def _check_segmenter(machine: RobotClient, args: Args) -> tuple[str, bool]:
-    name = "2. detections-to-segments block pose (W32)"
+    name = "detections-to-segments block pose"
     if not args.segmenter:
         line = skip(
             name,
-            "no --segmenter given; add a vision service config like W32 "
+            "no --segmenter given. Add a vision service config "
             "(detections-to-segments over the wrist camera) and re-run with --segmenter",
         )
         print(line)
@@ -375,9 +366,9 @@ async def _check_segmenter(machine: RobotClient, args: Args) -> tuple[str, bool]
     expected_mm: Vec3 = (bx * MM_PER_M, by * MM_PER_M, bz * MM_PER_M)
     delta_mm = pose_delta_mm(world_pose, expected_mm)
 
-    print(f"  camera-frame centre (mm): {camera_pose}")
-    print(f"  world-frame centre (mm): {world_pose}")
-    print(f"  expected W23 (mm): {expected_mm}")
+    print(f"  camera-frame center (mm): {camera_pose}")
+    print(f"  world-frame center (mm): {world_pose}")
+    print(f"  expected (mm): {expected_mm}")
     ok = delta_mm <= POSE_TOLERANCE_MM
     line = verdict(name, ok, f"delta {delta_mm:.3f} mm")
     print(line)
@@ -392,7 +383,7 @@ async def _check_isaac_version(machine: RobotClient, args: Args) -> tuple[str, b
     print(f"  lighting: {status.get('lighting')!r}")
     ok = isinstance(isaac_version, str) and len(isaac_version) > 0
     line = verdict(
-        "6. compat.isaac_version() on the real install (OQ-14)",
+        "compat.isaac_version() on the real install",
         ok,
         f"isaac_version={isaac_version!r}",
     )
@@ -402,8 +393,8 @@ async def _check_isaac_version(machine: RobotClient, args: Args) -> tuple[str, b
 
 def _check_isaac_4_5_manual() -> tuple[str, bool]:
     line = skip(
-        "5. depth fresh after reset + vFOV matches (CAM-4, CAM-17)",
-        "needs an Isaac 4.5 box; manually check depth after `reset` is fresh "
+        "depth fresh after reset and vFOV matches",
+        "needs an Isaac 4.5 box. Manually check depth after `reset` is fresh "
         "and that focal_y_px == focal_x_px",
     )
     print(line)
@@ -419,56 +410,52 @@ async def main() -> None:
         results: list[tuple[str, bool]] = []
         bbox: Bbox | None = None
 
-        print("\n-- item 6: compat.isaac_version() --")
+        print("\n-- compat.isaac_version() --")
         try:
             results.append(await _check_isaac_version(machine, args))
         except Exception as exc:  # noqa: BLE001 - never crash the checklist run
             line = verdict(
-                "6. compat.isaac_version() on the real install (OQ-14)",
+                "compat.isaac_version() on the real install",
                 False,
                 f"exception: {exc!r}",
             )
             print(line)
             results.append((line, False))
 
-        print("\n-- item 3: sample_color on the block --")
+        print("\n-- sample_color on the block --")
         try:
             line, ok, bbox = await _check_sample_color(cam, args, await _fetch_depth_rows(cam))
             results.append((line, ok))
         except Exception as exc:  # noqa: BLE001 - never crash the checklist run
-            line = verdict("3. sample_color on the block", False, f"exception: {exc!r}")
+            line = verdict("sample_color on the block", False, f"exception: {exc!r}")
             print(line)
             results.append((line, False))
 
-        print("\n-- item 1: depth image sees the block --")
+        print("\n-- depth image sees the block --")
         try:
             results.append(await _check_depth(cam, bbox))
         except Exception as exc:  # noqa: BLE001 - never crash the checklist run
-            line = verdict("1. depth image sees the block (OQ-11)", False, f"exception: {exc!r}")
+            line = verdict("depth image sees the block", False, f"exception: {exc!r}")
             print(line)
             results.append((line, False))
 
-        print("\n-- item 4: GetImages filter_source_names --")
+        print("\n-- GetImages filter_source_names --")
         try:
             results.append(await _check_get_images_filter(cam))
         except Exception as exc:  # noqa: BLE001 - never crash the checklist run
-            line = verdict(
-                "4. GetImages honours filter_source_names (OQ-16)", False, f"exception: {exc!r}"
-            )
+            line = verdict("GetImages honors filter_source_names", False, f"exception: {exc!r}")
             print(line)
             results.append((line, False))
 
-        print("\n-- item 2: detections-to-segments block pose --")
+        print("\n-- detections-to-segments block pose --")
         try:
             results.append(await _check_segmenter(machine, args))
         except Exception as exc:  # noqa: BLE001 - never crash the checklist run
-            line = verdict(
-                "2. detections-to-segments block pose (W32)", False, f"exception: {exc!r}"
-            )
+            line = verdict("detections-to-segments block pose", False, f"exception: {exc!r}")
             print(line)
             results.append((line, False))
 
-        print("\n-- item 5: Isaac 4.5 manual checks --")
+        print("\n-- Isaac 4.5 manual checks --")
         results.append(_check_isaac_4_5_manual())
 
         print("\n== summary ==")

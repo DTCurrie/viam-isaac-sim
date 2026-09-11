@@ -1,13 +1,11 @@
-"""WorldHandle seam contract (SCN-16): the scene mutations the world
-component's DoCommand verbs drive through PropGeometry / prop_spawn_orientation
-/ prop_box_dims / sample_prop_positions / MockWorldHandle / IsaacWorldHandle."""
-
 import math
 import threading
+from typing import ClassVar
 
 import numpy as np
 import pytest
 
+from isaac_module.models import world_commands
 from isaac_module.sim_manager import (
     DEFAULT_MIN_SEPARATION_M,
     PROP_REST_EPSILON_M,
@@ -310,7 +308,7 @@ def test_sample_prop_positions_raises_when_crowded_region_has_no_room():
 def test_sample_prop_positions_placements_respect_both_bounds():
     dims = {"a": (0.05, 0.05, 0.05), "b": (0.05, 0.05, 0.05), "c": (0.05, 0.05, 0.05)}
     placed = sample_prop_positions(dims, REGION, seed=3)
-    (lo_x, lo_y, z0), (hi_x, hi_y, z1) = REGION
+    (lo_x, lo_y, _z0), (hi_x, hi_y, _z1) = REGION
     half = 0.025
     positions = list(placed.values())
     for x, y, _z in positions:
@@ -354,7 +352,7 @@ class _FakeXForm:
     isaacsim's SingleXFormPrim AND the Dynamic/FixedCuboid constructors
     (both end up recording a pose the same way here)."""
 
-    _STORE: dict[str, tuple[np.ndarray, np.ndarray]] = {}
+    _STORE: ClassVar[dict[str, tuple[np.ndarray, np.ndarray]]] = {}
 
     def __init__(self, prim_path: str, name: str = "", position=None, orientation=None, **_ignored):
         self.prim_path = prim_path
@@ -384,10 +382,10 @@ FAKE_SIM_EVENTS: list[str] = []
 
 class _FakeCubeObject(_FakeXForm):
     """Stands in for the scene-registered Dynamic/FixedCuboid object
-    (SCN-16 sized props): adds set_local_scale, the API IsaacWorldHandle
+    (sized props): adds set_local_scale, the API IsaacWorldHandle
     rescales through."""
 
-    _SCALE_STORE: dict[str, np.ndarray] = {}
+    _SCALE_STORE: ClassVar[dict[str, np.ndarray]] = {}
 
     def set_local_scale(self, scale) -> None:
         FAKE_SIM_EVENTS.append("scale")
@@ -560,7 +558,7 @@ def test_mock_sized_randomize_snaps_unnamed_props_to_spawn_like_isaac():
 
 
 def test_sample_prop_positions_restarts_stranded_layouts():
-    """GPU run 8: with per-prop-only retries, seed 6 strands the third cube in
+    """With per-prop-only retries, seed 6 strands the third cube in
     the demo cell's exact region. A stranded layout must be redrawn whole."""
     dims = {
         name: (0.06, 0.06, 0.06) for name in ("pick_cube", "ignore_cube_green", "ignore_cube_blue")
@@ -600,3 +598,104 @@ def test_six_block_cell_scatter_succeeds_at_the_measured_separation():
         assert set(placed) == set(dims)
         successes += 1
     assert successes == 100
+
+
+# ----------------------------------------------------------------------
+# scatter_cell/clear_cell DoCommand payload (world_commands._cmd_scatter_cell,
+# _cmd_clear_cell): a scene with no relation to the shipped cell, proving the
+# verbs take their names, region and park grid from the payload alone. Both
+# handlers never read their ``world`` argument, so it is passed as None.
+# ----------------------------------------------------------------------
+
+GENERIC_NAMES_BY_COLOR = {"alpha": ["block_alpha_1", "block_alpha_2"], "beta": ["block_beta_1"]}
+GENERIC_PARK_XY_MM = {
+    "block_alpha_1": (1000.0, 1000.0),
+    "block_alpha_2": (1000.0, 1200.0),
+    "block_beta_1": (1200.0, 1000.0),
+}
+GENERIC_REGION_MM = [[0.0, 0.0, 30.0], [500.0, 500.0, 30.0]]
+
+
+def _generic_pool_handle() -> MockWorldHandle:
+    props = [
+        _cube(name, position=[x / 1000.0, y / 1000.0, 0.03])
+        for name, (x, y) in GENERIC_PARK_XY_MM.items()
+    ]
+    return _mock_handle(props)
+
+
+def _generic_scatter_command(**overrides: object) -> dict:
+    command: dict = {
+        "command": "scatter_cell",
+        "seed": 1,
+        "names_by_color": GENERIC_NAMES_BY_COLOR,
+        "region": GENERIC_REGION_MM,
+        "park_positions_mm": {name: list(xy) for name, xy in GENERIC_PARK_XY_MM.items()},
+    }
+    command.update(overrides)
+    return command
+
+
+def test_cmd_scatter_cell_missing_names_by_color_raises_value_error_naming_it():
+    command = _generic_scatter_command()
+    del command["names_by_color"]
+    with pytest.raises(ValueError, match="names_by_color"):
+        world_commands._cmd_scatter_cell(None, _generic_pool_handle(), command)
+
+
+def test_cmd_scatter_cell_missing_region_raises_value_error_naming_it():
+    command = _generic_scatter_command()
+    del command["region"]
+    with pytest.raises(ValueError, match="region"):
+        world_commands._cmd_scatter_cell(None, _generic_pool_handle(), command)
+
+
+def test_cmd_scatter_cell_missing_park_positions_mm_raises_value_error_naming_it():
+    command = _generic_scatter_command()
+    del command["park_positions_mm"]
+    with pytest.raises(ValueError, match="park_positions_mm"):
+        world_commands._cmd_scatter_cell(None, _generic_pool_handle(), command)
+
+
+def test_cmd_scatter_cell_missing_seed_raises_value_error_naming_it():
+    command = _generic_scatter_command()
+    del command["seed"]
+    with pytest.raises(ValueError, match="seed"):
+        world_commands._cmd_scatter_cell(None, _generic_pool_handle(), command)
+
+
+def test_cmd_scatter_cell_malformed_names_by_color_raises_value_error_naming_the_color():
+    command = _generic_scatter_command(names_by_color={"alpha": "not-a-list"})
+    with pytest.raises(ValueError, match="alpha"):
+        world_commands._cmd_scatter_cell(None, _generic_pool_handle(), command)
+
+
+def test_cmd_clear_cell_missing_names_by_color_raises_value_error_naming_it():
+    with pytest.raises(ValueError, match="names_by_color"):
+        world_commands._cmd_clear_cell(None, _generic_pool_handle(), {"command": "clear_cell"})
+
+
+def test_cmd_clear_cell_missing_park_positions_mm_raises_value_error_naming_it():
+    command = {"command": "clear_cell", "names_by_color": GENERIC_NAMES_BY_COLOR}
+    with pytest.raises(ValueError, match="park_positions_mm"):
+        world_commands._cmd_clear_cell(None, _generic_pool_handle(), command)
+
+
+def test_cmd_scatter_cell_round_trips_a_generic_payload_end_to_end():
+    handle = _generic_pool_handle()
+    result = world_commands._cmd_scatter_cell(None, handle, _generic_scatter_command())
+    all_names = {"block_alpha_1", "block_alpha_2", "block_beta_1"}
+    assert set(result["positions"]) | set(result["parked"]) == all_names
+    assert set(result["counts"]) == {"alpha", "beta"}
+
+
+def test_cmd_clear_cell_round_trips_a_generic_payload_end_to_end():
+    handle = _generic_pool_handle()
+    world_commands._cmd_scatter_cell(None, handle, _generic_scatter_command())
+    clear_command = {
+        "command": "clear_cell",
+        "names_by_color": GENERIC_NAMES_BY_COLOR,
+        "park_positions_mm": {name: list(xy) for name, xy in GENERIC_PARK_XY_MM.items()},
+    }
+    result = world_commands._cmd_clear_cell(None, handle, clear_command)
+    assert sorted(result["parked"]) == sorted(["block_alpha_1", "block_alpha_2", "block_beta_1"])

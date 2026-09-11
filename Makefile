@@ -15,13 +15,14 @@ setup:
 	@echo "nothing to set up - the module is packaged as source"
 
 fmt:
-	$(PY) -m ruff format src tests
+	$(PY) -m ruff format src tests tools examples
 
 fmt-check:
-	$(PY) -m ruff format --check src tests
+	$(PY) -m ruff format --check src tests tools examples
 
 lint:
-	$(PY) -m ruff check src tests
+	$(PY) -m ruff check src tests tools examples
+	node .claude/scripts/prose-lint.mjs src tools examples
 
 typecheck:
 	$(PY) -m mypy

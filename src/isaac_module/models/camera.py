@@ -1,46 +1,4 @@
-"""viam:isaac-sim-devin:camera - a simulated RGB(-D) camera.
-
-Attributes:
-  world (string, default "isaac-world") - name of the viam:isaac-sim-devin:world component
-  prim_path (string)              - existing camera prim to attach to, or
-                                    where to create one (default /World/<name>)
-  width / height (int)            - resolution, default 848x480
-  position ([x,y,z] meters)       - where to place a newly created camera
-  target ([x,y,z] meters)         - aim the camera at this point (easiest way
-                                    to make a scene-monitor camera)
-  orientation_rpy_deg ([r,p,y])   - explicit orientation instead of target
-  fov_deg (float)                 - horizontal field of view, default 90.5
-  depth (bool)                    - attach the depth annotator and advertise
-                                    GetPointCloud / the "depth" GetImages
-                                    source, default false
-  clip_near / clip_far (m)        - render clipping planes, default 0.05/10.0
-  image_format ("png"|"jpeg")     - colour encoding for GetImages, default "png"
-  frequency (float)               - capture rate; unset = every rendered frame
-  parent_prim (string)            - create the camera as a child of this prim
-                                    so it moves with it, e.g. an arm's wrist
-                                    link for an end-effector camera. A
-                                    parent_prim camera MUST carry a "frame"
-                                    whose "parent" is the arm component; the
-                                    frame's translation/orientation become the
-                                    camera's local mount pose (see
-                                    models/utils.apply_frame_to_attrs).
-  local_position ([x,y,z] m)      - offset from parent_prim, default [0,0,0.05]
-  local_orientation_rpy_deg       - orientation relative to parent_prim;
-                                    default [180,0,0] = look out the +Z
-                                    (tool) axis
-  annotator_device (string)       - GPU-resident annotator data path,
-                                    e.g. "cuda"; 5.0 only - ignored
-                                    with a log line on 4.5
-
-DoCommand:
-  {"command": "sample_color", "region": [x0, y0, x1, y1]} - mean RGB over the
-  given pixel region of the most recent frame -> {"srgb_hex", "mean_rgb"}.
-
-close() releases the handle and its post-reset hook. The prim stays
-in the stage. A reconfigure that changes a spawn attribute (prim_path,
-position, parent_prim, or the frame it derives from) after the camera is
-already attached raises ValueError - restart the module to apply it.
-"""
+"""The simulated RGB(-D) camera model."""
 
 from __future__ import annotations
 
@@ -54,7 +12,6 @@ from grpclib import Status
 from typing_extensions import Self
 from viam.components.camera import Camera
 from viam.errors import MethodNotImplementedError, ViamGRPCError
-from viam.logging import getLogger
 from viam.media.video import CameraMimeType, NamedImage
 from viam.proto.app.robot import ComponentConfig
 from viam.proto.common import ResourceName, ResponseMetadata
@@ -64,7 +21,6 @@ from viam.resource.easy_resource import EasyResource
 from viam.resource.types import Model, ModelFamily
 
 from .. import FAMILY, NAMESPACE
-from ..camera_base import NoFrameYetError
 from ..encoding import (
     DEPTH_MIME,
     PCD_MIME,
@@ -74,7 +30,7 @@ from ..encoding import (
     rgb_to_png,
     xyz_rgb_to_pcd,
 )
-from ..errors import SimTimeoutError
+from ..handles.camera import NoFrameYetError
 from ..sim_manager import (
     DEFAULT_CAMERA_FOV_DEG,
     DEFAULT_CAMERA_HEIGHT,
@@ -85,7 +41,8 @@ from ..sim_manager import (
     SimConfig,
     SimManager,
 )
-from .utils import apply_frame_to_attrs, get_attrs, validate_sim_component
+from .component_frame_pose import apply_frame_to_attrs, get_attrs
+from .sim_component_validation import validate_sim_component
 
 # realsense's own message-size guard on the encoded point cloud
 # (`realsense.hpp:34-35`, `realsense.hpp:783`)
@@ -95,10 +52,16 @@ _SAMPLE_COLOR_REGION_LEN = 4
 _SUPPORTED_COMMANDS = ("sample_color",)
 
 
-LOGGER = getLogger(__name__)
-
-
 class IsaacCamera(Camera, EasyResource):  # type: ignore[misc]  # SDK: API is Final on the component, redeclared by EasyResource
+    """viam:isaac-sim-devin:camera, a simulated RGB(-D) camera.
+
+    DoCommand:
+      {"command": "sample_color", "region": [x0, y0, x1, y1]} - mean RGB over the
+      given pixel region of the most recent frame -> {"srgb_hex", "mean_rgb"}.
+
+    close() releases the handle and its post-reset hook. The prim stays in the
+    stage."""
+
     MODEL: ClassVar[Model] = Model(ModelFamily(NAMESPACE, FAMILY), "camera")
 
     def __init__(self, name: str) -> None:
@@ -116,7 +79,45 @@ class IsaacCamera(Camera, EasyResource):  # type: ignore[misc]  # SDK: API is Fi
 
     @classmethod
     def validate_config(cls, config: ComponentConfig) -> tuple[Sequence[str], Sequence[str]]:
-        # cameras can always be created fresh, no asset/usd required
+        """Cameras can always be created fresh, so no asset or usd is required.
+
+        Attributes:
+          world (string, default "isaac-world") - name of the viam:isaac-sim-devin:world component
+          prim_path (string)              - existing camera prim to attach to, or
+                                            where to create one (default /World/<name>)
+          width / height (int)            - resolution, default 848x480
+          position ([x,y,z] meters)       - where to place a newly created camera
+          target ([x,y,z] meters)         - aim the camera at this point (easiest way
+                                            to make a scene-monitor camera)
+          orientation_rpy_deg ([r,p,y])   - explicit orientation instead of target
+          fov_deg (float)                 - horizontal field of view, default 90.5
+          depth (bool)                    - attach the depth annotator and advertise
+                                            GetPointCloud / the "depth" GetImages
+                                            source, default false
+          clip_near / clip_far (m)        - render clipping planes, default 0.05/10.0
+          image_format ("png"|"jpeg")     - color encoding for GetImages, default "png"
+          frequency (float)               - rejected at validation. Isaac Sim's
+                                            Camera.set_frequency validates the value
+                                            against /app/runLoops/main/rateLimitFrequency,
+                                            not this module's rendering_dt, and the
+                                            render product renders every frame
+                                            regardless of what is set
+          parent_prim (string)            - create the camera as a child of this prim
+                                            so it moves with it, e.g. an arm's wrist
+                                            link for an end-effector camera. A
+                                            parent_prim camera MUST carry a "frame"
+                                            whose "parent" is the arm component; the
+                                            frame's translation/orientation become the
+                                            camera's local mount pose (see
+                                            models/component_frame_pose.apply_frame_to_attrs).
+          local_position ([x,y,z] m)      - offset from parent_prim, default [0,0,0.05]
+          local_orientation_rpy_deg       - orientation relative to parent_prim,
+                                            default [180,0,0] = look out the +Z
+                                            (tool) axis
+          annotator_device (string)       - GPU-resident annotator data path,
+                                            e.g. "cuda"; 5.0 only - ignored
+                                            with a log line on 4.5
+        """
         deps, opt_deps = validate_sim_component(config, needs_source=False)
         attrs = get_attrs(config)
         _validate_camera_attrs(config.name, attrs)
@@ -126,8 +127,8 @@ class IsaacCamera(Camera, EasyResource):  # type: ignore[misc]  # SDK: API is Fi
         self, config: ComponentConfig, dependencies: Mapping[ResourceName, ResourceBase]
     ) -> None:
         attrs = apply_frame_to_attrs(config, get_attrs(config))
-        # a frame-derived quat is ROS-optical (+Z forward, the frame system's
-        # convention); a legacy orientation_wxyz attr stays world axes
+        # a frame-derived orientation is ROS-optical (+Z forward, the frame
+        # system's convention). An orientation_rpy_deg attribute stays in world axes.
         if (
             config.HasField("frame")
             and config.frame.HasField("orientation")
@@ -156,8 +157,9 @@ class IsaacCamera(Camera, EasyResource):  # type: ignore[misc]  # SDK: API is Fi
         **kwargs: Any,
     ) -> tuple[list[NamedImage], ResponseMetadata]:
         handle = self._h()
-        # Log filter_source_names as viam-server sends it, for debugging which values arrive.
-        LOGGER.info("camera %s get_images filter_source_names=%r", self.name, filter_source_names)
+        self.logger.debug(
+            "camera %s get_images filter_source_names=%r", self.name, filter_source_names
+        )
         frame = await asyncio.to_thread(_call, handle.get_frame)
 
         color_mime = CameraMimeType.JPEG if handle.image_format == "jpeg" else CameraMimeType.PNG
@@ -201,8 +203,8 @@ class IsaacCamera(Camera, EasyResource):  # type: ignore[misc]  # SDK: API is Fi
         return pcd, PCD_MIME
 
     async def get_geometries(self, **kwargs: Any) -> list[Any]:
-        # cameras occupy no space; needed so the motion service can build a
-        # world state when this camera has a frame
+        """Empty, because a camera occupies no space. Present so the motion
+        service can build a world state when this camera has a frame."""
         return []
 
     async def get_properties(self, **kwargs: Any) -> GetPropertiesResponse:
@@ -238,8 +240,9 @@ class IsaacCamera(Camera, EasyResource):  # type: ignore[misc]  # SDK: API is Fi
         name = command.get("command")
         if name == "sample_color":
             return await asyncio.to_thread(self._sample_color, command.get("region"))
-        raise ValueError(
-            f"unknown command {name!r}; supported commands: {', '.join(_SUPPORTED_COMMANDS)}"
+        raise ViamGRPCError(
+            f"unknown command {name!r}; supported commands: {', '.join(_SUPPORTED_COMMANDS)}",
+            Status.INVALID_ARGUMENT,
         )
 
     def _sample_color(self, region: Any) -> dict[str, Any]:
@@ -261,22 +264,20 @@ class IsaacCamera(Camera, EasyResource):  # type: ignore[misc]  # SDK: API is Fi
             )
 
         patch = frame.rgb[y0:y1, x0:x1]
-        mean_rgb = [int(round(v)) for v in patch.reshape(-1, 3).mean(axis=0)]
+        mean_rgb = [round(v) for v in patch.reshape(-1, 3).mean(axis=0)]
         srgb_hex = "#" + "".join(f"{v:02X}" for v in mean_rgb)
         return {"srgb_hex": srgb_hex, "mean_rgb": mean_rgb}
 
 
-_T = TypeVar("_T")
+_TResult = TypeVar("_TResult")
 
 
-def _call(fn: Callable[[], _T]) -> _T:
+def _call(fn: Callable[[], _TResult]) -> _TResult:
     """Run a handle call, mapping sim-layer errors to their gRPC status."""
     try:
         return fn()
     except NoFrameYetError as e:
         raise ViamGRPCError(str(e), Status.FAILED_PRECONDITION) from e
-    except SimTimeoutError as e:
-        raise ViamGRPCError(str(e), Status.DEADLINE_EXCEEDED) from e
     except NotImplementedError as e:
         raise MethodNotImplementedError(str(e)) from e
 
@@ -316,8 +317,13 @@ def _validate_camera_attrs(name: str, attrs: dict[str, Any]) -> None:
         raise ValueError(f'{name}: "image_format" must be "png" or "jpeg", got {image_format!r}')
 
     frequency = attrs.get("frequency")
-    if frequency is not None and not (isinstance(frequency, (int, float)) and frequency > 0):
-        raise ValueError(f'{name}: "frequency" must be > 0 when set, got {frequency!r}')
+    if frequency is not None:
+        raise ValueError(
+            f'{name}: "frequency" is not supported. Isaac Sim\'s Camera.set_frequency '
+            "validates the value against /app/runLoops/main/rateLimitFrequency, not "
+            "this module's rendering_dt, and the render product renders every frame "
+            "regardless of what is set."
+        )
 
     depth = attrs.get("depth", False)
     if not isinstance(depth, bool):

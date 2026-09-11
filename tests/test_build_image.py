@@ -1,14 +1,9 @@
-"""Dry-run checks for `provisioning/build-image.sh`.
-
-No real `gcloud` call is ever made: `--dry-run` prints every command it would
-run instead of executing it, and these tests only ever exercise that mode.
-"""
-
 import subprocess
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
 SCRIPT = REPO / "provisioning" / "build-image.sh"
+CREATE_SIM_MACHINE_SCRIPT = REPO / "provisioning" / "create-sim-machine.sh"
 
 
 def run_dry() -> subprocess.CompletedProcess:
@@ -65,3 +60,37 @@ def test_dry_run_prints_expected_commands_in_order() -> None:
 
     assert output.count("images create") == 1
     assert output.count("instances delete") == 1
+
+
+# ----------------------------------------------------------------------
+# create-sim-machine.sh: --open-livestream opens TCP 49100 + UDP 47998
+# ----------------------------------------------------------------------
+
+
+def test_create_sim_machine_syntax_is_valid() -> None:
+    result = subprocess.run(
+        ["bash", "-n", str(CREATE_SIM_MACHINE_SCRIPT)], capture_output=True, text=True, check=False
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_create_sim_machine_has_open_livestream_flag() -> None:
+    text = CREATE_SIM_MACHINE_SCRIPT.read_text()
+    assert "--open-livestream" in text
+
+
+def test_create_sim_machine_open_livestream_opens_the_livestream_ports() -> None:
+    text = CREATE_SIM_MACHINE_SCRIPT.read_text()
+    assert "tcp:49100,udp:47998" in text
+
+
+def test_create_sim_machine_open_livestream_creates_the_firewall_rule_idempotently() -> None:
+    text = CREATE_SIM_MACHINE_SCRIPT.read_text()
+    assert "firewall-rules describe" in text
+    assert "firewall-rules create" in text
+
+
+def test_create_sim_machine_open_livestream_tags_the_instance() -> None:
+    text = CREATE_SIM_MACHINE_SCRIPT.read_text()
+    assert "add-tags" in text
+    assert "--target-tags" in text

@@ -1,6 +1,3 @@
-"""Pure helpers behind the Isaac gripper attach (FINDINGS ARM-2, R-4), driven
-with fake prims: articulation-root removal and the fingertip collision check."""
-
 import pytest
 
 from isaac_module.sim_manager import (
@@ -117,7 +114,7 @@ def test_no_collision_anywhere_reports_all_false():
 
 
 # ---------------------------------------------------------------------------
-# de-instance + rewrite must not touch expired instance proxies (GPU run 6)
+# de-instance + rewrite must not touch expired instance proxies
 # ---------------------------------------------------------------------------
 
 ISAAC_DEV_PART = "omniverse://isaac-dev.ov.nvidia.com/Isaac/Robots/Robotiq/2F-85/parts/part.usd"
@@ -248,7 +245,7 @@ def test_rewrite_de_instances_by_path_and_never_touches_expired_proxies():
 
 
 # ---------------------------------------------------------------------------
-# passive linkage drives are released; only finger_joint is driven (GPU run 21)
+# passive linkage drives are released; only finger_joint is driven
 # ---------------------------------------------------------------------------
 
 
@@ -321,7 +318,8 @@ ARM_AND_GRIPPER_DOFS = [
 def test_gripper_handle_releases_passive_drives_and_drives_finger_joint_only():
     import math
 
-    from isaac_module.sim_manager import PASSIVE_JOINT_DAMPING, IsaacGripperHandle
+    from isaac_module.handles.gripper import PASSIVE_JOINT_DAMPING
+    from isaac_module.sim_manager import IsaacGripperHandle
 
     art = FakeArmArticulation(ARM_AND_GRIPPER_DOFS)
     handle = IsaacGripperHandle(
@@ -349,11 +347,11 @@ def _jaw_handle():
 
 
 def test_jaw_vibrating_on_a_block_stalls_and_holds():
-    """GPU run 23: at the contact angle the jaw oscillates +/-1 deg at 90 deg/s;
+    """At the contact angle the jaw oscillates +/-1 deg at 90 deg/s;
     velocity-gated predicates never fire. The progress window must."""
     import math
 
-    from isaac_module.sim_manager import GRIPPER_HOLDING_STEPS
+    from isaac_module.handles.gripper import GRIPPER_HOLDING_STEPS
 
     handle, art = _jaw_handle()
     handle.set_jaw(math.radians(47))
@@ -368,7 +366,7 @@ def test_jaw_vibrating_on_a_block_stalls_and_holds():
 def test_jaw_closing_freely_reports_moving_then_not_holding():
     import math
 
-    from isaac_module.sim_manager import GRIPPER_HOLDING_STEPS
+    from isaac_module.handles.gripper import GRIPPER_HOLDING_STEPS
 
     handle, art = _jaw_handle()
     handle.set_jaw(math.radians(47))
@@ -386,7 +384,7 @@ def _latched_hold():
     polled fast (grab()'s loop) until the stall fires."""
     import math
 
-    from isaac_module.sim_manager import GRIPPER_HOLDING_STEPS
+    from isaac_module.handles.gripper import GRIPPER_HOLDING_STEPS
 
     handle, art = _jaw_handle()
     handle.set_jaw(math.radians(47))
@@ -398,7 +396,7 @@ def _latched_hold():
 
 
 def test_jaw_hold_latches_through_slow_creep_samples():
-    """GPU run 25: grab()'s 120 Hz poll saw the stall, but the jaw kept
+    """grab()'s 120 Hz poll saw the stall, but the jaw kept
     creeping ~0.6 deg/s squeezing the lifted block, so a 1 Hz client sample
     reset the progress window every read and never re-accumulated it. The
     latch must carry the hold across such samples."""
