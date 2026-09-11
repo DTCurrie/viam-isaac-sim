@@ -14,7 +14,9 @@ def _config(name: str, attrs: dict) -> ComponentConfig:
     return ComponentConfig(name=name, attributes=dict_to_struct(attrs))
 
 
-def test_do_command_prim_pose_default_prim_is_the_bases_own_root(world):
+def test_do_command_prim_pose_default_prim_is_the_assets_body_prim(world):
+    # the jetbot's root is a plain Xform physics never moves; its chassis
+    # drives, so the default reads the chassis and a moving base reads as moving
     IsaacBase.new(
         _config(
             "base_prim_pose",
@@ -32,7 +34,7 @@ def test_do_command_prim_pose_default_prim_is_the_bases_own_root(world):
         return await world.do_command({"command": "prim_pose", "name": "base_prim_pose"})
 
     result = asyncio.run(scenario())
-    assert result["prim_path"] == "/World/base_prim_pose"
+    assert result["prim_path"] == "/World/base_prim_pose/chassis"
     assert result["position_mm"] == pytest.approx([300.0, -200.0, 100.0], abs=1e-3)
     assert result["quaternion_wxyz"] == pytest.approx([0.0, 0.0, 0.0, 1.0], abs=1e-6)
 

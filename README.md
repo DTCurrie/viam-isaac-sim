@@ -18,6 +18,7 @@ an empty stage to a sorting cell that runs itself.
 | Model | Viam API | What it does |
 |---|---|---|
 | `viam:isaac-sim-devin:world` | `rdk:component:generic` | Boots Isaac Sim, opens the USD stage, runs the sim loop. Configure exactly one. |
+| `viam:isaac-sim-devin:scene-finalizer` | `rdk:component:generic` | Built last (its `depends_on` names every sim component) and tells the world the scene is populated, so a cold start reads as initializing instead of timing out. |
 | `viam:isaac-sim-devin:arm` | `rdk:component:arm` | Spawns (or attaches to) an articulation, whether a UR arm, a Franka, or any USD, and exposes joint control. |
 | `viam:isaac-sim-devin:camera` | `rdk:component:camera` | Creates (or attaches to) a camera prim and serves RGB, depth (`image/vnd.viam.dep`) and point clouds (`pointcloud/pcd`). |
 | `viam:isaac-sim-devin:base` | `rdk:component:base` | Spawns a differential-drive robot (e.g. jetbot) and drives it. |
@@ -232,6 +233,7 @@ and conventions. The conductor's and sorter-sensor's attributes are in
 | `usd_stage` | _empty stage + ground plane_ | USD file or omniverse:// URL to open. When set without `lighting`, the module logs a warning that the stage must provide its own floor and lights (it adds neither to a user stage) |
 | `physics_dt` / `rendering_dt` | `1/60` | step sizes in seconds. The block-sorting cell uses `1/120` for `physics_dt` (>= 80 steps/s is the floor for a 2F-85 grasp), rendering stays `1/60` |
 | `boot_timeout_sec` | `110` | stays under viam-server's 2 minute resource configuration timeout (`VIAM_RESOURCE_CONFIGURATION_TIMEOUT`) |
+| `wait_for_finalizer` | `false` | defer world steps until a `scene-finalizer` component runs, see below |
 | `kit_log_level` | `"warning"` | kit console verbosity |
 | `props` | `[]` | objects spawned into the scene at boot, see below |
 | `lighting` | _unset_ | dome and sphere lights applied at boot, see below |
@@ -249,6 +251,31 @@ best-effort. Both keys are optional, and leaving it unset leaves the
 renderer's defaults alone. `disable_viewport_updates: true` requires
 `livestream: false`, since the livestream needs viewport updates, and is
 refused otherwise.
+
+`wait_for_finalizer: true` holds the world at the boot pose, draining its task
+queue but not stepping, until a `scene-finalizer` component is built (see
+"scene-finalizer" below). The renderer compiles shaders during the first
+`world.step` calls after the scene changes, and on a cold shader cache that
+can take minutes per step. Without the gate, a queued call made during one of
+those steps times out, so viam-server's resource builds fail and retry for
+minutes. With the gate, those slow steps run once, after every sim component
+is built, and a caller meets `UNAVAILABLE` instead of a timeout. A
+`scene-finalizer` naming this world and every sim component:
+
+```json
+{
+  "name": "cell-ready",
+  "api": "rdk:component:generic",
+  "model": "viam:isaac-sim-devin:scene-finalizer",
+  "depends_on": ["isaac-world", "pick-arm", "pick-grip", "scene-cam"]
+}
+```
+
+While the world is initializing, every sim resource's operational calls fail
+with gRPC `UNAVAILABLE` and the message `Isaac Sim is initializing; retry
+shortly`, so a client retries instead of timing out. The world's `status`
+DoCommand still answers, reporting `"ready": false` until the finalizer runs
+and three world steps complete.
 
 Each entry in `props` is an object:
 
@@ -319,14 +346,17 @@ The world also supports `DoCommand`:
 * `{"command": "ignore_props", "names": [...]}` -> `{"ignored": [...]}`. An
   empty list clears the exclusion. Excludes the named props from
   `GetGeometries` (e.g. the block currently being grasped)
-* `{"command": "scatter_cell", "seed": int, "size_range_mm"?: [lo, hi]
-  (applies to every drawn block, 0 < lo <= hi, omit to keep current
-  sizes), "counts"?: {color: int} (overrides the default 1-3 per-color
-  draw for that color)}` -> `{"seed", "counts": {color: n}, "positions":
-  {name: [x,y,z] mm}, "sizes_mm": {name: [x,y,z] mm}, "parked": [names]}`,
-  which draws a fresh sorting problem from the 18-block pool
-* `{"command": "clear_cell"}` -> `{"parked": [names]}`, which re-parks all 18
-  pool blocks
+* `{"command": "scatter_cell", "seed": int, "names_by_color": {color:
+  [names]}, "region": [[x0,y0,z0], [x1,y1,z1]] mm, "park_positions_mm":
+  {name: [x,y]}, "size_range_mm"?: [lo, hi] (applies to every drawn block,
+  0 < lo <= hi, omit to keep current sizes), "counts"?: {color: int}
+  (overrides the default 1-3 per-color draw for that color)}` -> `{"seed",
+  "counts": {color: n}, "positions": {name: [x,y,z] mm}, "sizes_mm": {name:
+  [x,y,z] mm}, "parked": [names]}`, which draws a fresh sorting problem
+  from the named pool. The world knows no cell, so the caller (the
+  conductor, from `cell_layout`) supplies the pool, region and park grid
+* `{"command": "clear_cell", "names_by_color": {...}, "park_positions_mm":
+  {...}}` -> `{"parked": [names]}`, which re-parks every pool block
 * `{"command": "joint_state", "name": "<arm component>"}` -> `{"joints":
   [{"name", "named", "position_deg", "velocity_deg_s", "target_deg"}]}`,
   the named arm's per-joint state
@@ -613,7 +643,21 @@ config instead of the asset's own defaults.
 `MoveStraight` with a velocity nearly zero stops the base and returns, the
 same no-op-stop semantics as rdk's wheeled base. `Spin` with an angle
 nearly zero raises, and `Spin` with a velocity nearly zero stops the base
-and returns, again matching the wheeled base.
+and returns, again matching the wheeled base. Both hold their velocity
+until the computed duration has passed in sim time, not wall time, so a sim
+stepping below real time still covers the commanded distance. A `timeout`
+still cuts the wait on the wall clock.
+
+### scene-finalizer
+
+This model has no attributes. Its `depends_on` must name the world component
+and every sim arm, gripper, camera and base in the machine, or `validate_config`
+rejects the config. viam-server then builds it last, and building it (or
+reconfiguring it) tells the world the scene is populated and it is safe to
+start stepping, see `wait_for_finalizer` under "world attributes" above.
+`tools/simulate_config.py` emits this component automatically, naming the
+world plus every swapped sim component, and both `fragments/isaac-sim-block-sorting.json`
+and `fragments/isaac-sim-world.json` carry one.
 
 ## Lifecycle (close and reconfigure)
 

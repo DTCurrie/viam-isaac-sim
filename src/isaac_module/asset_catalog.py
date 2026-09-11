@@ -113,5 +113,8 @@ KNOWN_ASSETS: dict[str, dict[str, Any]] = {
         "wheel_joints": ["left_wheel_joint", "right_wheel_joint"],
         "wheel_radius": 0.03,
         "wheel_base": 0.1125,
+        # the asset's root is a plain Xform that physics never moves; the
+        # chassis rigid body is what drives, so poses are read from it
+        "body_prim": "chassis",
     },
 }

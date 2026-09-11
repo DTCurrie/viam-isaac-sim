@@ -4,6 +4,7 @@ from . import (  # noqa: F401 - importing registers the models
     camera,
     conductor,
     gripper,
+    scene_finalizer,
     sorter_sensor,
     world,
 )

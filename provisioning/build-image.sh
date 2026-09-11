@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Builds the `viam-isaac-sim` GCP image: a GPU instance with the NVIDIA driver,
-# Python 3.11, and Isaac Sim baked into the venv `first_run.sh` looks for, plus
-# viam-agent installed and ready for a machine's credentials. `create-sim-machine.sh`
-# launches instances from the resulting image.
+# Python 3.11, and Isaac Sim baked into the venv `first_run.sh` looks for, a warm
+# shader cache, and viam-agent installed and ready for a machine's credentials.
+# `create-sim-machine.sh` launches instances from the resulting image.
 #
 # Usage: build-image.sh --project PROJECT [--zone ZONE] [--machine-type TYPE]
 #   [--image-family FAMILY] [--dry-run]
@@ -115,8 +115,24 @@ wait_for_ssh() {
 }
 
 copy_install_files() {
+    run gcloud compute ssh "$BUILDER_NAME" \
+        --project "$PROJECT" \
+        --zone "$ZONE" \
+        --command "mkdir -p tools fragments"
     run gcloud compute scp "$SCRIPT_DIR/../first_run.sh" "$SCRIPT_DIR/../requirements.txt" \
         "$BUILDER_NAME:~/" \
+        --project "$PROJECT" \
+        --zone "$ZONE"
+    run gcloud compute scp --recurse "$SCRIPT_DIR/../src" \
+        "$BUILDER_NAME:~/" \
+        --project "$PROJECT" \
+        --zone "$ZONE"
+    run gcloud compute scp "$SCRIPT_DIR/../tools/warm_shader_cache.py" \
+        "$BUILDER_NAME:~/tools/" \
+        --project "$PROJECT" \
+        --zone "$ZONE"
+    run gcloud compute scp "$SCRIPT_DIR/../fragments/isaac-sim-block-sorting.json" \
+        "$BUILDER_NAME:~/fragments/" \
         --project "$PROJECT" \
         --zone "$ZONE"
 }
@@ -136,6 +152,21 @@ reboot_and_confirm() {
     # Re-runs the installer so its fast path (a venv where `import isaacsim`
     # already succeeds) confirms the install landed instead of re-downloading it.
     run_first_run
+}
+
+# Runs as root because viam-agent runs the module as root, and Kit's per-user
+# caches (`~/.cache/ov`, `~/.nv/ComputeCache`, `~/.cache/nvidia/GLCache`) must
+# land in root's home to be found there later. Runs after the reboot so the
+# driver is active. Uses our own fragment rather than NVIDIA's generic
+# `warmup.sh` so the compiled pipelines include our assets, props and camera
+# render products, not just the base pipelines. Kit's portable cache lands
+# under the venv at `isaacsim/kit/cache`. A driver or Isaac Sim bump
+# invalidates the cache, so the image is rebuilt after either.
+warm_shader_cache() {
+    run gcloud compute ssh "$BUILDER_NAME" \
+        --project "$PROJECT" \
+        --zone "$ZONE" \
+        --command "sudo VIAM_MODULE_DATA=$DATA_DIR OMNI_KIT_ACCEPT_EULA=YES PYTHONPATH=src $DATA_DIR/isaac-venv/bin/python tools/warm_shader_cache.py --fragment fragments/isaac-sim-block-sorting.json"
 }
 
 install_viam_agent() {
@@ -176,6 +207,7 @@ main() {
     copy_install_files
     run_first_run
     reboot_and_confirm
+    warm_shader_cache
     install_viam_agent
     stop_builder
     create_image

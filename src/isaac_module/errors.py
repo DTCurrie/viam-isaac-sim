@@ -8,6 +8,7 @@ with the status below, and the builtin the code used to raise, so existing
   SimNotBootedError  (RuntimeError)  -> FAILED_PRECONDITION
   PrimNotFoundError  (ValueError)    -> INVALID_ARGUMENT
   SimTimeoutError    (TimeoutError)  -> DEADLINE_EXCEEDED
+  SimInitializingError (RuntimeError) -> UNAVAILABLE
 
 UNIMPLEMENTED is ``viam.errors.MethodNotImplementedError``, raised directly by
 the model method. This module stays import-light on purpose.
@@ -45,6 +46,25 @@ class CameraInitError(SimError, RuntimeError):
     is raised once the bounded retry in ``SimManager._initialize_camera`` is
     exhausted.
     """
+
+
+SIM_INITIALIZING_MESSAGE = "Isaac Sim is initializing; retry shortly"
+
+
+class SimInitializingError(ViamGRPCError, SimError, RuntimeError):
+    """The world is booted but not yet ready for operational calls.
+
+    Raised by ``SimManager.run`` (and ``SimManager.require_ready``) while a
+    world configured with ``wait_for_finalizer`` is still draining the scene
+    finalizer's first warm-up steps, so a cold shader compile reads as
+    "initializing" rather than as a timed-out call. UNAVAILABLE is the status
+    clients and the app treat as transient. The message is fixed so a client
+    can match it.
+    """
+
+    def __init__(self, message: str = SIM_INITIALIZING_MESSAGE) -> None:
+        ViamGRPCError.__init__(self, message, Status.UNAVAILABLE)
+        Exception.__init__(self, message)
 
 
 class SimTimeoutError(ViamGRPCError, SimError, TimeoutError):

@@ -17,7 +17,7 @@ into. Read it before you add a model or move a file.
 | path | lines | what it owns |
 | --- | --- | --- |
 | `src/main.py` | 114 | The process layout. Isaac Sim gets the main thread, the Viam module gRPC server gets a daemon thread with a fixed 8-worker executor. Signals stop the module before the sim. |
-| `src/isaac_module/sim_manager.py` | 1745 | `SimConfig` and `SimManager`: the Kit lifecycle, the boot sequence, the sim thread and its task queue, the component factories and the handle cache. |
+| `src/isaac_module/sim_manager.py` | 1877 | `SimConfig` and `SimManager`: the Kit lifecycle, the boot sequence, the sim thread and its task queue, the component factories and the handle cache. |
 | `src/isaac_module/handles/world.py` | 623 | `WorldHandle`, its Isaac backend and its mock: scene verbs, prop poses, geometries. |
 | `src/isaac_module/handles/arm.py` | 747 | `ArmHandle`, Isaac and mock: joint drive, settle detection, the velocity cap, prim poses. |
 | `src/isaac_module/handles/gripper.py` | 530 | `GripperHandle`, Isaac and mock: jaw drive, stall and hold detection, the attach sequence. |
@@ -26,6 +26,7 @@ into. Read it before you add a model or move a file.
 | `src/isaac_module/models/world.py` | 300 | The `isaac-world` generic component: boot config, `close()`, `do_command` dispatch through `asyncio.to_thread`. |
 | `src/isaac_module/models/world_commands.py` | 363 | One function per world verb behind `COMMAND_HANDLERS`, including the payload-driven `scatter_cell` and `clear_cell`. |
 | `src/isaac_module/models/world_config_validation.py` | 272 | The world's attribute validators, including `kit_log_level` and the identity-frame rule. |
+| `src/isaac_module/models/scene_finalizer.py` | 53 | The `scene-finalizer` generic component: validates `depends_on` names at least one component, and calls `finalize_scene()` on build and reconfigure. |
 | `src/isaac_module/models/arm.py` | 650 | The `arm` component: joint moves, IK against the served kinematics, `max_vel_degs_per_sec`, typed gRPC errors, hold-on-cancel. |
 | `src/isaac_module/models/camera.py` | 339 | The `camera` component: images, point clouds, encoding. |
 | `src/isaac_module/models/gripper.py` | 378 | The `gripper` component: open, grab, jaw state, deadlines. |
@@ -74,12 +75,18 @@ Take `GetJointPositions` on a simulated arm.
    model holds an `ArmHandle` it got from `SimManager.create_arm` during `reconfigure`.
 3. The model calls `await asyncio.to_thread(handle.joint_positions)`. This hop matters. The handle
    call blocks, and blocking it on the module's event loop would freeze every other component.
-4. `ArmHandle.joint_positions` in `handles/arm.py` calls `SimManager.run`.
-   If the caller is already on the sim thread, `run` calls `fn` inline. Otherwise it puts
-   `(fn, Future)` on a `queue.Queue` and waits on the future with a 30 second default timeout.
+4. `ArmHandle.joint_positions` in `handles/arm.py` calls `SimManager.run`. If the caller is
+   already on the sim thread, `run` calls `fn` inline, gate or no gate, since nothing on that
+   thread can queue behind a slow step. Otherwise `run` checks the scene gate: while the world is
+   waiting on a `scene-finalizer` and is not yet ready, it refuses with `UNAVAILABLE` unless the
+   caller is a component factory or a stop verb, both of which pass
+   `allow_during_initialization=True`. Past the gate it puts `(fn, Future)` on a `queue.Queue`
+   and waits on the future with a 30 second default timeout.
 5. The sim thread is `SimManager.main_loop`. Once per step it drains the
-   queue in `_drain_tasks`, runs each callable, and sets its future. Then it calls
-   `world.step(render=True)`.
+   queue in `_drain_tasks`, runs each callable, and sets its future. While a configured
+   `scene-finalizer` has not yet been built, the loop keeps draining the queue but does not step
+   the world. Once the finalizer runs, the loop steps three times before reporting the world
+   ready. Otherwise it calls `world.step(render=True)` every cycle.
 6. `fn` reads the Isaac articulation and returns radians. The model converts to degrees and builds
    the Viam response.
 

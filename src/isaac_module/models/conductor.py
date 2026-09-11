@@ -85,7 +85,11 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, ClassVar, cast
 
+from grpclib import Status
+from grpclib.exceptions import GRPCError
 from typing_extensions import Self
+from viam.components.arm import Arm
+from viam.errors import ViamGRPCError
 from viam.logging import getLogger
 from viam.proto.app.robot import ComponentConfig
 from viam.proto.common import Pose, PoseInFrame, ResourceName, WorldState
@@ -459,6 +463,7 @@ class IsaacConductor(Generic, EasyResource):  # type: ignore[misc]  # SDK: API i
             return by_name[resource_name]
 
         self._world = cast("WorldApi", dep("world"))
+        self._arm = cast(Arm, dep("arm"))
         self._gripper = cast("GripperApi", dep("gripper"))
         self._gripper_name = str(attrs["gripper"])
         self._camera_name = str(attrs["camera"])
@@ -491,9 +496,26 @@ class IsaacConductor(Generic, EasyResource):  # type: ignore[misc]  # SDK: API i
             return cast("Mapping[str, ValueTypes]", self._status_snapshot())
         raise ValueError(f"unknown command {cmd!r}; supported: start, stop, status")
 
+    async def _require_arm_ready(self) -> None:
+        """Probe the arm before committing to a run, so a cold sim's
+        UNAVAILABLE reaches the caller instead of a run that starts and then
+        immediately errors. Any other failure from the probe is not this
+        method's concern: start proceeds and the run itself will surface it."""
+        try:
+            await self._arm.is_moving()
+        except (GRPCError, ViamGRPCError) as err:
+            status = err.status if isinstance(err, GRPCError) else err.grpc_code
+            if status is Status.UNAVAILABLE:
+                raise
+            LOGGER.debug("arm readiness probe failed with %s; starting anyway", err)
+        except Exception as err:  # noqa: BLE001 - any other probe failure is not fatal to start
+            LOGGER.debug("arm readiness probe failed with %s; starting anyway", err)
+
     async def _handle_start(self, command: Mapping[str, ValueTypes]) -> dict[str, ValueTypes]:
         if self._state in (STATE_RUNNING, STATE_STOPPING):
             return {"ok": False, "state": self._state}
+
+        await self._require_arm_ready()
 
         seed_value = command.get("seed")
         seed = (

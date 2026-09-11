@@ -18,6 +18,7 @@
       "attributes": {
         "headless": true,
         "livestream": true,
+        "wait_for_finalizer": false,
         "lighting": {
           "dome": {
             "intensity": 1000,
@@ -36,6 +37,12 @@
           }
         }
       }
+    },
+    {
+      "name": "scene-finalizer",
+      "api": "rdk:component:generic",
+      "model": "viam:isaac-sim-devin:scene-finalizer",
+      "depends_on": ["isaac-world"]
     }
   ]
 }

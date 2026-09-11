@@ -286,18 +286,19 @@ class IsaacArmHandle(ArmHandle):
         return self._sim.run(_get)
 
     def set_joint_targets(self, positions: list[float], max_vel_rad_s: float | None = None) -> None:
-        import numpy as np
+        self._sim.run(lambda: self._apply_joint_targets_on_sim_thread(positions, max_vel_rad_s))
 
-        def _apply():
-            self._apply_velocity_cap(max_vel_rad_s)
-            action = self._sim._isaac.ArticulationAction(
-                joint_positions=np.array(positions, dtype=float),
-                joint_indices=self._joint_indices,
-            )
-            self._art.apply_action(action)
-            self._targets = list(positions)
-
-        self._sim.run(_apply)
+    def _apply_joint_targets_on_sim_thread(
+        self, positions: list[float], max_vel_rad_s: float | None
+    ) -> None:
+        """Sim-thread body shared by set_joint_targets and stop's hold-in-place."""
+        self._apply_velocity_cap(max_vel_rad_s)
+        action = self._sim._isaac.ArticulationAction(
+            joint_positions=np.array(positions, dtype=float),
+            joint_indices=self._joint_indices,
+        )
+        self._art.apply_action(action)
+        self._targets = list(positions)
 
     def _apply_velocity_cap(self, max_vel_rad_s: float | None) -> None:
         """Cap the named joints' max velocity for this move. SingleArticulation
@@ -448,9 +449,12 @@ class IsaacArmHandle(ArmHandle):
             self._sim.run(_remove)
 
     def stop(self) -> None:
-        # hold the current position
-        current = self.get_joint_positions()
-        self.set_joint_targets(current)
+        def _hold() -> None:
+            positions = self._art.get_joint_positions(joint_indices=self._joint_indices)
+            current = [float(v) for v in positions]
+            self._apply_joint_targets_on_sim_thread(current, None)
+
+        self._sim.run(_hold, allow_during_initialization=True)
         # the new target IS the current position, so any in-flight
         # wait_for_settle should read as having reached it, not stalled.
         with self._active_settle_lock:

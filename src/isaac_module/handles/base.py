@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import threading
+import time
 from typing import TYPE_CHECKING, Any
 
 from viam.logging import getLogger
@@ -26,6 +27,13 @@ class BaseHandle:
         raise NotImplementedError
 
     def is_moving(self) -> bool:
+        raise NotImplementedError
+
+    def sim_time(self) -> float:
+        """Seconds of simulated time, the clock the base's motion runs on.
+        The sim seldom steps at real time (an L4 driving four render
+        products runs near 0.4x), so a distance-for-duration command has
+        to wait on this clock, not the wall's."""
         raise NotImplementedError
 
     def get_prim_world_pose(self, prim_path: str) -> tuple[Vec3, Quat]:
@@ -61,15 +69,22 @@ class IsaacBaseHandle(BaseHandle):
             LOGGER.exception("error driving base")
 
     def set_velocity(self, linear_mps: float, angular_rps: float) -> None:
+        self._sim.require_ready()
         with self._lock:
             self._cmd = (float(linear_mps), float(angular_rps))
 
     def stop(self) -> None:
-        self.set_velocity(0.0, 0.0)
+        # zeroed directly, not through set_velocity, so a stop always
+        # succeeds even while the world is still initializing.
+        with self._lock:
+            self._cmd = (0.0, 0.0)
 
     def is_moving(self) -> bool:
         with self._lock:
             return self._cmd != (0.0, 0.0)
+
+    def sim_time(self) -> float:
+        return self._sim.run(lambda: float(self._sim.world.current_time))
 
     def get_prim_world_pose(self, prim_path: str) -> tuple[Vec3, Quat]:
         def _pose() -> tuple[Vec3, Quat]:
@@ -124,7 +139,13 @@ class MockBaseHandle(BaseHandle):
         with self._lock:
             return self._cmd != (0.0, 0.0)
 
+    def sim_time(self) -> float:
+        # the mock integrates nothing, so wall time is its sim clock
+        return time.monotonic()
+
     def get_prim_world_pose(self, prim_path: str) -> tuple[Vec3, Quat]:
-        if prim_path != self._prim_path:
+        # the root and anything under it (the asset's body prim) read as the
+        # spawn pose; the mock has no articulation to move them apart
+        if prim_path != self._prim_path and not prim_path.startswith(f"{self._prim_path}/"):
             raise PrimNotFoundError(f"prim not found: {prim_path}")
         return self.spawn_position, self.spawn_orientation

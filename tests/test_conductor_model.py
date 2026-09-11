@@ -7,11 +7,14 @@ import asyncio
 from typing import Any
 
 import pytest
+from grpclib import Status
+from viam.errors import ViamGRPCError
 from viam.proto.app.robot import ComponentConfig
 from viam.proto.common import Pose, ResourceName
 from viam.utils import dict_to_struct
 
 from isaac_module import cell_layout
+from isaac_module.errors import SimInitializingError
 from isaac_module.models import conductor as conductor_module
 from isaac_module.models.conductor import (
     PARK_POSE_TCP_MM,
@@ -86,10 +89,23 @@ class FakeGripper:
         raise NotImplementedError
 
 
-def _dependencies(world: Any, gripper: Any) -> dict[ResourceName, Any]:
+class FakeArm:
+    """Stands in for the arm dependency, which the conductor only reads a
+    cheap readiness signal from before committing to a run."""
+
+    def __init__(self, is_moving_error: Exception | None = None) -> None:
+        self._is_moving_error = is_moving_error
+
+    async def is_moving(self) -> bool:
+        if self._is_moving_error is not None:
+            raise self._is_moving_error
+        return False
+
+
+def _dependencies(world: Any, gripper: Any, arm: Any = None) -> dict[ResourceName, Any]:
     deps: dict[ResourceName, Any] = {
         ResourceName(name=WORLD_NAME): world,
-        ResourceName(name=ARM_NAME): object(),
+        ResourceName(name=ARM_NAME): arm if arm is not None else FakeArm(),
         ResourceName(name=GRIPPER_NAME): gripper,
         ResourceName(name=CAMERA_NAME): object(),
         ResourceName(name=SIDE_CAMERA_NAME): object(),
@@ -100,11 +116,13 @@ def _dependencies(world: Any, gripper: Any) -> dict[ResourceName, Any]:
     return deps
 
 
-def _make_conductor(world: Any | None = None, gripper: Any | None = None) -> IsaacConductor:
+def _make_conductor(
+    world: Any | None = None, gripper: Any | None = None, arm: Any | None = None
+) -> IsaacConductor:
     world = world if world is not None else FakeWorld()
     gripper = gripper if gripper is not None else FakeGripper()
     config = _config("conductor-1", _valid_attrs())
-    return IsaacConductor.new(config, _dependencies(world, gripper))
+    return IsaacConductor.new(config, _dependencies(world, gripper, arm))
 
 
 # ----------------------------------------------------------------------
@@ -198,6 +216,21 @@ async def test_second_start_while_running_is_a_noop():
     status = await conductor.do_command({"command": "status"})
     assert status["state"] == "complete"
     assert status["outcomes"] == {"red-0": {"outcome": "placed", "attempts": 1}}
+
+
+async def test_start_fails_fast_when_the_sim_is_still_initializing():
+    conductor = _make_conductor(arm=FakeArm(is_moving_error=SimInitializingError()))
+    task_before = conductor._task
+
+    with pytest.raises(ViamGRPCError) as excinfo:
+        await conductor.do_command({"command": "start", "loops": 1, "seed": 20})
+
+    assert excinfo.value.grpc_code is Status.UNAVAILABLE
+    assert str(excinfo.value) == "Isaac Sim is initializing; retry shortly"
+
+    status = await conductor.do_command({"command": "status"})
+    assert status["state"] == "idle"
+    assert conductor._task is task_before
 
 
 async def test_stop_between_motions_halts_before_the_next_block():

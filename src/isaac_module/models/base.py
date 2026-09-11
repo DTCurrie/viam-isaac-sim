@@ -2,6 +2,7 @@
 
 import asyncio
 import math
+import time
 from collections.abc import Mapping, Sequence
 from typing import Any, ClassVar
 
@@ -24,6 +25,9 @@ from .sim_component_validation import validate_sim_component
 # wheeled_base.go treats an angle or speed within this threshold of zero as
 # "nearly 0" (`wheeled_base.go:243`, `wheeled_base.go:248`)
 NEAR_ZERO_THRESHOLD = 0.0001
+# how often a distance-for-duration move re-reads the sim clock. Each read
+# is one sim-thread round trip, so this also paces to the step rate.
+SIM_TIME_POLL_S = 0.02
 
 
 class BaseMoveTimeoutError(ViamGRPCError, TimeoutError):
@@ -143,17 +147,16 @@ class IsaacBase(Base, EasyResource):  # type: ignore[misc]  # SDK: API is Final 
         speed = abs(velocity) / 1000.0
         direction = 1.0 if (meters >= 0) == (velocity >= 0) else -1.0
         duration = abs(meters) / speed
-        wait_s = duration if timeout is None else min(duration, timeout)
         handle = self._h()
         await asyncio.to_thread(handle.set_velocity, direction * speed, 0.0)
         try:
-            await asyncio.sleep(wait_s)
+            reached = await self._drive_for_sim_seconds(handle, duration, timeout)
         finally:
             await asyncio.to_thread(handle.stop)
-        if timeout is not None and timeout < duration:
+        if not reached:
             raise BaseMoveTimeoutError(
                 f"base {self.name}: move_straight did not reach its target within "
-                f"{timeout:.2f}s (needed {duration:.2f}s)"
+                f"{timeout:.2f}s of wall time (needs {duration:.2f}s of sim time)"
             )
 
     async def spin(
@@ -170,18 +173,40 @@ class IsaacBase(Base, EasyResource):  # type: ignore[misc]  # SDK: API is Final 
         speed = math.radians(abs(velocity))
         direction = 1.0 if (radians >= 0) == (velocity >= 0) else -1.0
         duration = abs(radians) / speed
-        wait_s = duration if timeout is None else min(duration, timeout)
         handle = self._h()
         await asyncio.to_thread(handle.set_velocity, 0.0, direction * speed)
         try:
-            await asyncio.sleep(wait_s)
+            reached = await self._drive_for_sim_seconds(handle, duration, timeout)
         finally:
             await asyncio.to_thread(handle.stop)
-        if timeout is not None and timeout < duration:
+        if not reached:
             raise BaseMoveTimeoutError(
                 f"base {self.name}: spin did not reach its target within "
-                f"{timeout:.2f}s (needed {duration:.2f}s)"
+                f"{timeout:.2f}s of wall time (needs {duration:.2f}s of sim time)"
             )
+
+    async def _drive_for_sim_seconds(
+        self, handle: BaseHandle, duration_s: float, timeout: float | None
+    ) -> bool:
+        """Hold the velocity already commanded until ``duration_s`` of sim
+        time has passed, or the wall-clock ``timeout`` runs out first.
+        Returns whether the sim-time deadline was reached. The sim seldom
+        steps at real time (an L4 driving four render products runs near
+        0.4x), so a wall-clock sleep would cover that share of the commanded
+        distance."""
+        start = await asyncio.to_thread(handle.sim_time)
+        wall_deadline = None if timeout is None else time.monotonic() + timeout
+        while True:
+            elapsed = await asyncio.to_thread(handle.sim_time) - start
+            if elapsed >= duration_s:
+                return True
+            if wall_deadline is not None:
+                remaining = wall_deadline - time.monotonic()
+                if remaining <= 0.0:
+                    return False
+                await asyncio.sleep(min(SIM_TIME_POLL_S, remaining))
+            else:
+                await asyncio.sleep(SIM_TIME_POLL_S)
 
     async def set_power(
         self, linear: Vector3, angular: Vector3, *, timeout: float | None = None, **kwargs

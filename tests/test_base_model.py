@@ -124,6 +124,46 @@ def _isaac_base_manager() -> SimManager:
     return manager
 
 
+def test_move_straight_waits_on_the_sim_clock_not_the_wall(world):
+    """A sim stepping below real time must still cover the commanded
+    distance, so the move holds until the duration has passed in sim time.
+    Here the sim clock runs at half wall speed: 0.1 s of sim time takes
+    0.2 s of wall time."""
+    base = _make_base("move-straight-sim-clock-base")
+    handle = base._handle
+    assert handle is not None
+    wall_start = time.monotonic()
+    handle.sim_time = lambda: wall_start + (time.monotonic() - wall_start) * 0.5  # type: ignore[method-assign]
+
+    async def scenario():
+        t0 = time.monotonic()
+        await base.move_straight(distance=100, velocity=1000)  # 0.1 s of sim time
+        return time.monotonic() - t0, await base.is_moving()
+
+    elapsed, moving = asyncio.run(scenario())
+    assert elapsed >= 0.18
+    assert moving is False
+
+
+def test_spin_timeout_is_measured_on_the_wall_clock(world):
+    """The wall-clock timeout still bounds a move whose sim clock has
+    stalled, so a paused sim cannot hang a caller."""
+    base = _make_base("spin-stalled-sim-clock-base")
+    handle = base._handle
+    assert handle is not None
+    handle.sim_time = lambda: 0.0  # type: ignore[method-assign]
+
+    async def scenario():
+        t0 = time.monotonic()
+        with pytest.raises(BaseMoveTimeoutError):
+            await base.spin(angle=90, velocity=45, timeout=0.05)
+        return time.monotonic() - t0, await base.is_moving()
+
+    elapsed, moving = asyncio.run(scenario())
+    assert elapsed < 1.0
+    assert moving is False
+
+
 def test_differential_controller_receives_the_three_speed_limits():
     manager = _isaac_base_manager()
     attrs = {

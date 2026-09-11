@@ -458,6 +458,47 @@ def test_arm_on_a_non_world_frame_parent_fails_at_resolve_time() -> None:
     assert "allow_unmatched" in message
 
 
+def test_resolved_config_gets_a_finalizer_depending_on_the_world_and_every_swapped_component() -> (
+    None
+):
+    real_config = _load(REAL_CONFIG_PATH)
+    resolution = resolve(real_config, _table(), _world_fragment())
+    resolved_by_name = _by_name(resolution.config["components"])
+
+    finalizers = [c for c in resolution.config["components"] if c["name"] == "scene-finalizer"]
+    assert len(finalizers) == 1
+    assert finalizers[0]["depends_on"] == [DEFAULT_WORLD_NAME, "pick-arm", "pick-grip", "wrist-cam"]
+    assert resolved_by_name[DEFAULT_WORLD_NAME]["attributes"]["wait_for_finalizer"] is True
+
+
+def test_resolved_config_with_no_sim_component_finalizer_depends_only_on_the_world() -> None:
+    config = {"components": []}
+    resolution = resolve(config, _table(), _world_fragment())
+    resolved_by_name = _by_name(resolution.config["components"])
+
+    finalizer = resolved_by_name["scene-finalizer"]
+    assert finalizer["depends_on"] == [DEFAULT_WORLD_NAME]
+    assert resolved_by_name[DEFAULT_WORLD_NAME]["attributes"]["wait_for_finalizer"] is False
+
+
+def test_user_supplied_finalizer_is_passed_through_untouched() -> None:
+    real_config = _load(REAL_CONFIG_PATH)
+    user_finalizer = {
+        "name": "scene-finalizer",
+        "api": "rdk:component:generic",
+        "model": "viam:isaac-sim-devin:scene-finalizer",
+        "depends_on": ["pick-arm"],
+    }
+    real_config["components"].append(dict(user_finalizer))
+
+    resolution = resolve(real_config, _table(), _world_fragment())
+    resolved_by_name = _by_name(resolution.config["components"])
+
+    assert resolved_by_name["scene-finalizer"] == user_finalizer
+    world_attrs = resolved_by_name[DEFAULT_WORLD_NAME]["attributes"]
+    assert "wait_for_finalizer" not in world_attrs or world_attrs["wait_for_finalizer"] is False
+
+
 def test_arm_on_a_non_world_frame_parent_passes_through_with_allow_unmatched() -> None:
     real_config = _load(ARM_ON_GANTRY_CONFIG_PATH)
     real_by_name = _by_name(real_config["components"])

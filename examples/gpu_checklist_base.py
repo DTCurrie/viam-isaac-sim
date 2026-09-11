@@ -177,8 +177,20 @@ async def _check_wheel_geometry(base: Base) -> tuple[str, bool]:
     return line, ok
 
 
+async def _sim_time_s(world: Generic) -> float:
+    status = await world.do_command({"command": "status"})
+    sim_time = status["sim_time"]
+    if not isinstance(sim_time, (int, float)):
+        raise RuntimeError(f"world status has no numeric sim_time: {sim_time!r}")
+    return float(sim_time)
+
+
 async def _check_set_velocity(base: Base, world: Generic) -> tuple[str, bool]:
+    # SetVelocity is open-loop, so the distance it covers scales with how
+    # much sim time passed, not how long this laptop slept. The sim on a
+    # loaded box steps well below real time, so expect against sim time.
     before = await _base_pose(base, world)
+    sim_before = await _sim_time_s(world)
     await base.set_velocity(
         linear=Vector3(x=0.0, y=SET_VELOCITY_LINEAR_MMPS, z=0.0),
         angular=Vector3(x=0.0, y=0.0, z=0.0),
@@ -187,12 +199,18 @@ async def _check_set_velocity(base: Base, world: Generic) -> tuple[str, bool]:
         await asyncio.sleep(SET_VELOCITY_DURATION_S)
     finally:
         await base.stop()
+    sim_after = await _sim_time_s(world)
     after = await _base_pose(base, world)
     observed_mm = forward_distance_mm(before, after)
-    expected_mm = SET_VELOCITY_LINEAR_MMPS * SET_VELOCITY_DURATION_S
+    sim_elapsed_s = sim_after - sim_before
+    expected_mm = SET_VELOCITY_LINEAR_MMPS * sim_elapsed_s
     ok = within_relative_tolerance(observed_mm, expected_mm, SET_VELOCITY_TOLERANCE_FRACTION)
     print(f"  before (mm/deg): {before}")
     print(f"  after (mm/deg): {after}")
+    print(
+        f"  sim time elapsed: {sim_elapsed_s:.2f} s over {SET_VELOCITY_DURATION_S:.1f} s of wall"
+        f" time (real-time factor {sim_elapsed_s / SET_VELOCITY_DURATION_S:.2f})"
+    )
     print(f"  forward distance: {observed_mm:.1f} mm, expected {expected_mm:.1f} mm")
     line = verdict(
         "SetVelocity forward for one second moves the base along its own +x",

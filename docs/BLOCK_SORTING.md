@@ -260,17 +260,26 @@ without `size_range_mm` never resets.
 
 ## Pooled scatter
 
-`{"command": "scatter_cell", "seed": ...}` draws a fresh sorting problem
-from a fixed pool of 18 blocks (`cell_layout.BLOCK_COLORS` x 3 per color)
-without spawning or deleting anything. A per-color count is drawn first,
-1-3 per color by default, from the same seeded stream as the sizes and
-positions. That many blocks per color then place inside the scatter region
-with the existing separation rules, and every undrawn block parks out of the
-way. The same `seed` always draws the same counts, sizes, and
-positions.
+`scatter_cell` draws a fresh sorting problem from a pool of blocks without
+spawning or deleting anything. The world component knows no cell, so the
+caller supplies the cell's numbers: the pool as `names_by_color`, the
+scatter `region` as two `[x, y, z]` corners in mm, and the park grid as
+`park_positions_mm`. The conductor builds them from `cell_layout` (18
+blocks, `BLOCK_COLORS` x 3). A per-color count is drawn first, 1-3 per
+color by default, from the same seeded stream as the sizes and positions.
+That many blocks per color then place inside the region with the existing
+separation rules, and every undrawn block parks out of the way. The same
+`seed` always draws the same counts, sizes, and positions.
 
 ```json
-{"command": "scatter_cell", "seed": 42, "size_range_mm": [50, 70]}
+{
+  "command": "scatter_cell",
+  "seed": 42,
+  "size_range_mm": [50, 70],
+  "names_by_color": {"red": ["block_red_1", "block_red_2", "block_red_3"], "green": ["..."]},
+  "region": [[-1350, -300, 750], [-700, 300, 750]],
+  "park_positions_mm": {"block_red_1": [x, y], "block_red_2": [x, y]}
+}
 ```
 
 -> `{"seed": 42, "counts": {"red": 2, "green": 1, ...}, "positions":
@@ -283,8 +292,9 @@ log-only evidence for a caller (e.g. a test harness) that wants to know
 what got drawn. It is never control input for the arm or the motion
 service.
 
-`{"command": "clear_cell"}` re-parks all 18 pool blocks and returns
-`{"parked": [names]}`, the same log-only shape.
+`{"command": "clear_cell", "names_by_color": {...}, "park_positions_mm":
+{...}}` re-parks every pool block and returns `{"parked": [names]}`, the
+same log-only shape.
 
 ## Arm mount recipe
 

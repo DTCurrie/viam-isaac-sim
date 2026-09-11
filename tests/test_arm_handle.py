@@ -251,8 +251,10 @@ class FakeSim:
     def __init__(self) -> None:
         self.world = FakeWorld()
         self._isaac = FakeIsaacNamespace()
+        self.run_calls: list[bool] = []
 
-    def run(self, fn, timeout: float = 30.0):
+    def run(self, fn, timeout: float = 30.0, *, allow_during_initialization: bool = False):
+        self.run_calls.append(allow_during_initialization)
         return fn()
 
 
@@ -284,6 +286,18 @@ def test_isaac_velocity_cap_is_set_and_restored_via_the_articulation_view():
     handle.set_joint_targets([0.4, 0.5])  # max_vel_rad_s=None -> restore
 
     assert view.set_calls[-1] == ([5.0, 5.0], None)
+
+
+def test_isaac_stop_is_one_run_call_allowed_during_initialization():
+    handle, art, sim = _make_handle()
+    art.positions = [0.3, 0.7]
+    sim.run_calls.clear()
+
+    handle.stop()
+
+    assert sim.run_calls == [True]
+    assert art.positions == pytest.approx([0.3, 0.7])
+    assert handle._targets == pytest.approx([0.3, 0.7])
 
 
 def test_isaac_settle_reaches_after_window_not_before():

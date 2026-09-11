@@ -212,21 +212,23 @@ class IsaacGripperHandle(GripperHandle):
         return self._sim.run(_get)
 
     def set_jaw(self, rad: float) -> None:
+        self._sim.run(lambda: self._apply_jaw_target_on_sim_thread(rad))
+
+    def _apply_jaw_target_on_sim_thread(self, rad: float) -> None:
+        """Sim-thread body shared by set_jaw and stop's hold-in-place. Clamps
+        here, not in each caller, so a physics overshoot measured by stop's
+        hold never becomes a target past the jaw's travel limits."""
         rad = min(max(rad, self._open_rad), self._closed_rad)
-
-        def _set() -> None:
-            # finger_joint only: the linkage carries the passive joints
-            action = self._sim._isaac.ArticulationAction(
-                joint_positions=np.array([rad], dtype=float),
-                joint_indices=[self._idx],
-            )
-            self._art.apply_action(action)
-            self._target = rad
-            self._best_gap_rad = None
-            self._no_progress_count = 0
-            self._held_latch = False
-
-        self._sim.run(_set)
+        # finger_joint only: the linkage carries the passive joints
+        action = self._sim._isaac.ArticulationAction(
+            joint_positions=np.array([rad], dtype=float),
+            joint_indices=[self._idx],
+        )
+        self._art.apply_action(action)
+        self._target = rad
+        self._best_gap_rad = None
+        self._no_progress_count = 0
+        self._held_latch = False
 
     def open(self) -> None:
         self.set_jaw(self._open_rad)
@@ -235,7 +237,11 @@ class IsaacGripperHandle(GripperHandle):
         self.set_jaw(self._closed_rad)
 
     def stop(self) -> None:
-        self.set_jaw(self.get_jaw())
+        def _hold() -> None:
+            measured = float(self._art.get_joint_positions(joint_indices=[self._idx])[0])
+            self._apply_jaw_target_on_sim_thread(measured)
+
+        self._sim.run(_hold, allow_during_initialization=True)
 
     def _gap_and_stall(self) -> tuple[float, bool]:
         """(|target - measured|, stalled): the jaw is stalled when the gap has

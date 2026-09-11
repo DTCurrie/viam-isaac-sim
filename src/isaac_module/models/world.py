@@ -57,6 +57,27 @@ _SUPPORTED_COMMANDS = (
 _SERIALIZED_COMMANDS = frozenset({"scatter_cell", "randomize_props"})
 
 
+def sim_config_from_attrs(attrs: Mapping[str, Any]) -> SimConfig:
+    """The world component's attributes as the SimConfig the sim boots from.
+    Shared with tools/warm_shader_cache.py, which boots the same world
+    without viam-server, so the two cannot drift."""
+    return SimConfig(
+        mock=bool(attrs.get("mock", False)),
+        headless=bool(attrs.get("headless", True)),
+        livestream=bool(attrs.get("livestream", True)),
+        usd_stage=attrs.get("usd_stage") or None,
+        physics_dt=float(attrs.get("physics_dt", 1.0 / 60.0)),
+        rendering_dt=float(attrs.get("rendering_dt", 1.0 / 60.0)),
+        boot_timeout=float(attrs.get("boot_timeout_sec", 110.0)),
+        wait_for_finalizer=bool(attrs.get("wait_for_finalizer", False)),
+        kit_log_level=str(attrs.get("kit_log_level", "warning")),
+        livestream_public_ip=str(attrs.get("livestream_public_ip", "")),
+        props=[dict(p) for p in attrs.get("props", [])],
+        lighting=dict(attrs["lighting"]) if attrs.get("lighting") is not None else None,
+        render=dict(attrs["render"]) if attrs.get("render") is not None else None,
+    )
+
+
 class IsaacWorld(Generic, EasyResource):  # type: ignore[misc]  # SDK: API is Final on the component, redeclared by EasyResource
     """viam:isaac-sim-devin:world, the generic component that owns the simulator.
 
@@ -145,6 +166,11 @@ class IsaacWorld(Generic, EasyResource):  # type: ignore[misc]  # SDK: API is Fi
                                             boot routinely runs longer.
         kit_log_level (string)            - kit console verbosity: "verbose", "info",
                                             "warning" or "error" (default "warning")
+        wait_for_finalizer (bool, default false) - defer world stepping until the
+                                            scene-finalizer component reports every
+                                            scene-populating component built; operational
+                                            calls answer UNAVAILABLE until it has stepped a
+                                            few times past that point
         props (list)                      - objects spawned into the scene at boot:
                                             {"name": non-empty str, unique after
                                               sanitizing to a USD prim name,
@@ -195,6 +221,8 @@ class IsaacWorld(Generic, EasyResource):  # type: ignore[misc]  # SDK: API is Fi
             validate_render(attrs["render"], bool(attrs.get("livestream", True)))
         if "kit_log_level" in attrs:
             validate_kit_log_level(attrs["kit_log_level"])
+        if "wait_for_finalizer" in attrs and not isinstance(attrs["wait_for_finalizer"], bool):
+            raise ValueError("wait_for_finalizer must be a boolean")
         return [], []
 
     def reconfigure(
@@ -205,21 +233,7 @@ class IsaacWorld(Generic, EasyResource):  # type: ignore[misc]  # SDK: API is Fi
             self.logger.warning(
                 "usd_stage is set without lighting: stage must provide floor and lights"
             )
-        cfg = SimConfig(
-            mock=bool(attrs.get("mock", False)),
-            headless=bool(attrs.get("headless", True)),
-            livestream=bool(attrs.get("livestream", True)),
-            usd_stage=attrs.get("usd_stage") or None,
-            physics_dt=float(attrs.get("physics_dt", 1.0 / 60.0)),
-            rendering_dt=float(attrs.get("rendering_dt", 1.0 / 60.0)),
-            boot_timeout=float(attrs.get("boot_timeout_sec", 110.0)),
-            kit_log_level=str(attrs.get("kit_log_level", "warning")),
-            livestream_public_ip=str(attrs.get("livestream_public_ip", "")),
-            props=[dict(p) for p in attrs.get("props", [])],
-            lighting=dict(attrs["lighting"]) if attrs.get("lighting") is not None else None,
-            render=dict(attrs["render"]) if attrs.get("render") is not None else None,
-        )
-        SimManager.get().ensure_booted(cfg)
+        SimManager.get().ensure_booted(sim_config_from_attrs(attrs))
         # the module adds a ground plane only when it owns the stage
         self._serves_floor = not attrs.get("usd_stage")
         if not hasattr(self, "_ignored_props"):

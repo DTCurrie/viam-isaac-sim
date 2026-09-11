@@ -46,7 +46,30 @@ def test_dry_run_prints_expected_commands_in_order() -> None:
     first_run_line = output[first_run_line_start:first_run_line_end]
     assert "VIAM_MODULE_DATA=/opt/viam-isaac-sim" in first_run_line
 
-    agent_idx = output.find("preinstall.sh", first_run_idx)
+    scp_section = output[create_instance_line_end:first_run_idx]
+    assert "src" in scp_section
+    assert "warm_shader_cache.py" in scp_section
+    assert "isaac-sim-block-sorting.json" in scp_section
+
+    second_first_run_idx = output.find("bash first_run.sh", first_run_line_end)
+    assert second_first_run_idx != -1
+
+    warmup_idx = output.find("warm_shader_cache.py", second_first_run_idx)
+    assert warmup_idx != -1
+    warmup_line_start = output.rfind("\n", 0, warmup_idx)
+    warmup_line_end = output.find("\n", warmup_idx)
+    warmup_line = output[warmup_line_start:warmup_line_end]
+    assert "sudo" in warmup_line
+    assert "VIAM_MODULE_DATA=/opt/viam-isaac-sim" in warmup_line
+    assert "isaac-venv/bin/python" in warmup_line
+    assert "--fragment fragments/isaac-sim-block-sorting.json" in warmup_line
+
+    ssh_lines_with_warmup = [
+        line for line in output.splitlines() if "ssh" in line and "warm_shader_cache.py" in line
+    ]
+    assert len(ssh_lines_with_warmup) == 1
+
+    agent_idx = output.find("preinstall.sh", warmup_idx)
     assert agent_idx != -1
 
     images_create_idx = output.find("images create", agent_idx)

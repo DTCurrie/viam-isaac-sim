@@ -355,6 +355,15 @@ def _resolve_fragment_variables(node: Any, unresolved: list[str]) -> Any:
     return node
 
 
+def resolve_fragment_variables(node: Any) -> tuple[Any, list[str]]:
+    """A deep copy of ``node`` with every defaulted ``$variable`` replaced by
+    its default, plus the names left unresolved. The public form of
+    ``_resolve_fragment_variables`` for callers that read a fragment file
+    directly, such as tools/warm_shader_cache.py."""
+    unresolved: list[str] = []
+    return _resolve_fragment_variables(copy.deepcopy(node), unresolved), unresolved
+
+
 def _with_world_component(
     components: list[dict[str, Any]], world_fragment: dict[str, Any]
 ) -> tuple[list[dict[str, Any]], list[str]]:
@@ -365,7 +374,58 @@ def _with_world_component(
         for c in world_fragment.get("components", [])
         if c["name"] not in existing_names
     ]
-    return missing + components, unresolved
+    merged = _with_finalizer_dependencies(missing + components, existing_names, world_fragment)
+    return merged, unresolved
+
+
+def _with_finalizer_dependencies(
+    components: list[dict[str, Any]],
+    names_in_input_config: set[str],
+    world_fragment: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """A module cannot see the machine's full component list, so a finalizer inserted
+    from the fragment has to be told which components to wait on. Its `depends_on`
+    becomes the world followed by every emitted component the sim module itself
+    serves, in output order, and the world's `wait_for_finalizer` flips on only when
+    that list holds more than the world. A finalizer the input config already named
+    is a user's own choice and is left exactly as written, flag included.
+    """
+    fragment_modules: list[dict[str, Any]] = world_fragment.get("modules", [])
+    if not fragment_modules:
+        return components
+    module_prefix = f"{fragment_modules[0]['module_id']}:"
+    world_model = f"{module_prefix}world"
+    finalizer_model = f"{module_prefix}scene-finalizer"
+    fragment_finalizer = next(
+        (c for c in world_fragment.get("components", []) if c.get("model") == finalizer_model),
+        None,
+    )
+    if fragment_finalizer is None or fragment_finalizer["name"] in names_in_input_config:
+        return components
+    world_component = next((c for c in components if c.get("model") == world_model), None)
+    if world_component is None:
+        return components
+    sim_component_names = [
+        c["name"]
+        for c in components
+        if c.get("model", "").startswith(module_prefix)
+        and c.get("model") not in (world_model, finalizer_model)
+    ]
+    depends_on = [world_component["name"], *sim_component_names]
+    has_sim_components = bool(sim_component_names)
+    rewritten: list[dict[str, Any]] = []
+    for component in components:
+        if component.get("model") == finalizer_model:
+            component = dict(component)
+            component["depends_on"] = depends_on
+        elif component is world_component and has_sim_components:
+            component = dict(component)
+            component["attributes"] = {
+                **component.get("attributes", {}),
+                "wait_for_finalizer": True,
+            }
+        rewritten.append(component)
+    return rewritten
 
 
 def _with_module_entry(config: dict[str, Any], world_fragment: dict[str, Any]) -> dict[str, Any]:

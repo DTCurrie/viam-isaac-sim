@@ -30,7 +30,13 @@ from . import FAMILY, NAMESPACE
 from .asset_catalog import KNOWN_ASSETS
 from .asset_catalog import UR_JOINT_NAMES as UR_JOINT_NAMES
 from .compat import IsaacAPI, caps, import_isaac, isaac_version
-from .errors import CameraInitError, PrimNotFoundError, SimNotBootedError, SimTimeoutError
+from .errors import (
+    CameraInitError,
+    PrimNotFoundError,
+    SimInitializingError,
+    SimNotBootedError,
+    SimTimeoutError,
+)
 from .handles.arm import SETTLE_TOL_RAD as SETTLE_TOL_RAD
 
 # models/arm.py re-exports SETTLE_TOL_RAD and SettleOutcome through sim_manager rather than
@@ -203,6 +209,26 @@ class SimConfig:
     # disable_viewport_updates is a launcher-config key, both at boot. The
     # mock records the config for tests.
     render: dict[str, Any] | None = None
+    # defer world steps until a scene-finalizer component runs. The finalizer's
+    # depends_on names every scene-populating component, so the renderer's
+    # first (slow, shader-compiling) steps happen after every resource is built
+    # instead of while viam-server is still constructing them. Operational
+    # calls answer UNAVAILABLE (SimInitializingError) until
+    # POST_FINALIZER_WARMUP_STEPS steps have completed after finalization.
+    wait_for_finalizer: bool = False
+
+
+# Completed world steps after finalize_scene() before the world reports ready.
+# Each cold step completes only after its shader compile, so three completed
+# steps means the compiles the populated scene provoked are behind us.
+POST_FINALIZER_WARMUP_STEPS = 3
+# A world.step that takes longer than this is logged with what it means (a
+# cold shader compile, expected on the first steps after the scene changes).
+# A warm step is ~1/60 s, so anything past a few seconds is never a normal step.
+SLOW_STEP_WARN_S = 5.0
+# How long the sim thread waits on the scene gate between task drains while
+# stepping is deferred, so a queued create_* call is picked up promptly.
+SCENE_GATE_POLL_S = 0.01
 
 
 def _boot_extra_args(cfg: SimConfig) -> list[str]:
@@ -287,6 +313,17 @@ DEFAULT_CAMERA_WIDTH = 848
 DEFAULT_CAMERA_HEIGHT = 480
 
 
+def _forget_scene_object(scene: Any, name: str) -> None:
+    """Drop ``name`` from the scene registry if it is registered, leaving the
+    prim in place. A re-attached arm is bound with ``initialize()`` and never
+    re-added to the registry, and its released handle already dropped the
+    entry, so an unconditional ``remove_object`` raises ``Cannot remove
+    object ... since it doesn't exist`` and a gripper rebuilt after an arm
+    attribute edit never comes up."""
+    if scene.get_object(name) is not None:
+        scene.remove_object(name, registry_only=True)
+
+
 class SimManager:
     """Owns the sim thread. Get the process-wide instance via SimManager.get()."""
 
@@ -304,6 +341,22 @@ class SimManager:
         self._tasks: queue.Queue[tuple[Callable[[], Any], Future]] = queue.Queue()
         self._boot_requested = threading.Event()
         self._booted = threading.Event()
+        # the scene gate. _scene_finalized: every scene-populating component
+        # has been built (set by the scene-finalizer model's finalize_scene()).
+        # _ready: POST_FINALIZER_WARMUP_STEPS steps have completed since. Both
+        # start set and are cleared by ensure_booted when cfg.wait_for_finalizer
+        # is true, so a world without the field never gates anything.
+        self._scene_finalized = threading.Event()
+        self._scene_finalized.set()
+        self._ready = threading.Event()
+        self._ready.set()
+        # completed world steps since finalize_scene(), counted toward
+        # POST_FINALIZER_WARMUP_STEPS. Only meaningful while _ready is clear.
+        self._warmup_steps_completed = 0
+        # monotonic start time of the world.step currently in flight on the
+        # sim thread, or None between steps. Lets run()'s timeout message
+        # say how long a slow (shader-compiling) step has been running.
+        self._step_started_at: float | None = None
         self._boot_error: BaseException | None = None
         self._stop = threading.Event()
         # set once main_loop() returns, so a call arriving after shutdown
@@ -363,11 +416,29 @@ class SimManager:
             raise RuntimeError(f"Isaac Sim failed to boot previously: {self._boot_error}")
 
         self.cfg = cfg
+        if cfg.wait_for_finalizer:
+            self._scene_finalized.clear()
+            self._ready.clear()
+        else:
+            self._scene_finalized.set()
+            self._ready.set()
         self._boot_requested.set()
         if not self._booted.wait(timeout=cfg.boot_timeout):
             raise SimTimeoutError(f"Isaac Sim did not boot within {cfg.boot_timeout}s")
         if self._boot_error is not None:
             raise RuntimeError(f"Isaac Sim failed to boot: {self._boot_error}")
+
+    def finalize_scene(self) -> None:
+        """Release world stepping. Called by the scene-finalizer model once
+        every component it depends on has been built."""
+        self._scene_finalized.set()
+
+    def require_ready(self) -> None:
+        """Raise SimInitializingError (UNAVAILABLE) until the post-finalizer
+        warm-up steps have completed. Handles whose operational verbs bypass
+        run() (the base's velocity command) call this themselves."""
+        if not self._ready.is_set():
+            raise SimInitializingError()
 
     def request_stop(self) -> None:
         self._stop.set()
@@ -405,7 +476,7 @@ class SimManager:
         boot, then step the sim while draining queued tasks. Sets
         ``_stopped`` on every exit path, so callers still holding a
         reference after this returns fail fast instead of waiting out
-        run()'s full timeout (PY-28)."""
+        run()'s full timeout."""
         try:
             self._sim_thread_id = threading.get_ident()
 
@@ -442,6 +513,16 @@ class SimManager:
         used to spin on a dead app instead of reporting a boot/run failure."""
         last = time.monotonic()
         while not self._stop.is_set() and (self.mock or self._sim_app.is_running()):
+            if not self._scene_finalized.is_set():
+                # scene-populating components are still being built. Drain
+                # tasks (a create_* call is allowed through the gate) but
+                # skip stepping so the renderer's first, slow shader-compiling
+                # steps happen once, after the scene is complete.
+                self._drain_tasks()
+                self._scene_finalized.wait(timeout=SCENE_GATE_POLL_S)
+                last = time.monotonic()
+                continue
+
             self._drain_tasks()
             now = time.monotonic()
             dt = now - last
@@ -451,13 +532,36 @@ class SimManager:
                     callback(dt)
                 time.sleep(0.01)
             else:
-                self.world.step(render=True)
+                self._step_world_once()
+
+            if not self._ready.is_set():
+                self._warmup_steps_completed += 1
+                if self._warmup_steps_completed >= POST_FINALIZER_WARMUP_STEPS:
+                    self._ready.set()
 
         if not self.mock and self._sim_app is not None and not self._stop.is_set():
             self._boot_error = RuntimeError(
                 "Isaac Sim's app stopped running outside a requested shutdown"
             )
             LOGGER.error("Isaac Sim's app stopped running; the world's status verb reports it")
+
+    def _step_world_once(self) -> None:
+        """One rendered Isaac step, timed. Records the in-flight start so
+        run()'s timeout message can say how long the step has been running,
+        and warns when a step passes SLOW_STEP_WARN_S, which on a cold shader
+        cache is the first steps after the scene changes."""
+        step_started = time.monotonic()
+        self._step_started_at = step_started
+        self.world.step(render=True)
+        self._step_started_at = None
+        elapsed = time.monotonic() - step_started
+        if elapsed > SLOW_STEP_WARN_S:
+            LOGGER.warning(
+                "world.step took %.1fs: the first steps after the scene "
+                "changes compile shaders; with the gate on, calls answer "
+                "UNAVAILABLE until the world is ready",
+                elapsed,
+            )
 
     def _drain_tasks(self) -> None:
         while True:
@@ -471,21 +575,43 @@ class SimManager:
                 except BaseException as e:  # noqa: BLE001 - task() may raise anything, it must reach the caller via the future, not be swallowed here
                     fut.set_exception(e)
 
-    def run(self, task: Callable[[], Any], timeout: float = 30.0) -> Any:
+    def run(
+        self,
+        task: Callable[[], Any],
+        timeout: float = 30.0,
+        *,
+        allow_during_initialization: bool = False,
+    ) -> Any:
         """Run task on the sim thread and return its result. Raises
         immediately, without waiting ``timeout``, once main_loop() has
-        exited (PY-28)."""
+        exited, and with SimInitializingError (UNAVAILABLE) while the
+        scene gate is closed unless ``allow_during_initialization`` is set,
+        which the component factories and the stop verbs pass so a cold
+        start can still build resources and halt motion."""
         if self._stopped:
             raise SimNotBootedError("Isaac Sim has stopped - the module is shutting down")
         if threading.get_ident() == self._sim_thread_id:
+            # already on the sim thread, so nothing here can queue behind a
+            # slow step. The gate is for callers that would. Post-reset hooks
+            # and the create factories' own nested calls land here while the
+            # scene is still initializing.
             return task()
+        if not allow_during_initialization:
+            self.require_ready()
         fut: Future = Future()
         self._tasks.put((task, fut))
         try:
             return fut.result(timeout=timeout)
         except concurrent.futures.TimeoutError as exc:
             fut.cancel()
-            raise SimTimeoutError(f"sim-thread call timed out after {timeout}s") from exc
+            message = f"sim-thread call timed out after {timeout}s"
+            step_started = self._step_started_at
+            if step_started is not None:
+                message += (
+                    "; the sim thread has been inside world.step for "
+                    f"{time.monotonic() - step_started:.1f}s"
+                )
+            raise SimTimeoutError(message) from exc
 
     def _boot(self) -> None:
         cfg = self.cfg
@@ -519,7 +645,7 @@ class SimManager:
             # the 5.0 livestream sample ("hide_ui": False,  # Show the GUI).
             launcher_config["hide_ui"] = False
         # SimulationApp.__init__ unconditionally replaces SIGINT with a
-        # handler that calls sys.exit(0) directly (IS-13), bypassing
+        # handler that calls sys.exit(0) directly, bypassing
         # main.py's own shutdown path. Put the caller's handler straight
         # back so SIGINT after boot goes through the same path SIGTERM does.
         prior_sigint_handler = signal.getsignal(signal.SIGINT)
@@ -708,8 +834,9 @@ class SimManager:
             "render": self.render,
             # GPU checklist item 6: None in mock or when no probe answers
             "isaac_version": _version_string(isaac_version()),
+            "ready": self._ready.is_set(),
         }
-        if self._booted.is_set() and not self.mock:
+        if self._booted.is_set() and not self.mock and self._ready.is_set():
             out["playing"] = self.run(lambda: bool(self.world.is_playing()))
             out["sim_time"] = self.run(lambda: float(self.world.current_time))
         return out
@@ -860,7 +987,7 @@ class SimManager:
                     handle._gains = handle._art.get_articulation_controller().get_gains()
                     return handle
 
-                handle = self.run(_spawn, timeout=120.0)
+                handle = self.run(_spawn, timeout=120.0, allow_during_initialization=True)
                 self.register_post_reset(lambda: handle.post_reset(), owner=name)
                 return handle
 
@@ -1077,7 +1204,11 @@ class SimManager:
         else:
 
             def factory():
-                handle = self.run(lambda: self._create_camera_isaac(name, attrs), timeout=120.0)
+                handle = self.run(
+                    lambda: self._create_camera_isaac(name, attrs),
+                    timeout=120.0,
+                    allow_during_initialization=True,
+                )
                 self.register_post_reset(lambda: handle.post_reset(), owner=name)
                 return handle
 
@@ -1190,7 +1321,11 @@ class SimManager:
         else:
 
             def factory():
-                return self.run(lambda: self._create_base_isaac(name, attrs), timeout=120.0)
+                return self.run(
+                    lambda: self._create_base_isaac(name, attrs),
+                    timeout=120.0,
+                    allow_during_initialization=True,
+                )
 
         return self._cached_handle(name, attrs, factory)
 
@@ -1233,7 +1368,7 @@ class SimManager:
 
         # models/base.py clamps the commanded linear/angular velocity; only
         # the controller can clamp the resulting per-wheel speed, which is
-        # what actually saturates the drive (IS-24). max_wheel_speed is the
+        # what actually saturates the drive. max_wheel_speed is the
         # combined-motion bound: the wheel angular velocity needed to hit
         # max_linear_mps while simultaneously turning at max_angular_rps.
         max_linear_mps = float(attrs.get("max_linear_mps", 0.5))
@@ -1291,6 +1426,7 @@ class SimManager:
                 handle = self.run(
                     lambda: self._create_gripper_isaac(name, attrs, arm_attrs, arm_handle),
                     timeout=120.0,
+                    allow_during_initialization=True,
                 )
                 # GPU checklist item 6: re-command the last commanded
                 # jaw target after a reset mid-pick, so it doesn't drop
@@ -1457,7 +1593,7 @@ class SimManager:
         # Register a fresh wrapper BEFORE the reset so reset() initializes it
         # against the new topology (the prim, and the arm's name, stay).
         arm_object_name = arm._art.name
-        self.world.scene.remove_object(arm_object_name, registry_only=True)
+        _forget_scene_object(self.world.scene, arm_object_name)
         fresh_articulation = self._isaac.SingleArticulation(
             prim_path=arm._prim_path, name=arm_object_name
         )

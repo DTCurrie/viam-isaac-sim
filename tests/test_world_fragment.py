@@ -75,15 +75,14 @@ def test_exactly_one_module_entry() -> None:
     assert VERSION_PATTERN.match(module["version"])
 
 
-def test_exactly_one_component() -> None:
+def test_exactly_two_components() -> None:
     fragment = _fragment()
     components = fragment["components"]
-    assert len(components) == 1
-    component = components[0]
-    assert component["name"] == DEFAULT_WORLD_NAME
-    assert component["model"] == str(IsaacWorld.MODEL)
-    assert API_PATTERN.match(component["api"])
-    assert component["api"] == "rdk:component:generic"
+    assert len(components) == 2
+    world = next(c for c in components if c["name"] == DEFAULT_WORLD_NAME)
+    assert world["model"] == str(IsaacWorld.MODEL)
+    assert API_PATTERN.match(world["api"])
+    assert world["api"] == "rdk:component:generic"
 
 
 def test_no_props_in_attributes() -> None:
@@ -122,6 +121,16 @@ def test_both_fragments_pin_the_same_released_module_version() -> None:
     assert VERSION_PATTERN.match(world_version), world_version
     assert VERSION_PATTERN.match(sorting_version), sorting_version
     assert world_version == sorting_version
+
+
+def test_finalizer_depends_only_on_the_world_and_the_world_does_not_wait_for_it() -> None:
+    fragment = _fragment()
+    components = {c["name"]: c for c in fragment["components"]}
+    finalizer = components["scene-finalizer"]
+    assert finalizer["api"] == "rdk:component:generic"
+    assert finalizer["model"] == f"{NAMESPACE}:{FAMILY}:scene-finalizer"
+    assert finalizer["depends_on"] == [DEFAULT_WORLD_NAME]
+    assert components[DEFAULT_WORLD_NAME]["attributes"]["wait_for_finalizer"] is False
 
 
 def test_livestream_public_ip_is_a_fragment_variable_defaulting_to_auto_detect() -> None:

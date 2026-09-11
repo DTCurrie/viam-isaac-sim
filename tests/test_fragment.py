@@ -18,6 +18,7 @@ from isaac_module.models.arm import IsaacArm
 from isaac_module.models.base import IsaacBase
 from isaac_module.models.camera import IsaacCamera
 from isaac_module.models.gripper import IsaacGripper
+from isaac_module.models.scene_finalizer import IsaacSceneFinalizer
 from isaac_module.models.sorter_sensor import SorterSensor
 from isaac_module.models.world import IsaacWorld
 
@@ -31,6 +32,7 @@ MODELS = {
     "base": IsaacBase,
     "gripper": IsaacGripper,
     "sorter-sensor": SorterSensor,
+    "scene-finalizer": IsaacSceneFinalizer,
 }
 API_PATTERN = re.compile(r"^rdk:component:[a-z_]+$")
 
@@ -119,8 +121,9 @@ def _component_config(component: dict) -> ComponentConfig:
     """Build the proto viam-server hands the module from the fragment's JSON
     (only the frame shapes the fragment actually uses are translated)."""
     config = ComponentConfig(
-        name=component["name"], attributes=dict_to_struct(component["attributes"])
+        name=component["name"], attributes=dict_to_struct(component.get("attributes", {}))
     )
+    config.depends_on.extend(component.get("depends_on", []))
     frame = component.get("frame")
     if frame is None:
         return config
@@ -167,6 +170,7 @@ def test_fragment_is_valid_json_with_the_expected_components():
         "side-cam",
         "wrist-cam",
         "block-sorter-sensor",
+        "scene-finalizer",
     ]
 
 
@@ -178,11 +182,12 @@ def test_every_component_uses_the_api_form_not_the_legacy_namespace_type_pair():
 
 
 def test_every_non_world_component_names_sim_world_or_omits_it():
-    # block-sorter-sensor polls the conductor, not the sim, so it carries no
-    # `world` attribute of its own. Every other component's `world` attribute
-    # defaults to "isaac-world", so omitting it is as valid as naming it.
+    # block-sorter-sensor polls the conductor and scene-finalizer only signals
+    # completion, so neither carries a `world` attribute of its own. Every
+    # other component's `world` attribute defaults to "isaac-world", so
+    # omitting it is as valid as naming it.
     for component in _fragment()["components"]:
-        if component["name"] in ("isaac-world", "block-sorter-sensor"):
+        if component["name"] in ("isaac-world", "block-sorter-sensor", "scene-finalizer"):
             continue
         attributes = component["attributes"]
         assert "world" not in attributes or attributes["world"] == "isaac-world"
@@ -203,6 +208,16 @@ def test_every_fragment_component_validates_against_its_model(component):
     # the sorter sensor never touches the sim: it polls the conductor service
     elif component["name"] == "block-sorter-sensor":
         assert list(dependencies) == ["block-sorter"]
+    # the finalizer must be built last, after the world and every sim component
+    elif component["name"] == "scene-finalizer":
+        assert list(dependencies) == [
+            "isaac-world",
+            "pick-arm",
+            "pick-grip",
+            "scene-cam",
+            "side-cam",
+            "wrist-cam",
+        ]
     elif component["name"] != "isaac-world":
         assert list(dependencies) == ["isaac-world"]
 
@@ -472,6 +487,7 @@ def test_the_pick_cell_roster_is_present():
         "scene-cam",
         "side-cam",
         "block-sorter-sensor",
+        "scene-finalizer",
     }
 
     service_names = {(s["name"], s["api"]) for s in fragment["services"]}
@@ -504,6 +520,23 @@ def test_the_sorter_sensor_entry_depends_on_the_conductor_it_polls():
     assert sensor["model"] == "viam:isaac-sim-devin:sorter-sensor"
     assert sensor["attributes"]["conductor"] == "block-sorter"
     assert sensor["depends_on"] == ["block-sorter"]
+
+
+def test_the_finalizer_depends_on_the_world_and_every_sim_component_and_gates_the_world():
+    fragment = _fragment()
+    components = {c["name"]: c for c in fragment["components"]}
+    finalizer = components["scene-finalizer"]
+    assert finalizer["api"] == "rdk:component:generic"
+    assert finalizer["model"] == "viam:isaac-sim-devin:scene-finalizer"
+    assert finalizer["depends_on"] == [
+        "isaac-world",
+        "pick-arm",
+        "pick-grip",
+        "scene-cam",
+        "side-cam",
+        "wrist-cam",
+    ]
+    assert components["isaac-world"]["attributes"]["wait_for_finalizer"] is True
 
 
 def test_every_segmenter_wires_its_own_colors_detector_and_the_wrist_camera():

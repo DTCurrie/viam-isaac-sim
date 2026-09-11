@@ -12,6 +12,11 @@
       "short_description": "Boots and manages the Isaac Sim world/stage. Configure exactly one."
     },
     {
+      "model": "viam:isaac-sim-devin:scene-finalizer",
+      "api": "rdk:component:generic",
+      "short_description": "Signals that scene population is complete; depends_on every sim component"
+    },
+    {
       "model": "viam:isaac-sim-devin:arm",
       "api": "rdk:component:arm",
       "short_description": "A simulated arm (UR, Franka, or any articulation USD)"

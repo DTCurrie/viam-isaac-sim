@@ -24,7 +24,7 @@ endpoints.
 Integration: a real driver accepts a `world` attribute and sends its own commands to the world
 service over a simulation API instead of to hardware, reusing all of its own logic. That API does
 not exist yet. What keeps the door open: the world component is the one resource that knows it is
-a sim (see "The one sim-only resource"), the models reach it only through the handle interface in
+a sim (see "The sim-only resources"), the models reach it only through the handle interface in
 `src/isaac_module/handles/`, and that interface is the surface a simulation API would be cut from,
 with these models as its first clients.
 
@@ -90,9 +90,9 @@ the real machine has no such shortcut. The pick pipeline already keeps this rule
 find a block and a point cloud to measure it, the same as it would against a camera bolted to a
 real arm. That is the rule for every pipeline.
 
-## The one sim-only resource
+## The sim-only resources
 
-The `world` component is the only resource in this module with no real-world counterpart, and the
+The `world` component is a resource in this module with no real-world counterpart, and the
 only thing a fragment adds beyond components that could also point at real hardware. It owns
 booting Isaac Sim, opening the USD stage, holding props and the scene, serving scenario verbs, and
 running the livestream.
@@ -102,6 +102,17 @@ the same gRPC calls a real arm answers and nothing more. `scatter_cell` and `cle
 world are scene verbs that take their prop names, region and park grid from the command, so they
 serve any scene. They set no precedent for adding scenario logic to a component that represents a
 piece of hardware.
+
+The `scene-finalizer` component is the second resource with no real counterpart. A module cannot
+see the machine's full component list, so it has no way to know on its own when every arm,
+gripper, camera and base it will drive has finished spawning. The config tells it instead: the
+finalizer's `depends_on` names the world and every sim component in the scene, viam-server builds
+it last, and building it is the signal that the scene is populated. Until that happens, and for a
+few steps after, every sim resource answers `UNAVAILABLE` with `Isaac Sim is initializing; retry
+shortly`. This is part of the contract, not a startup wrinkle a client works around: the status
+clients and the app already treat `UNAVAILABLE` as transient and retry, and a resource's `stop`
+verb still works while the world initializes, so an operator can always stop a machine. See
+`README.md`'s "world attributes" and "scene-finalizer" sections for the config shape.
 
 ## Granularity
 

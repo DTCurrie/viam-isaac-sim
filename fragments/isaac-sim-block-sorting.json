@@ -31,6 +31,7 @@
       "attributes": {
         "headless": true,
         "livestream": true,
+        "wait_for_finalizer": true,
         "physics_dt": 0.008333333333333333,
         "rendering_dt": 0.016666666666666666,
         "props": [
@@ -578,6 +579,12 @@
         "conductor": "block-sorter"
       },
       "depends_on": ["block-sorter"]
+    },
+    {
+      "name": "scene-finalizer",
+      "api": "rdk:component:generic",
+      "model": "viam:isaac-sim-devin:scene-finalizer",
+      "depends_on": ["isaac-world", "pick-arm", "pick-grip", "scene-cam", "side-cam", "wrist-cam"]
     }
   ],
   "services": [

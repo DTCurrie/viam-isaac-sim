@@ -27,12 +27,23 @@ credentials.
    (prints every `gcloud` and remote command it would run, without running
    any).
 3. Expect it to create a builder instance, install the driver and Isaac Sim,
-   reboot once to confirm the install, install viam-agent, then stop the
-   builder, snapshot it into an image named `viam-isaac-sim-<YYYYMMDD>` in the
-   `viam-isaac-sim` family, and delete the builder. The slow step is the Isaac
-   Sim pip install, which downloads 10GB+. The whole run takes on the order of
-   20-30 minutes.
-4. Confirm the image landed: `gcloud compute images list --filter="family=viam-isaac-sim"`.
+   reboot once to confirm the install, warm the shader cache, install
+   viam-agent, then stop the builder, snapshot it into an image named
+   `viam-isaac-sim-<YYYYMMDD>` in the `viam-isaac-sim` family, and delete the
+   builder. The slow step is the Isaac Sim pip install, which downloads 10GB+.
+   The whole run takes on the order of 20-30 minutes.
+4. While the builder is still up, confirm the shader cache warmed:
+
+   ```
+   sudo du -sh /opt/viam-isaac-sim/isaac-venv/lib/python3.11/site-packages/isaacsim/kit/cache \
+     /root/.cache/ov /root/.nv/ComputeCache /root/.cache/nvidia/GLCache
+   ```
+
+   Target: the builder, over SSH. Expected result: all four directories
+   exist and are non-empty. This step exists because a cold cache makes the
+   module's first renders take minutes, and every VM from the image would
+   pay that cost on its first boot.
+5. Confirm the image landed: `gcloud compute images list --filter="family=viam-isaac-sim"`.
 
 ## 2. Creating a sim machine by hand
 
@@ -108,6 +119,8 @@ connect to.
   `https://pypi.nvidia.com`.
 - `g2-standard-8` (one NVIDIA L4): `build-image.sh`'s default machine type,
   matching `tools/create_sim_machine.py`'s `DEFAULT_MACHINE_TYPE`.
+- The shader cache `build-image.sh` warms is valid for one GPU model and
+  driver branch. Rebuild the image after a driver or Isaac Sim bump.
 
 Every pin above was read on 2026-09-09 out of `build-image.sh`,
 `first_run.sh` and `tools/create_sim_machine.py`, not off a running VM. To

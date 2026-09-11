@@ -26,6 +26,12 @@ def default_ee_prim_path(attrs: dict[str, Any], name: str) -> str | None:
 
 
 def default_base_prim_path(attrs: dict[str, Any], name: str) -> str:
-    """The base's own root prim, the prim_pose verb's default path for a
-    base, matching the normalisation SimManager uses to spawn/mock it."""
-    return attrs.get("prim_path") or f"/World/{prim_name(name)}"
+    """The prim_pose verb's default path for a base: the asset's body prim
+    under the base's root when the asset declares one (the jetbot's root is
+    a plain Xform physics never moves, its chassis is what drives), else the
+    root itself, matching the normalisation SimManager uses to spawn/mock
+    it."""
+    root = attrs.get("prim_path") or f"/World/{prim_name(name)}"
+    asset = attrs.get("asset")
+    body_prim = KNOWN_ASSETS[asset].get("body_prim") if asset and asset in KNOWN_ASSETS else None
+    return f"{root}/{body_prim}" if body_prim else root

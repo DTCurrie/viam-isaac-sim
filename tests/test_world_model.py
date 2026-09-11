@@ -15,7 +15,7 @@ from isaac_module import cell_layout
 from isaac_module.errors import PrimNotFoundError
 from isaac_module.models.arm import IsaacArm
 from isaac_module.models.gripper import IsaacGripper
-from isaac_module.models.world import IsaacWorld
+from isaac_module.models.world import IsaacWorld, sim_config_from_attrs
 from isaac_module.sim_manager import (
     DEFAULT_MIN_SEPARATION_M,
     UR_JOINT_NAMES,
@@ -779,3 +779,16 @@ def test_get_geometries_serves_no_floor_over_a_user_stage():
         return await stage_world.get_geometries()
 
     assert all(g.label != "floor" for g in asyncio.run(scenario()))
+
+
+def test_validate_config_rejects_non_bool_wait_for_finalizer():
+    with pytest.raises(ValueError, match="wait_for_finalizer must be a boolean"):
+        IsaacWorld.validate_config(_config("w", {"wait_for_finalizer": "yes"}))
+
+
+def test_validate_config_accepts_bool_wait_for_finalizer():
+    IsaacWorld.validate_config(_config("w", {"wait_for_finalizer": True}))
+
+
+def test_sim_config_from_attrs_carries_wait_for_finalizer():
+    assert sim_config_from_attrs({"wait_for_finalizer": True}).wait_for_finalizer is True

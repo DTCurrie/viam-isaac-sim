@@ -2,9 +2,38 @@ import pytest
 
 from isaac_module.sim_manager import (
     PAD_PRIM_NAME_FRAGMENTS,
+    _forget_scene_object,
     _pad_collision_status,
     _remove_articulation_roots,
 )
+
+
+class _RecordingScene:
+    def __init__(self, registered: set[str]) -> None:
+        self.registered = registered
+        self.removed: list[tuple[str, bool]] = []
+
+    def get_object(self, name: str):
+        return object() if name in self.registered else None
+
+    def remove_object(self, name: str, registry_only: bool = False) -> None:
+        if name not in self.registered:
+            raise Exception(f"Cannot remove object {name} from the scene since it doesn't exist")
+        self.removed.append((name, registry_only))
+
+
+def test_forget_scene_object_drops_a_registered_arm_from_the_registry_only():
+    scene = _RecordingScene({"pick-arm"})
+    _forget_scene_object(scene, "pick-arm")
+    assert scene.removed == [("pick-arm", True)]
+
+
+def test_forget_scene_object_skips_a_re_attached_arm_that_is_not_registered():
+    # a re-attached arm is bound with initialize() and never re-added, and its
+    # released handle already dropped the entry, so the raw remove raised here
+    scene = _RecordingScene(set())
+    _forget_scene_object(scene, "pick-arm")
+    assert scene.removed == []
 
 
 class FakeApi:

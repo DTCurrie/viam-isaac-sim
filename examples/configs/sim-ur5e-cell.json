@@ -18,6 +18,7 @@
       "attributes": {
         "headless": true,
         "livestream": true,
+        "wait_for_finalizer": true,
         "lighting": {
           "dome": {
             "intensity": 1000,
@@ -31,6 +32,17 @@
         },
         "livestream_public_ip": ""
       }
+    },
+    {
+      "name": "scene-finalizer",
+      "api": "rdk:component:generic",
+      "model": "viam:isaac-sim-devin:scene-finalizer",
+      "depends_on": [
+        "isaac-world",
+        "pick-arm",
+        "pick-grip",
+        "wrist-cam"
+      ]
     },
     {
       "name": "pick-arm",
