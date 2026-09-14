@@ -19,6 +19,13 @@
         "headless": true,
         "livestream": true,
         "wait_for_finalizer": false,
+        "ground": {
+          "kind": "plane",
+          "matte": true
+        },
+        "render": {
+          "viewport_grid": false
+        },
         "lighting": {
           "dome": {
             "intensity": 1000,
@@ -26,7 +33,14 @@
               1,
               1,
               1
-            ]
+            ],
+            "texture": {
+              "$variable": {
+                "name": "hdri-path",
+                "default_value": "module://hdri/empty_warehouse_01_1k.hdr"
+              }
+            },
+            "rotation_deg": 150
           },
           "sphere_intensity": 30000
         },

@@ -19,7 +19,7 @@ import queue
 import signal
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from concurrent.futures import Future
 from dataclasses import dataclass, field
 from typing import Any, cast
@@ -166,6 +166,7 @@ from .usd_assets import (
 from .usd_assets import (
     _bucket_candidate as _bucket_candidate,
 )
+from .visual_props import VISUAL_PROP_KIND, status_row
 
 LOGGER = getLogger("viam-isaac-sim")
 
@@ -209,6 +210,12 @@ class SimConfig:
     # disable_viewport_updates is a launcher-config key, both at boot. The
     # mock records the config for tests.
     render: dict[str, Any] | None = None
+    # the floor the module adds when it owns the stage. None = today's grid
+    # environment. Shape: {"kind": "grid"|"plane"|"none", "color": [r,g,b],
+    # "size": m, "friction": f, "restitution": r}, the plane-only keys with
+    # defaults in models/world_config_validation.py (GROUND_DEFAULTS). Ignored
+    # with a warning when usd_stage is set. The mock records it for tests.
+    ground: dict[str, Any] | None = None
     # defer world steps until a scene-finalizer component runs. The finalizer's
     # depends_on names every scene-populating component, so the renderer's
     # first (slow, shader-compiling) steps happen after every resource is built
@@ -259,7 +266,7 @@ def _boot_extra_args(cfg: SimConfig) -> list[str]:
     return args
 
 
-# GCP 1:1-NATs a VM's external IP, so it never appears on a local interface;
+# GCP 1:1-NATs a VM's external IP, so it never appears on a local interface,
 # the metadata server is the only way to read it from inside the VM.
 _GCP_METADATA_EXTERNAL_IP_URL = (
     "http://metadata.google.internal/computeMetadata/v1/instance/"
@@ -296,6 +303,100 @@ DEFAULT_DOME_INTENSITY = 1000.0
 DEFAULT_DOME_COLOR = (1.0, 1.0, 1.0)
 DOME_LIGHT_PRIM_PATH = "/World/DomeLight"
 SPHERE_LIGHT_PRIM_PATH = "/World/SphereLight"
+# the plain floor ground.kind "plane" authors in place of the grid environment
+GROUND_PLANE_PRIM_PATH = "/World/groundPlane"
+GROUND_PLANE_NAME = "ground_plane"
+# RTX "Matte Object" post-process: a prim carrying the primvar is invisible to
+# primary rays but still receives shadows, so the dome texture shows through a
+# ground.matte plane. Setting paths and the primvar were confirmed on Isaac Sim
+# 5.0.0 on 2026-09-14: the plane vanished and kept its shadows.
+MATTE_OBJECT_PRIMVAR = "primvars:isMatteObject"
+MATTE_OBJECT_SETTING = "/rtx/post/matteObject/enabled"
+SHADOW_CATCHER_SETTING = "/rtx/post/matteObject/enableShadowCatcher"
+
+
+def dome_light_settings(dome: Mapping[str, Any], resolve: Callable[[str], str]) -> dict[str, Any]:
+    """Pure. Turns a validated ``lighting.dome`` mapping into the values
+    ``_apply_lighting`` authors on the DomeLight prim: the resolved texture
+    path (or None), the texture format (default DEFAULT_DOME_TEXTURE_FORMAT),
+    and the ``(0, 0, yaw)`` rotation - None unless rotation_deg is present, so
+    a dome without an explicit yaw keeps today's identity xform. Kit already
+    orients a DomeLight's pole to the Z-up stage (GPU-observed 2026-09-14, a
+    270 degree X tilt stood the HDRI floor up in front of the camera), so no
+    up-axis correction is authored here."""
+    from .models.world_config_validation import DEFAULT_DOME_TEXTURE_FORMAT
+
+    texture_value = dome.get("texture")
+    rotation_deg = dome.get("rotation_deg")
+    rotate_xyz: tuple[float, float, float] | None = None
+    if rotation_deg is not None:
+        rotate_xyz = (0.0, 0.0, float(rotation_deg))
+    return {
+        "texture": resolve(texture_value) if texture_value else None,
+        "texture_format": dome.get("texture_format", DEFAULT_DOME_TEXTURE_FORMAT),
+        "rotate_xyz": rotate_xyz,
+    }
+
+
+REMOTE_ASSET_SCHEMES = ("http://", "https://", "omniverse://")
+
+
+def missing_texture_warning(
+    path: str, exists: Callable[[str], bool] = os.path.exists
+) -> str | None:
+    """Pure given ``exists``. A resolved local texture path that is not on disk
+    gets a warning string; remote URLs are left to Isaac's resolver and return
+    None. USD authors a missing asset path without complaint and the renderer
+    falls back to an untextured dome, so this is the only place the mistake
+    is named."""
+    if path.startswith(REMOTE_ASSET_SCHEMES) or exists(path):
+        return None
+    return f"dome texture not found, the dome renders untextured: {path}"
+
+
+def ground_plan(
+    ground: Mapping[str, Any] | None, usd_stage: str | None
+) -> tuple[str, dict[str, Any]]:
+    """Pure. Decides what ``_boot`` should author for the floor: ``"skip"``
+    (with a ``reason`` key) when a ``ground`` config is set alongside a user's
+    own ``usd_stage`` (DEC-W5's ignore-with-a-warning case), ``"grid"`` for no
+    config or ``kind: "grid"``, ``"none"`` for ``kind: "none"``, or
+    ``"plane"`` with the ``scene.add_ground_plane`` kwargs (size, color,
+    static/dynamic friction from ``friction``, restitution), each field
+    filled from GROUND_DEFAULTS when the config omits it."""
+    from .models.world_config_validation import GROUND_DEFAULTS
+
+    if usd_stage is not None and ground is not None:
+        return "skip", {"reason": f"usd_stage {usd_stage!r} is set"}
+    if ground is None:
+        return "grid", {}
+
+    kind = ground.get("kind", GROUND_DEFAULTS["kind"])
+    if kind == "grid":
+        return "grid", {}
+    if kind == "none":
+        return "none", {}
+
+    friction = float(ground.get("friction", GROUND_DEFAULTS["friction"]))
+    color = ground.get("color", GROUND_DEFAULTS["color"])
+    kwargs = {
+        "size": float(ground.get("size", GROUND_DEFAULTS["size"])),
+        "color": [float(v) for v in color],
+        "static_friction": friction,
+        "dynamic_friction": friction,
+        "restitution": float(ground.get("restitution", GROUND_DEFAULTS["restitution"])),
+    }
+    return "plane", kwargs
+
+
+def ground_is_matte(ground: Mapping[str, Any] | None) -> bool:
+    """Pure. Whether ``ground.matte`` is set, falling back to
+    GROUND_DEFAULTS when the config omits it or ``ground`` is None."""
+    from .models.world_config_validation import GROUND_DEFAULTS
+
+    if ground is None:
+        return bool(GROUND_DEFAULTS["matte"])
+    return bool(ground.get("matte", GROUND_DEFAULTS["matte"]))
 
 
 # create_camera attrs contract defaults (CameraHandle class docstring).
@@ -378,6 +479,9 @@ class SimManager:
         # render-cost levers config from the world component.
         # stored so status() and tests can read it even in mock mode.
         self.render: dict[str, Any] | None = None
+        # floor config from the world component.
+        # stored so status() and tests can read it even in mock mode.
+        self.ground: dict[str, Any] | None = None
         # hooks fired (in registration order) after every world reset,
         # so component handles can re-anchor state that resets undo.
         # Each is (owner component name or None, hook). The owner lets
@@ -390,6 +494,12 @@ class SimManager:
         # spawn spec per registered prop (sanitized name -> attrs), the
         # Isaac-side scene registry
         self._prop_specs: dict[str, dict[str, Any]] = {}
+        # visual-only props (type "visual"), sanitized name ->
+        # visual_props.visual_prop_record. Never in _prop_specs or the mock
+        # registry, so no scene verb sees one; status() lists them under
+        # "visual_props". Filled by the Isaac path (_spawn_visual_prop) and
+        # by MockWorldHandle in mock mode.
+        self._visual_props: dict[str, dict[str, Any]] = {}
         # component name -> (spawn attrs, handle). release_handle (close())
         # pops a name so the next create_* re-runs the factory, re-attaching
         # to the prim that release_handle deliberately left in the stage.
@@ -618,6 +728,7 @@ class SimManager:
         assert cfg is not None
         self.lighting = cfg.lighting
         self.render = cfg.render
+        self.ground = cfg.ground
         if cfg.mock:
             LOGGER.info("booting in MOCK mode - no Isaac Sim")
             self.mock = True
@@ -687,9 +798,14 @@ class SimManager:
             rendering_dt=cfg.rendering_dt,
             stage_units_in_meters=1.0,
         )
-        if not cfg.usd_stage:
-            self.world.scene.add_default_ground_plane()
-        for prop in cfg.props:
+        self._add_ground(cfg)
+        if cfg.render is not None and "viewport_grid" in cfg.render:
+            self._apply_viewport_grid(bool(cfg.render["viewport_grid"]))
+        # non-visual props spawn first so a visual's fit.collider always
+        # finds its cube already in _prop_specs
+        ordered_props = [p for p in cfg.props if str(p.get("type", "cube")) != VISUAL_PROP_KIND]
+        ordered_props += [p for p in cfg.props if str(p.get("type", "cube")) == VISUAL_PROP_KIND]
+        for prop in ordered_props:
             try:
                 self._spawn_prop(prop)
             except Exception:
@@ -722,7 +838,9 @@ class SimManager:
         raises, so bad/unavailable lighting config can't block boot."""
         try:
             import omni.usd
-            from pxr import Gf, UsdLux
+            from pxr import Gf, Sdf, UsdGeom, UsdLux
+
+            from .assets import resolve_asset
 
             stage = omni.usd.get_context().get_stage()
 
@@ -733,6 +851,20 @@ class SimManager:
                 color = dome.get("color", DEFAULT_DOME_COLOR)
                 dome_light.CreateColorAttr(Gf.Vec3f(*[float(v) for v in color]))
 
+                settings = dome_light_settings(dome, resolve_asset)
+                if settings["texture"] is not None:
+                    warning = missing_texture_warning(settings["texture"])
+                    if warning:
+                        LOGGER.warning(warning)
+                    dome_light.CreateTextureFileAttr(Sdf.AssetPath(settings["texture"]))
+                    dome_light.CreateTextureFormatAttr(settings["texture_format"])
+                if settings["rotate_xyz"] is not None:
+                    xformable = UsdGeom.Xformable(dome_light)
+                    # clear any xform ops a prior reconfigure authored so a
+                    # re-applied rotation replaces rather than stacks on top.
+                    xformable.ClearXformOpOrder()
+                    xformable.AddRotateXYZOp().Set(Gf.Vec3f(*settings["rotate_xyz"]))
+
             sphere_intensity = lighting.get("sphere_intensity")
             if sphere_intensity is not None:
                 sphere_prim = stage.GetPrimAtPath(SPHERE_LIGHT_PRIM_PATH)
@@ -740,6 +872,85 @@ class SimManager:
                     UsdLux.SphereLight(sphere_prim).GetIntensityAttr().Set(float(sphere_intensity))
         except Exception:
             LOGGER.exception("failed to apply scene lighting")
+
+    def _add_ground(self, cfg: SimConfig) -> None:
+        """Author the floor ``ground_plan`` decided on. Runs on the sim thread
+        before props spawn, so a block always has something to land on."""
+        ground_kind, ground_kwargs = ground_plan(cfg.ground, cfg.usd_stage)
+        if ground_kind == "skip":
+            LOGGER.warning("ground config ignored: %s", ground_kwargs["reason"])
+            return
+        if ground_kind == "none":
+            return
+        if ground_kind == "plane":
+            import numpy as np
+
+            # PreviewSurface calls color.tolist(), so the colour must be an array
+            ground_kwargs["color"] = np.array(ground_kwargs["color"], dtype=float)
+            try:
+                self.world.scene.add_ground_plane(
+                    name=GROUND_PLANE_NAME,
+                    prim_path=GROUND_PLANE_PRIM_PATH,
+                    z_position=0.0,
+                    **ground_kwargs,
+                )
+                if ground_is_matte(cfg.ground):
+                    self._make_ground_matte()
+            except Exception:
+                LOGGER.exception("failed to add ground plane, falling back to the default grid")
+                self.world.scene.add_default_ground_plane()
+            return
+        # "grid": today's behaviour is a floor only when the module owns the
+        # stage, an unowned usd_stage keeps its own floor.
+        if not cfg.usd_stage:
+            self.world.scene.add_default_ground_plane()
+
+    def _make_ground_matte(self) -> None:
+        """Flag the ground plane's mesh prims as RTX "Matte Object"s so the
+        plane is invisible to primary rays but still receives shadows, and
+        turn on the matte-object/shadow-catcher render settings. Best-effort:
+        never raises, so a render-settings-API change can't block boot."""
+        try:
+            import carb
+            import omni.usd
+            from pxr import Sdf, Usd, UsdGeom
+
+            stage = omni.usd.get_context().get_stage()
+            root_prim = stage.GetPrimAtPath(GROUND_PLANE_PRIM_PATH)
+            flagged: list[str] = []
+            prims_to_check = list(Usd.PrimRange(root_prim)) if root_prim.IsValid() else []
+            # primvars inherit down the namespace, so the root covers whatever
+            # geometry the plane composes; meshes get it directly as well.
+            for prim in prims_to_check:
+                if prim == root_prim or prim.IsA(UsdGeom.Mesh):
+                    UsdGeom.PrimvarsAPI(prim).CreatePrimvar(
+                        "isMatteObject", Sdf.ValueTypeNames.Bool
+                    ).Set(True)
+                    flagged.append(str(prim.GetPath()))
+            settings = carb.settings.get_settings()
+            settings.set(MATTE_OBJECT_SETTING, True)
+            settings.set(SHADOW_CATCHER_SETTING, True)
+            LOGGER.info(
+                "flagged matte prims %s, set %s and %s",
+                flagged,
+                MATTE_OBJECT_SETTING,
+                SHADOW_CATCHER_SETTING,
+            )
+        except Exception:
+            LOGGER.exception("failed to make the ground plane matte")
+
+    def _apply_viewport_grid(self, show_grid: bool) -> None:
+        """Toggle the viewport's grid overlay through carb.settings, the only
+        post-launch (not launcher-config) render lever so far. Best-effort:
+        never raises, so a settings-API change can't block boot."""
+        setting_path = "/app/viewport/grid/enabled"
+        try:
+            import carb
+
+            carb.settings.get_settings().set(setting_path, show_grid)
+            LOGGER.info("set %s to %s", setting_path, show_grid)
+        except Exception:
+            LOGGER.exception("failed to apply render.viewport_grid")
 
     def _spawn_prop(self, prop: dict[str, Any]) -> None:
         """Add a configured prop to the scene (runs on the sim thread,
@@ -755,6 +966,10 @@ class SimManager:
         position = list(to_vec3(prop.get("position")))
         kind = str(prop.get("type", "cube"))
         orientation = prop_spawn_orientation(prop)
+
+        if kind == VISUAL_PROP_KIND:
+            self._spawn_visual_prop(prop, name, position, orientation)
+            return
 
         if kind == "usd":
             usd_path = prop.get("usd_path")
@@ -800,6 +1015,108 @@ class SimManager:
             "spawn_orientation": orientation,
         }
 
+    def _spawn_visual_prop(
+        self,
+        prop: dict[str, Any],
+        name: str,
+        position: list[float],
+        orientation: tuple[float, float, float, float],
+    ) -> None:
+        """Reference a visual-only prop (sim thread, before the initial
+        world.reset). Contract:
+
+        1. ``resolve_asset(prop["usd_path"])``; ``_usd_exists`` False ->
+           ``ValueError`` naming the prop and the resolved path.
+        2. ``add_reference_to_stage`` at ``/World/<name>``.
+        3. ``fit.collider`` -> the named cube must already be in
+           ``_prop_specs`` (boot spawns every non-visual prop first) and be
+           ``type: cube``, else ``ValueError``; ``collider_dims_m`` is its
+           ``prop_box_dims``. Mesh dims: ``UsdGeom.BBoxCache`` over the
+           default and render purposes, ``ComputeUntransformedBound`` (the
+           asset's own extent, before our pose and scale).
+        4. ``SingleXFormPrim(prim_path).set_world_pose(position, orientation)``
+           then ``set_local_scale`` with ``visual_scale(...)``.
+        5. ``bounds_m`` = ``ComputeWorldBound`` after pose and scale, as
+           ``{"min": [x, y, z], "max": [x, y, z]}``.
+        6. ``self._visual_props[name] = visual_prop_record(...)``.
+
+        No ``apply_prop_physics``, no ``world.scene.add``, never touches
+        ``_prop_specs``. A name already in ``_prop_specs`` or
+        ``_visual_props`` is a ``ValueError``."""
+        import numpy as np
+        import omni.usd
+        from pxr import Usd, UsdGeom
+
+        from .assets import resolve_asset
+        from .visual_props import fit_collider_name, visual_prop_record, visual_scale
+
+        if name in self._prop_specs or name in self._visual_props:
+            raise ValueError(f"prop {name!r} already exists")
+        usd_path = prop.get("usd_path")
+        if not usd_path:
+            LOGGER.info("visual prop %s skipped: usd_path is empty, nothing to reference", name)
+            return
+        resolved_path = resolve_asset(str(usd_path))
+        if self._usd_exists(resolved_path) is False:
+            raise ValueError(f"prop {name}: usd not found: {resolved_path}")
+        prim_path = f"/World/{name}"
+        self._isaac.add_reference_to_stage(usd_path=resolved_path, prim_path=prim_path)
+
+        collider_name = fit_collider_name(prop)
+        collider_dims_m: tuple[float, float, float] | None = None
+        if collider_name is not None:
+            collider_spec = self._prop_specs.get(prim_name(collider_name))
+            if collider_spec is None or str(collider_spec.get("type", "cube")) != "cube":
+                raise ValueError(
+                    f"prop {name}: fit.collider {collider_name!r} must name an existing cube prop"
+                )
+            collider_dims_m = prop_box_dims(collider_spec)
+
+        stage = omni.usd.get_context().get_stage()
+        prim = stage.GetPrimAtPath(prim_path)
+        cache = UsdGeom.BBoxCache(
+            Usd.TimeCode.Default(), [UsdGeom.Tokens.default_, UsdGeom.Tokens.render]
+        )
+        mesh_size = cache.ComputeUntransformedBound(prim).ComputeAlignedRange().GetSize()
+        mesh_dims_m: tuple[float, float, float] = (
+            float(mesh_size[0]),
+            float(mesh_size[1]),
+            float(mesh_size[2]),
+        )
+        if collider_dims_m is not None and any(dim <= 0 for dim in mesh_dims_m):
+            raise ValueError(f"prop {name}: mesh has no bounds to fit against its collider")
+
+        if collider_name is not None:
+            # the mesh dresses the collider, so the grey cube stops rendering.
+            # Visibility is a render attribute: PhysX keeps the collider.
+            collider_prim = stage.GetPrimAtPath(f"/World/{prim_name(collider_name)}")
+            UsdGeom.Imageable(collider_prim).MakeInvisible()
+            LOGGER.info("hid collider %s behind visual prop %s", collider_name, name)
+
+        xform = self._isaac.SingleXFormPrim(prim_path)
+        xform.set_world_pose(position=position, orientation=list(orientation))
+        scale = visual_scale(prop, collider_dims_m, mesh_dims_m)
+        if scale is not None:
+            xform.set_local_scale(np.array(scale))
+
+        cache.Clear()
+        world_range = cache.ComputeWorldBound(prim).ComputeAlignedRange()
+        bounds_m = {
+            "min": [float(v) for v in world_range.GetMin()],
+            "max": [float(v) for v in world_range.GetMax()],
+        }
+
+        self._visual_props[name] = visual_prop_record(
+            prop,
+            name=name,
+            resolved_path=resolved_path,
+            position=(position[0], position[1], position[2]),
+            orientation=orientation,
+            collider_dims_m=collider_dims_m,
+            mesh_dims_m=mesh_dims_m,
+            bounds_m=bounds_m,
+        )
+
     def _require_booted(self) -> None:
         if self._stopped:
             raise SimNotBootedError("Isaac Sim has stopped - the module is shutting down")
@@ -832,9 +1149,11 @@ class SimManager:
             "error": str(self._boot_error) if self._boot_error else "",
             "lighting": self.lighting,
             "render": self.render,
+            "ground": self.ground,
             # GPU checklist item 6: None in mock or when no probe answers
             "isaac_version": _version_string(isaac_version()),
             "ready": self._ready.is_set(),
+            "visual_props": [status_row(record) for record in self._visual_props.values()],
         }
         if self._booted.is_set() and not self.mock and self._ready.is_set():
             out["playing"] = self.run(lambda: bool(self.world.is_playing()))

@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 from viam.logging import getLogger
 
+from ..assets import resolve_asset
 from ..prim_paths import prim_name
 from ..prop_scatter import (
     DEFAULT_MIN_SEPARATION_M,
@@ -27,11 +28,20 @@ from ..prop_scatter import (
     prop_spawn_orientation,
 )
 from ..spatial import Quat, Vec3, _as_quat, to_vec3
+from ..visual_props import fit_collider_name, is_visual_prop, visual_prop_error, visual_prop_record
 
 if TYPE_CHECKING:
     from ..sim_manager import SimManager
 
 LOGGER = getLogger(__name__)
+
+
+def _require_not_visual(sim: SimManager, verb: str, names: Sequence[str]) -> None:
+    """Raise on the first ``names`` entry that is a visual prop. Every
+    non-geometry prop verb calls this before any other lookup."""
+    for name in names:
+        if prim_name(name) in sim._visual_props:
+            raise ValueError(visual_prop_error(verb, name))
 
 
 class WorldHandle:
@@ -190,14 +200,21 @@ class MockWorldHandle(WorldHandle):
     def __init__(self, sim: SimManager, props: Sequence[dict[str, Any]]) -> None:
         self._sim = sim
         self._registry: dict[str, dict[str, Any]] = {}
-        for prop in props:
+        # non-visual props register first so a visual's fit.collider always
+        # finds its cube already in the registry
+        ordered_props = [p for p in props if not is_visual_prop(p)]
+        ordered_props += [p for p in props if is_visual_prop(p)]
+        for prop in ordered_props:
             self._register(prop)
 
     def _register(self, prop: dict[str, Any]) -> None:
         if not prop.get("name"):
             raise ValueError(f"every prop needs a name: {prop}")
+        if is_visual_prop(prop):
+            self._register_visual(prop)
+            return
         name = prim_name(str(prop["name"]))
-        if name in self._registry:
+        if name in self._registry or name in self._sim._visual_props:
             raise ValueError(f"prop {name!r} already exists")
         position = to_vec3(prop.get("position"))
         orientation = prop_spawn_orientation(prop)
@@ -208,6 +225,33 @@ class MockWorldHandle(WorldHandle):
             "position": position,
             "orientation": orientation,
         }
+
+    def _register_visual(self, prop: dict[str, Any]) -> None:
+        name = prim_name(str(prop["name"]))
+        if name in self._registry or name in self._sim._visual_props:
+            raise ValueError(f"prop {name!r} already exists")
+        if not prop.get("usd_path"):
+            LOGGER.info("visual prop %s skipped: usd_path is empty, nothing to reference", name)
+            return
+        collider_name = fit_collider_name(prop)
+        collider_dims_m: Vec3 | None = None
+        if collider_name is not None:
+            entry = self._registry.get(prim_name(collider_name))
+            if entry is None or str(entry["spawn"].get("type", "cube")) != "cube":
+                raise ValueError(
+                    f"prop {name}: fit.collider {collider_name!r} must name an existing cube prop"
+                )
+            collider_dims_m = prop_box_dims(entry["spawn"])
+        self._sim._visual_props[name] = visual_prop_record(
+            prop,
+            name=name,
+            resolved_path=resolve_asset(str(prop["usd_path"])),
+            position=to_vec3(prop.get("position")),
+            orientation=prop_spawn_orientation(prop),
+            collider_dims_m=collider_dims_m,
+            mesh_dims_m=None,
+            bounds_m=None,
+        )
 
     def registry(self) -> dict[str, dict[str, Any]]:
         """The live registry, keyed by prim name (tests read it)."""
@@ -266,6 +310,7 @@ class MockWorldHandle(WorldHandle):
     def set_prop_pose(
         self, name: str, position_m: Vec3, orientation_wxyz: Quat | None = None
     ) -> None:
+        _require_not_visual(self._sim, "set_prop_pose", [name])
         entry = self._entry(name)
         entry["position"] = to_vec3(position_m)
         if orientation_wxyz is not None:
@@ -279,6 +324,7 @@ class MockWorldHandle(WorldHandle):
         min_separation_m: float = DEFAULT_MIN_SEPARATION_M,
         size_range_m: dict[str, tuple[float, float]] | None = None,
     ) -> RandomizeResult:
+        _require_not_visual(self._sim, "randomize_props", names)
         _validate_size_range_names(names, size_range_m)
         entries = {name: self._entry(name) for name in names}
         if size_range_m:
@@ -325,6 +371,9 @@ class MockWorldHandle(WorldHandle):
         size_range_m: tuple[float, float] | None = None,
         counts: dict[str, int] | None = None,
     ) -> ScatterCellResult:
+        _require_not_visual(
+            self._sim, "scatter_cell", [name for names in names_by_color.values() for name in names]
+        )
         pool_names = _require_pool_blocks(self._registry, names_by_color, "scatter_cell")
         _require_park_positions(pool_names, park_positions_m, "scatter_cell")
         rng = random.Random(seed)
@@ -359,6 +408,9 @@ class MockWorldHandle(WorldHandle):
         names_by_color: dict[str, list[str]],
         park_positions_m: dict[str, tuple[float, float]],
     ) -> ClearCellResult:
+        _require_not_visual(
+            self._sim, "clear_cell", [name for names in names_by_color.values() for name in names]
+        )
         pool_names = _require_pool_blocks(self._registry, names_by_color, "clear_cell")
         _require_park_positions(pool_names, park_positions_m, "clear_cell")
         for name in pool_names:
@@ -482,6 +534,7 @@ class IsaacWorldHandle(WorldHandle):
     def set_prop_pose(
         self, name: str, position_m: Vec3, orientation_wxyz: Quat | None = None
     ) -> None:
+        _require_not_visual(self._sim, "set_prop_pose", [name])
         self._prop_spec(name)  # ValueError on unknown name
         spawned_prim_name = prim_name(name)
         self._sim.run(lambda: self._teleport(spawned_prim_name, position_m, orientation_wxyz))
@@ -494,6 +547,7 @@ class IsaacWorldHandle(WorldHandle):
         min_separation_m: float = DEFAULT_MIN_SEPARATION_M,
         size_range_m: dict[str, tuple[float, float]] | None = None,
     ) -> RandomizeResult:
+        _require_not_visual(self._sim, "randomize_props", names)
         _validate_size_range_names(names, size_range_m)
         specs = {name: self._prop_spec(name) for name in names}
         if size_range_m:
@@ -543,6 +597,9 @@ class IsaacWorldHandle(WorldHandle):
         size_range_m: tuple[float, float] | None = None,
         counts: dict[str, int] | None = None,
     ) -> ScatterCellResult:
+        _require_not_visual(
+            self._sim, "scatter_cell", [name for names in names_by_color.values() for name in names]
+        )
         pool_names = _require_pool_blocks(self._sim._prop_specs, names_by_color, "scatter_cell")
         _require_park_positions(pool_names, park_positions_m, "scatter_cell")
         rng = random.Random(seed)
@@ -577,6 +634,9 @@ class IsaacWorldHandle(WorldHandle):
         names_by_color: dict[str, list[str]],
         park_positions_m: dict[str, tuple[float, float]],
     ) -> ClearCellResult:
+        _require_not_visual(
+            self._sim, "clear_cell", [name for names in names_by_color.values() for name in names]
+        )
         pool_names = _require_pool_blocks(self._sim._prop_specs, names_by_color, "clear_cell")
         _require_park_positions(pool_names, park_positions_m, "clear_cell")
         specs = {name: self._prop_spec(name) for name in pool_names}

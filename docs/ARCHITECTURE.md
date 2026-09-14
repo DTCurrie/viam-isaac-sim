@@ -12,43 +12,45 @@ into. Read it before you add a model or move a file.
 
 ## The module map
 
-`src/` is 13,349 lines across 46 Python files in two packages, plus the entry point.
+`src/` is 14,476 lines across 49 Python files in two packages, plus the entry point.
 
 | path | lines | what it owns |
 | --- | --- | --- |
 | `src/main.py` | 114 | The process layout. Isaac Sim gets the main thread, the Viam module gRPC server gets a daemon thread with a fixed 8-worker executor. Signals stop the module before the sim. |
-| `src/isaac_module/sim_manager.py` | 1877 | `SimConfig` and `SimManager`: the Kit lifecycle, the boot sequence, the sim thread and its task queue, the component factories and the handle cache. |
-| `src/isaac_module/handles/world.py` | 623 | `WorldHandle`, its Isaac backend and its mock: scene verbs, prop poses, geometries. |
-| `src/isaac_module/handles/arm.py` | 747 | `ArmHandle`, Isaac and mock: joint drive, settle detection, the velocity cap, prim poses. |
-| `src/isaac_module/handles/gripper.py` | 530 | `GripperHandle`, Isaac and mock: jaw drive, stall and hold detection, the attach sequence. |
+| `src/isaac_module/sim_manager.py` | 2192 | `SimConfig` and `SimManager`: the Kit lifecycle, the boot sequence, the sim thread and its task queue, the component factories and the handle cache. |
+| `src/isaac_module/handles/world.py` | 677 | `WorldHandle`, its Isaac backend and its mock: scene verbs, prop poses, geometries. |
+| `src/isaac_module/handles/arm.py` | 751 | `ArmHandle`, Isaac and mock: joint drive, settle detection, the velocity cap, prim poses. |
+| `src/isaac_module/handles/gripper.py` | 536 | `GripperHandle`, Isaac and mock: jaw drive, stall and hold detection, the attach sequence. |
 | `src/isaac_module/handles/camera.py` | 475 | `CameraHandle`, Isaac and mock: frames, intrinsics, the warm-up retry, the deterministic mock scene. |
-| `src/isaac_module/handles/base.py` | 130 | `BaseHandle`, Isaac and mock: wheel velocities and the base's root pose. |
-| `src/isaac_module/models/world.py` | 300 | The `isaac-world` generic component: boot config, `close()`, `do_command` dispatch through `asyncio.to_thread`. |
+| `src/isaac_module/handles/base.py` | 151 | `BaseHandle`, Isaac and mock: wheel velocities and the base's root pose. |
+| `src/isaac_module/models/world.py` | 341 | The `isaac-world` generic component: boot config, `close()`, `do_command` dispatch through `asyncio.to_thread`. |
 | `src/isaac_module/models/world_commands.py` | 363 | One function per world verb behind `COMMAND_HANDLERS`, including the payload-driven `scatter_cell` and `clear_cell`. |
-| `src/isaac_module/models/world_config_validation.py` | 272 | The world's attribute validators, including `kit_log_level` and the identity-frame rule. |
+| `src/isaac_module/models/world_config_validation.py` | 424 | The world's attribute validators, including `kit_log_level` and the identity-frame rule. |
 | `src/isaac_module/models/scene_finalizer.py` | 53 | The `scene-finalizer` generic component: validates `depends_on` names at least one component, and calls `finalize_scene()` on build and reconfigure. |
 | `src/isaac_module/models/arm.py` | 650 | The `arm` component: joint moves, IK against the served kinematics, `max_vel_degs_per_sec`, typed gRPC errors, hold-on-cancel. |
 | `src/isaac_module/models/camera.py` | 339 | The `camera` component: images, point clouds, encoding. |
 | `src/isaac_module/models/gripper.py` | 378 | The `gripper` component: open, grab, jaw state, deadlines. |
-| `src/isaac_module/models/base.py` | 217 | The `base` component: differential drive, `width_mm` and `wheel_circumference_mm`. |
+| `src/isaac_module/models/base.py` | 242 | The `base` component: differential drive, `width_mm` and `wheel_circumference_mm`. |
 | `src/isaac_module/models/component_frame_pose.py` | 81 | Frame-to-spawn-pose conversion. |
 | `src/isaac_module/models/sim_component_validation.py` | 100 | The shared spawned-component validation, including the `<arm>:<link>` frame-parent rule. |
-| `src/isaac_module/models/conductor.py` | 1076 | The block-sorting service. Not a driver, a client of the sim models. |
+| `src/isaac_module/models/conductor.py` | 1098 | The block-sorting service. Not a driver, a client of the sim models. |
 | `src/isaac_module/models/sorter_sensor.py` | 112 | A sensor that proxies the conductor's loop records. |
-| `src/isaac_module/config_resolver.py` | 418 | Reads a real machine config and writes the sim machine's config, reporting swaps, placeholders, pruned modules and unresolved variables. |
-| `src/isaac_module/asset_catalog.py` | 117 | `KNOWN_ASSETS`: USD candidates, joint names, `ee_prim`, packaged kinematics paths. |
+| `src/isaac_module/config_resolver.py` | 478 | Reads a real machine config and writes the sim machine's config, reporting swaps, placeholders, pruned modules and unresolved variables. |
+| `src/isaac_module/asset_catalog.py` | 120 | `KNOWN_ASSETS`: USD candidates, joint names, `ee_prim`, packaged kinematics paths. |
 | `src/isaac_module/kinematics_files/` | | The UR3e, UR5e, UR7e and UR20 SVA files shipped with the module. |
 | `src/isaac_module/usd_assets.py` | 270 | The USD asset repair helpers for the unresolvable Robotiq references. |
 | `src/isaac_module/prop_scatter.py` | 306 | The prop scatter engine and its result records. |
-| `src/isaac_module/prim_paths.py` | 31 | Prim naming and the default end-effector and base prim paths. |
+| `src/isaac_module/prim_paths.py` | 37 | Prim naming and the default end-effector and base prim paths. |
+| `src/isaac_module/assets.py` | 59 | `module://` and `data://` asset path schemes for textures, HDRIs and USD files named in world config. |
+| `src/isaac_module/visual_props.py` | 151 | Visual-only props: the `visual` kind's constants, the fit-scale arithmetic and the record shape `status.visual_props` lists. |
 | `src/isaac_module/component_diagnostics.py` | 144 | The bodies of the world's per-component introspection verbs. |
 | `src/isaac_module/compat.py` | 241 | The one place Isaac Sim is imported, the `IsaacAPI` protocol and the 5.0 capability row. |
 | `src/isaac_module/spatial.py` | 237 | Quaternion, orientation-vector and pose composition math. |
 | `src/isaac_module/length_units.py` | 11 | The one millimeter-to-meter conversion. |
 | `src/isaac_module/encoding.py` | 203 | Image and point cloud encoding. |
 | `src/isaac_module/kinematics.py` | 416 | SVA and URDF chains, forward and inverse. |
-| `src/isaac_module/physics.py` | 166 | Solver iteration counts and prop physics defaults. |
-| `src/isaac_module/errors.py` | 59 | The `SimError` hierarchy, each class carrying its gRPC status. |
+| `src/isaac_module/physics.py` | 168 | Solver iteration counts and prop physics defaults. |
+| `src/isaac_module/errors.py` | 79 | The `SimError` hierarchy, each class carrying its gRPC status. |
 | `src/isaac_module/sdk_patches.py` | 58 | One monkeypatch that adds the `MoveThroughJointPositions` handler the Python SDK 0.80 does not serve. |
 | `src/isaac_module/cell_layout.py` | 156 | The sorting cell's geometry. |
 | `src/isaac_module/sort_plan.py` | 133 | The sorting order. |
@@ -59,9 +61,11 @@ The block-sorting demo, `models/conductor.py`, `models/sorter_sensor.py`, `cell_
 `sort_plan.py`, `run_log.py` and `src/pickcell/`, is a layer above the sim models. It reaches the
 sim only through the Viam API and the world's `DoCommand`, and nothing in the sim core imports it.
 
-Around `src/` sit five more directories. `tests/` is 17,050 lines across 59 files and runs entirely
-against mocks. `examples/` is 2,859 lines: five GPU checklist scripts, one smoke script, and the
-single-pick client. `tools/` is 464 lines: the config resolver's CLI and the machine creator.
+Around `src/` sit five more directories. `tests/` is 19,095 lines across 69 files and runs entirely
+against mocks. `examples/` is 3,469 lines: five GPU checklist scripts, one smoke script, and the
+single-pick client. `tools/` is 1,211 lines: the config resolver's CLI, the machine creator, the
+RealSense mesh generator, the shader cache warmer, and `convert_mesh.py`, which turns a STEP or
+OBJ mesh into a visual USD in metres, Z-up, with its origin at the top-face centre.
 `fragments/` holds the two shipped Viam fragments. `provisioning/` holds the GCP image and machine
 scripts. `simulates.json` at the repo root is the machine-readable substitution table.
 

@@ -1,5 +1,6 @@
 """Config-attribute validators for the world component."""
 
+import math
 from collections.abc import Mapping, Sequence
 from typing import cast
 
@@ -8,6 +9,7 @@ from viam.utils import ValueTypes
 
 from ..physics import PROP_PHYSICS_KEYS
 from ..sim_manager import prim_name
+from ..visual_props import FIT_TRUE, PROP_KINDS, VISUAL_PROP_KIND, VISUAL_REJECTED_KEYS
 from .component_frame_pose import frame_pose
 
 _IDENTITY_QUAT = (1.0, 0.0, 0.0, 0.0)
@@ -130,10 +132,46 @@ def _validate_box_dims(label: str, prop: Mapping[str, object]) -> None:
             raise ValueError(f"prop {label}: 'box_dims' values must be positive")
 
 
+def _cube_prop_names(props: Sequence[object]) -> set[str]:
+    """The sanitised prim names of every ``type: "cube"`` (or default) prop,
+    the only kind ``fit.collider`` may name."""
+    names: set[str] = set()
+    for prop in props:
+        if not isinstance(prop, Mapping) or prop.get("type", "cube") != "cube":
+            continue
+        name = prop.get("name")
+        if isinstance(name, str) and name:
+            names.add(prim_name(name))
+    return names
+
+
+def _validate_fit(label: str, fit: object, cube_names: set[str]) -> None:
+    if fit == FIT_TRUE:
+        return
+    if not isinstance(fit, Mapping) or set(fit) != {"collider"}:
+        raise ValueError(
+            f"prop {label}: 'fit' must be the string \"true\" or a mapping of the form "
+            '{"collider": "<cube prop name>"}'
+        )
+    collider = fit["collider"]
+    if not (isinstance(collider, str) and collider):
+        raise ValueError(
+            f"prop {label}: 'fit' must be the string \"true\" or a mapping of the form "
+            '{"collider": "<cube prop name>"}'
+        )
+    if prim_name(collider) in cube_names:
+        return
+    raise ValueError(
+        f"prop {label}: fit.collider {collider!r} is not a cube prop in this props "
+        f"list (cube props: {sorted(cube_names)})"
+    )
+
+
 def validate_props(props: object) -> None:
     if not isinstance(props, Sequence) or isinstance(props, str):
         raise ValueError("props must be a list")
     seen_prim_names: set[str] = set()
+    cube_names = _cube_prop_names(props)
     for index, prop in enumerate(props):
         label = _prop_label(prop, index)
         if not isinstance(prop, Mapping):
@@ -150,10 +188,35 @@ def validate_props(props: object) -> None:
         seen_prim_names.add(sanitized_name)
 
         kind = prop.get("type", "cube")
-        if kind not in ("cube", "usd"):
-            raise ValueError(f'prop {label}: \'type\' must be "cube" or "usd" (got {kind!r})')
+        if kind not in PROP_KINDS:
+            raise ValueError(
+                f'prop {label}: \'type\' must be "cube", "usd", or "visual" (got {kind!r})'
+            )
         if kind == "usd" and not prop.get("usd_path"):
             raise ValueError(f"prop {label}: 'usd_path' is required when 'type' is \"usd\"")
+        if kind == VISUAL_PROP_KIND:
+            usd_path = prop.get("usd_path")
+            if usd_path is None:
+                raise ValueError(f"prop {label}: 'usd_path' is required when 'type' is \"visual\"")
+            if not isinstance(usd_path, str):
+                raise ValueError(
+                    f"prop {label}: 'usd_path' must be a string on a \"visual\" prop "
+                    "(an empty string skips the prop)"
+                )
+            for key in prop:
+                if key in VISUAL_REJECTED_KEYS:
+                    raise ValueError(
+                        f'prop {label}: {key!r} is not allowed on a "visual" prop (it has no '
+                        "collider or rigid body)"
+                    )
+
+        if "fit" in prop and kind != VISUAL_PROP_KIND:
+            raise ValueError(f"prop {label}: 'fit' is only valid on a \"visual\" prop")
+        if kind == VISUAL_PROP_KIND:
+            if "scale" in prop and "fit" in prop:
+                raise ValueError(f"prop {label}: 'scale' and 'fit' cannot both be set")
+            if "fit" in prop:
+                _validate_fit(label, prop["fit"], cube_names)
 
         if "position" in prop:
             _validate_number_triple(label, "position", prop["position"])
@@ -209,6 +272,81 @@ def _validate_prop_physics(label: str, prop: Mapping[str, object]) -> None:
 
 
 _LIGHTING_KEYS = {"dome", "sphere_intensity"}
+# lighting.dome: intensity and color as before; texture is a path or URL the
+# resolver accepts or a module:// or data:// scheme (isaac_module/assets.py);
+# texture_format is a UsdLux dome format, default "latlong"; rotation_deg is
+# the yaw about Z. Kit orients the dome's pole to the Z-up stage on its own.
+_DOME_KEYS = {"intensity", "color", "texture", "texture_format", "rotation_deg"}
+DOME_TEXTURE_FORMATS = {"automatic", "latlong", "mirroredBall", "angular", "cubeMapVerticalCross"}
+DEFAULT_DOME_TEXTURE_FORMAT = "latlong"
+
+# ground: the floor the module adds when it owns the stage (no usd_stage).
+# "grid" is today's default environment, "plane" a plain ground plane with the
+# plane-only keys below, "none" no floor at all.
+GROUND_KINDS = ("grid", "plane", "none")
+_GROUND_KEYS = {"kind", "color", "size", "friction", "restitution", "matte"}
+# matte: the plane is invisible to the camera but catches shadows, so the
+# dome texture's own floor shows through (RTX "Matte Object" post-process).
+_GROUND_PLANE_ONLY_KEYS = {"color", "size", "friction", "restitution", "matte"}
+GROUND_DEFAULTS: dict[str, object] = {
+    "kind": "grid",
+    "color": [0.5, 0.5, 0.5],
+    "size": 100.0,
+    "friction": 0.5,
+    "restitution": 0.0,
+    "matte": False,
+}
+
+
+def validate_ground(value: object) -> None:
+    """Object with keys in _GROUND_KEYS; kind in GROUND_KINDS; color a triple in
+    [0, 1]; size > 0; friction >= 0; restitution in [0, 1]; a plane-only key
+    with kind != "plane" is an error."""
+    if not isinstance(value, Mapping):
+        raise ValueError("ground must be an object")
+    for key in value:
+        if key not in _GROUND_KEYS:
+            raise ValueError(f"ground: unknown key {key!r}")
+
+    kind = value.get("kind")
+    if kind is not None and kind not in GROUND_KINDS:
+        raise ValueError(f"ground.kind must be one of {GROUND_KINDS} (got {kind!r})")
+
+    if "color" in value:
+        _validate_number_triple("ground", "color", value["color"])
+        for v in value["color"]:
+            is_number = isinstance(v, (int, float)) and not isinstance(v, bool)
+            if is_number and not (0 <= v <= 1):
+                raise ValueError("ground.color values must be in [0, 1]")
+
+    if "size" in value:
+        size = value["size"]
+        if not isinstance(size, (int, float)) or isinstance(size, bool) or size <= 0:
+            raise ValueError("ground.size must be a positive number")
+
+    if "friction" in value:
+        friction = value["friction"]
+        if not isinstance(friction, (int, float)) or isinstance(friction, bool) or friction < 0:
+            raise ValueError("ground.friction must be a number >= 0")
+
+    if "restitution" in value:
+        restitution = value["restitution"]
+        is_number = isinstance(restitution, (int, float)) and not isinstance(restitution, bool)
+        if not is_number or not (0 <= restitution <= 1):
+            raise ValueError("ground.restitution must be a number in [0, 1]")
+
+    if "matte" in value:
+        if not isinstance(value["matte"], bool):
+            raise ValueError("ground.matte must be a bool")
+
+    effective_kind = kind if kind is not None else GROUND_DEFAULTS["kind"]
+    if effective_kind != "plane":
+        for key in _GROUND_PLANE_ONLY_KEYS:
+            if key in value:
+                raise ValueError(
+                    f'ground.{key} is only valid when ground.kind is "plane" '
+                    f"(got kind {effective_kind!r})"
+                )
 
 
 def validate_lighting(value: object) -> None:
@@ -222,6 +360,9 @@ def validate_lighting(value: object) -> None:
     if dome is not None:
         if not isinstance(dome, Mapping):
             raise ValueError("lighting.dome must be an object")
+        for key in dome:
+            if key not in _DOME_KEYS:
+                raise ValueError(f"lighting.dome: unknown key {key!r}")
         if "intensity" in dome:
             intensity = dome["intensity"]
             is_number = isinstance(intensity, (int, float)) and not isinstance(intensity, bool)
@@ -233,6 +374,24 @@ def validate_lighting(value: object) -> None:
                 is_number = isinstance(v, (int, float)) and not isinstance(v, bool)
                 if is_number and not (0 <= v <= 1):
                     raise ValueError("lighting.dome.color values must be in [0, 1]")
+        if "texture" in dome:
+            texture = dome["texture"]
+            if not isinstance(texture, str) or not texture:
+                raise ValueError("lighting.dome.texture must be a non-empty string")
+        if "texture_format" in dome:
+            texture_format = dome["texture_format"]
+            if not isinstance(texture_format, str) or texture_format not in DOME_TEXTURE_FORMATS:
+                raise ValueError(
+                    "lighting.dome.texture_format must be one of "
+                    f"{sorted(DOME_TEXTURE_FORMATS)} (got {texture_format!r})"
+                )
+        if "rotation_deg" in dome:
+            rotation_deg = dome["rotation_deg"]
+            is_number = isinstance(rotation_deg, (int, float)) and not isinstance(
+                rotation_deg, bool
+            )
+            if not is_number or not math.isfinite(rotation_deg):
+                raise ValueError("lighting.dome.rotation_deg must be a finite number")
 
     sphere_intensity = value.get("sphere_intensity")
     if sphere_intensity is not None:
@@ -253,7 +412,9 @@ def validate_kit_log_level(value: object) -> None:
         raise ValueError(f"kit_log_level must be one of {sorted(_KIT_LOG_LEVELS)} (got {value!r})")
 
 
-_RENDER_KEYS = {"motion_bvh", "disable_viewport_updates"}
+# viewport_grid is the first post-launch lever: written through carb.settings
+# after Kit is up (best-effort), unlike the two launcher-time keys.
+_RENDER_KEYS = {"motion_bvh", "disable_viewport_updates", "viewport_grid"}
 
 
 def validate_render(value: object, livestream: bool) -> None:

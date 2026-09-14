@@ -38,7 +38,9 @@ FRICTION_COMBINE_MODE = "max"
 # physics steps/s. Rendering stays at 1/60 so camera cadence is unchanged.
 # Consumed by the shipped fragment and its test.
 PICK_CELL_PHYSICS_DT = 1.0 / 120.0
-PICK_CELL_RENDERING_DT = 1.0 / 60.0
+PICK_CELL_RENDERING_DT = (
+    1.0 / 30.0
+)  # 30 Hz: measured 2026-09-14, the matte HDRI floor at 60 Hz halved the sim's speed
 
 # The 2F-85 asset asks for 64 solver position iterations, the UR asset
 # authors 32. Re-applied to the arm after every reset, through the

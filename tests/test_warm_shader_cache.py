@@ -39,7 +39,7 @@ class TestPlanFromFragment:
 
     def test_props_count_and_lighting(self) -> None:
         plan = wsc.plan_from_fragment(_fragment())
-        assert len(plan.sim_config.props) == 29
+        assert len(plan.sim_config.props) == 32
         assert plan.sim_config.lighting is not None
         assert plan.sim_config.lighting["dome"]["intensity"] == 1000
 
@@ -72,8 +72,8 @@ class TestPlanFromFragment:
     def test_scene_cam_dimensions(self) -> None:
         plan = wsc.plan_from_fragment(_fragment())
         scene_cam = _component(plan, "scene-cam")
-        assert scene_cam.attrs["width"] == 1280
-        assert scene_cam.attrs["height"] == 720
+        assert scene_cam.attrs["width"] == 848
+        assert scene_cam.attrs["height"] == 480
 
     def test_side_cam_dimensions_and_depth(self) -> None:
         plan = wsc.plan_from_fragment(_fragment())

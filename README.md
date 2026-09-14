@@ -231,12 +231,13 @@ and conventions. The conductor's and sorter-sensor's attributes are in
 | `livestream` | `true` | viewer for the Isaac Sim WebRTC Streaming Client, on TCP 49100 and UDP 47998 |
 | `livestream_public_ip` | _unset_ | IP advertised to streaming clients when the sim machine has multiple interfaces |
 | `usd_stage` | _empty stage + ground plane_ | USD file or omniverse:// URL to open. When set without `lighting`, the module logs a warning that the stage must provide its own floor and lights (it adds neither to a user stage) |
-| `physics_dt` / `rendering_dt` | `1/60` | step sizes in seconds. The block-sorting cell uses `1/120` for `physics_dt` (>= 80 steps/s is the floor for a 2F-85 grasp), rendering stays `1/60` |
+| `physics_dt` / `rendering_dt` | `1/60` | step sizes in seconds. The block-sorting cell uses `1/120` for `physics_dt` (>= 80 steps/s is the floor for a 2F-85 grasp), rendering `1/30` (measured 2026-09-14: at `1/60` the matte HDRI floor halved the sim's real-time factor, at `1/30` it runs at 0.54x, faster than the old grid floor at `1/60`) |
 | `boot_timeout_sec` | `110` | stays under viam-server's 2 minute resource configuration timeout (`VIAM_RESOURCE_CONFIGURATION_TIMEOUT`) |
 | `wait_for_finalizer` | `false` | defer world steps until a `scene-finalizer` component runs, see below |
 | `kit_log_level` | `"warning"` | kit console verbosity |
 | `props` | `[]` | objects spawned into the scene at boot, see below |
 | `lighting` | _unset_ | dome and sphere lights applied at boot, see below |
+| `ground` | _unset_ | the floor the module adds when it owns the stage, default is today's grid environment, see below |
 | `render` | _unset_ | render-cost levers applied at boot, see below |
 
 `lighting` takes `{"dome": {"intensity": 1000, "color": [1, 1, 1]},
@@ -244,13 +245,45 @@ and conventions. The conductor's and sorter-sensor's attributes are in
 leaves the stage's lights alone. The default stage has a single
 100 000-intensity sphere light, so a dome light is useful to even out color
 for detection. It is applied at boot only, and a change takes effect after a
-part restart.
+part restart. `dome` also takes `texture` (a path, URL, `module://` or
+`data://` HDRI, see "Asset paths" below), `texture_format` (a UsdLux dome
+format, default `"latlong"`, one of `"automatic"`, `"latlong"`,
+`"mirroredBall"`, `"angular"`, `"cubeMapVerticalCross"`), and `rotation_deg`
+(yaw about Z). Kit orients the dome to the Z-up stage on its own, so no tilt
+is authored. The bundled 1k HDRI lights the scene well but reads soft as a
+backdrop through a 60 degree camera. Use a 4k or larger file under `data://`
+for a sharp backdrop.
 
-`render` takes `{"motion_bvh": bool, "disable_viewport_updates": bool}`,
-best-effort. Both keys are optional, and leaving it unset leaves the
-renderer's defaults alone. `disable_viewport_updates: true` requires
-`livestream: false`, since the livestream needs viewport updates, and is
-refused otherwise.
+`ground` takes `{"kind": "grid" | "plane" | "none", "color": [r, g, b],
+"size": m, "friction": f, "restitution": r, "matte": bool}`. `kind` defaults
+to `"grid"`, today's default environment. `"plane"` adds a plain ground
+plane, with plane-only keys `color` (default `[0.5, 0.5, 0.5]`), `size`
+(default `100` m), `friction` (default `0.5`), `restitution` (default `0`)
+and `matte` (default `false`). `"none"` adds no floor at all, so a block
+knocked off the table falls forever. `ground` is ignored with a warning when
+`usd_stage` is set, since the module adds a floor only to the stage it owns.
+When `matte` is true, the plane is invisible to the camera but still catches
+shadows, so the HDRI's own floor shows through under the tables while the
+collider stays. This reads right from a fixed camera such as `scene-cam`,
+since the dome sits at infinity, but slides under a moving one.
+
+`render` takes `{"motion_bvh": bool, "disable_viewport_updates": bool,
+"viewport_grid": bool}`, best-effort. All keys are optional, and leaving it
+unset leaves the renderer's defaults alone. `disable_viewport_updates: true`
+requires `livestream: false`, since the livestream needs viewport updates,
+and is refused otherwise. `viewport_grid: false` hides the viewport grid
+overlay, applied after launch.
+
+**Asset paths:** a texture or USD path in world config may use one of two
+module schemes in addition to whatever Isaac's own resolver accepts.
+`module://<rel>` resolves under the module's bundled `assets/` directory,
+shipped inside `module.tar.gz`. `data://<rel>` resolves under
+`$VIAM_MODULE_DATA/assets/<rel>` (default `/opt/viam-isaac-sim` when
+`VIAM_MODULE_DATA` is unset). Anything else is handed to Isaac's resolver
+unchanged. The bundled HDRI, `assets/hdri/empty_warehouse_01_1k.hdr`, is CC0
+(Poly Haven). The 1k file is for lighting, and a sharp backdrop wants a 4k
+or larger file under `data://`, for example
+`"lighting": {"dome": {"texture": "data://hdri/empty_warehouse_01_8k.hdr"}}`.
 
 `wait_for_finalizer: true` holds the world at the boot pose, draining its task
 queue but not stepping, until a `scene-finalizer` component is built (see
@@ -282,13 +315,14 @@ Each entry in `props` is an object:
 | key | value |
 |---|---|
 | `name` | string, snake_cased for the prim path |
-| `type` | `"cube"` or `"usd"` |
+| `type` | `"cube"`, `"usd"` or `"visual"` |
 | `position` | `[x,y,z]` meters, the prop's **center** |
 | `size` | meters, the cube's base edge length, > 0 |
 | `scale` | `[sx,sy,sz]`, multiplies `size` per axis |
 | `color` | `[r,g,b]`, each in `[0, 1]` |
 | `fixed` | bool, static rather than dynamic and physics-driven |
-| `usd_path` | required when `type` is `"usd"` |
+| `usd_path` | required when `type` is `"usd"` or `"visual"`. A `"visual"` path may use `module://` or `data://` (see "Asset paths" below). An empty string on a `"visual"` skips the prop, so a fragment variable can default to no asset |
+| `fit` | `"visual"` only, exclusive with `scale`: `"true"` keeps the asset's authored size, `{"collider": "<cube prop name>"}` scales the asset's bounds onto that cube's `size x scale` box, per axis |
 | `orientation_rpy_deg` | `[r,p,y]` degrees, the prop's initial orientation |
 | `orientation_wxyz` | `[w,x,y,z]`, not all zero, the same thing the other way |
 | `box_dims` | `[x,y,z]` meters, each > 0, the obstacle box for a `"usd"` prop whose geometry this module can't infer from the asset |
@@ -307,12 +341,42 @@ The shipped block-sorting cell sets `mass: 0.05, friction: 0.7, restitution: 0,
 contact_offset: 0.005` on the block and `friction: 0.7, restitution: 0` on the
 (fixed, so massless) place pad.
 
+A `"visual"` prop is a referenced USD given a pose and a scale, with no
+collider and no rigid body. It never appears in `prop_geometries`,
+`get_geometries`, `randomize_props`, `set_prop_pose`, `scatter_cell` or
+`clear_cell`. Each of those verbs rejects its name with a `ValueError`. The
+converter that produces a visual asset (`tools/convert_mesh.py`, see
+[`tools/README.md`](tools/README.md)) puts the asset's origin at the centre
+of its top face, so `position` is the collider's top-centre, for example
+`[-1.2, 0, 0.75]` for `table_source`. A fitted collider is hidden from the
+renderer (USD visibility `invisible`) so only the mesh shows. Its physics is
+unchanged, and a visual that fails to spawn leaves its collider visible.
+`fit: {"collider": "..."}` resolves
+against the other entries in the same `props` list at boot, so a visual prop
+spawned later through `spawn_prop` must use `scale` or `fit: "true"` instead.
+The world's `status` DoCommand lists visual props under `visual_props`, one
+row per prop with `name`, `usd_path`, `resolved_path`, `position`, `scale`,
+`collider_dims_m`, `mesh_dims_m` and `bounds_m`. The last two are `null` in
+the mock, which has no stage to measure.
+
+The GrabCAD table asset the converter is built for is not committed to this
+repository. Read GrabCAD's terms before committing or publishing a converted
+copy in the module. The converted USD used on the GPU VM lives under
+`data://` instead.
+
 `props` validation rules (`ValueError` on config, surfaced as
 `INVALID_ARGUMENT`):
 * names must be unique once snake_cased (the same normalisation used for prim
   paths)
-* `type` must be `"cube"` or `"usd"`
-* `usd_path` is required when `type` is `"usd"`
+* `type` must be `"cube"`, `"usd"` or `"visual"`
+* `usd_path` is required when `type` is `"usd"` or `"visual"`
+* a `"visual"` prop rejects `size`, `color`, `fixed`, `box_dims`, `mass`,
+  `friction`, `restitution`, `contact_offset` and `rest_offset`, since it has
+  no collider and no rigid body
+* `scale` and `fit` are exclusive
+* `fit` must be `"true"` or `{"collider": "<name>"}` naming a `"cube"` prop in
+  the same `props` list
+* `fit` is only valid on a `"visual"` prop
 * `position`, `scale`, and `color` must each be 3-number sequences
 * `color` values must be in `[0, 1]`
 * `size` must be a positive number

@@ -81,7 +81,8 @@ def test_single_reset_chokepoint_and_call_sites():
 def test_boot_stores_lighting_and_fires_pre_registered_hook():
     mgr = _fresh_manager()
     lighting_cfg = {"dome": {"intensity": 1000, "color": [1, 1, 1]}, "sphere_intensity": 30000}
-    mgr.cfg = SimConfig(mock=True, lighting=lighting_cfg)
+    ground_cfg = {"kind": "plane"}
+    mgr.cfg = SimConfig(mock=True, lighting=lighting_cfg, ground=ground_cfg)
 
     fired: list[None] = []
     mgr.register_post_reset(lambda: fired.append(None))
@@ -89,6 +90,7 @@ def test_boot_stores_lighting_and_fires_pre_registered_hook():
     mgr._boot()
 
     assert mgr.lighting == lighting_cfg
+    assert mgr.ground == ground_cfg
     assert len(fired) == 1
 
 

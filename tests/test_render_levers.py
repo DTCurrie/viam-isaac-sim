@@ -63,6 +63,17 @@ def test_disable_viewport_updates_defaults_livestream_true_and_is_rejected():
         IsaacWorld.validate_config(cfg)
 
 
+def test_render_viewport_grid_accepts_bool():
+    cfg = _world_config({"render": {"viewport_grid": False}})
+    IsaacWorld.validate_config(cfg)
+
+
+def test_render_viewport_grid_rejects_non_bool():
+    cfg = _world_config({"render": {"viewport_grid": "off"}})
+    with pytest.raises(ValueError, match=r"render\.viewport_grid must be a bool"):
+        IsaacWorld.validate_config(cfg)
+
+
 # ----------------------------------------------------------------------
 # mock boot -> render config visible via status()
 # ----------------------------------------------------------------------

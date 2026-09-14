@@ -30,10 +30,12 @@
       },
       "attributes": {
         "headless": true,
-        "livestream": true,
+        "livestream": false,
         "wait_for_finalizer": true,
         "physics_dt": 0.008333333333333333,
-        "rendering_dt": 0.016666666666666666,
+        "rendering_dt": 0.03333333333333333,
+        "ground": { "kind": "plane", "matte": true },
+        "render": { "viewport_grid": false },
         "props": [
           {
             "name": "table_source",
@@ -466,12 +468,43 @@
             "friction": 0.7,
             "restitution": 0,
             "contact_offset": 0.005
+          },
+          {
+            "name": "table_source_visual",
+            "type": "visual",
+            "usd_path": {
+              "$variable": { "name": "table-usd-path", "default_value": "" }
+            },
+            "position": [-1.2, 0, 0.75],
+            "fit": { "collider": "table_source" }
+          },
+          {
+            "name": "table_arm_visual",
+            "type": "visual",
+            "usd_path": {
+              "$variable": { "name": "table-usd-path", "default_value": "" }
+            },
+            "position": [0, 0, 0.75],
+            "fit": { "collider": "table_arm" }
+          },
+          {
+            "name": "table_place_visual",
+            "type": "visual",
+            "usd_path": {
+              "$variable": { "name": "table-usd-path", "default_value": "" }
+            },
+            "position": [1.2, 0, 0.75],
+            "fit": { "collider": "table_place" }
           }
         ],
         "lighting": {
           "dome": {
             "intensity": 1000,
-            "color": [1, 1, 1]
+            "color": [1, 1, 1],
+            "texture": {
+              "$variable": { "name": "hdri-path", "default_value": "module://hdri/empty_warehouse_01_1k.hdr" }
+            },
+            "rotation_deg": 150
           },
           "sphere_intensity": 30000
         }
@@ -509,13 +542,14 @@
       "model": "viam:isaac-sim-devin:camera",
       "frame": {
         "parent": "world",
-        "translation": { "x": 3200, "y": 3200, "z": 2600 }
+        "translation": { "x": 0, "y": 2500, "z": 1500 }
       },
       "attributes": {
         "world": "isaac-world",
         "target": [0, 0, 0.3],
-        "width": 1280,
-        "height": 720
+        "width": 848,
+        "height": 480,
+        "image_format": "jpeg"
       }
     },
     {
@@ -527,12 +561,12 @@
         "translation": { "x": -1750, "y": 0, "z": 900 },
         "orientation": {
           "type": "ov_degrees",
-          "value": { "x": 725, "y": 0, "z": -150, "th": 0 }
+          "value": { "x": 725, "y": 0, "z": -150, "th": -90 }
         },
         "geometry": {
           "type": "box",
-          "x": 25,
-          "y": 90,
+          "x": 90,
+          "y": 25,
           "z": 25
         }
       },
@@ -541,7 +575,8 @@
         "depth": true,
         "width": 848,
         "height": 480,
-        "fov_deg": 90.5
+        "fov_deg": 90.5,
+        "image_format": "jpeg"
       }
     },
     {
@@ -568,7 +603,8 @@
         "depth": true,
         "width": 848,
         "height": 480,
-        "fov_deg": 90.5
+        "fov_deg": 90.5,
+        "image_format": "jpeg"
       }
     },
     {

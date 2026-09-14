@@ -45,7 +45,7 @@ BLOCK_COLOR_DEFAULTS: dict[str, list[float]] = {
     "orange": [1.0, 0.4, 0.05],
 }
 
-# Seam — the nineteen `$variable`s the fragment ships, keyed by name, with the
+# Seam — the twenty-one `$variable`s the fragment ships, keyed by name, with the
 # default_value a fresh machine that sets nothing must boot.
 DETECT_COLOR_DEFAULTS: dict[str, str] = {
     "red": "#EA8D8D",
@@ -65,6 +65,8 @@ HUE_TOLERANCE_PCT_DEFAULTS: dict[str, float] = {
 }
 EXPECTED_VARIABLE_DEFAULTS: dict[str, Any] = {
     "table-height-m": 0.75,
+    "hdri-path": "module://hdri/empty_warehouse_01_1k.hdr",
+    "table-usd-path": "",
     **{f"block-color-{color}": default for color, default in BLOCK_COLOR_DEFAULTS.items()},
     "detect-color": DETECT_COLOR_DEFAULTS["red"],
     "hue-tolerance-pct": HUE_TOLERANCE_PCT_DEFAULTS["red"],
@@ -157,7 +159,8 @@ def _expected_prop_names() -> set[str]:
         for color in cell_layout.BLOCK_COLORS
         for index in range(1, cell_layout.POOL_BLOCKS_PER_COLOR + 1)
     }
-    return tables | pads | blocks | {"side_cam_body", "side_cam_mount"}
+    visuals = {f"{table}_visual" for table in tables}
+    return tables | pads | blocks | visuals | {"side_cam_body", "side_cam_mount"}
 
 
 def test_fragment_is_valid_json_with_the_expected_components():
@@ -275,9 +278,11 @@ def test_wrist_and_side_cameras_carry_a_collision_geometry_for_the_planner():
     tools/generate_realsense_mesh.py mesh: the app's fragment validation
     rejected mesh geometries on 2026-09-02 (phase-4 §Deferred). The wrist
     camera's long side runs along the frame's x (its boresight); the side
-    camera's long side runs along y, across its boresight (its frame's x),
-    matching the physical `side_cam_body` prop's orientation."""
-    expected_dims = {"wrist-cam": (90, 25, 25), "side-cam": (25, 90, 25)}
+    camera is rolled 90 degrees about its boresight (`th`) so its image is
+    upright, which puts its long side along the frame's x; in the world it
+    still runs across the boresight, matching the physical `side_cam_body`
+    prop's orientation."""
+    expected_dims = {"wrist-cam": (90, 25, 25), "side-cam": (90, 25, 25)}
     for name, (expected_x, expected_y, expected_z) in expected_dims.items():
         component = next(c for c in _fragment()["components"] if c["name"] == name)
         geometry = component["frame"]["geometry"]
@@ -573,7 +578,7 @@ def test_the_conductor_service_entry_matches_the_phase_4_contract():
         assert detectors[color] in services
 
 
-def test_the_nineteen_variables_ship_with_the_seam_default_values():
+def test_the_twenty_one_variables_ship_with_the_seam_default_values():
     found: dict[str, Any] = {}
     _collect_variables(_fragment(), found)
     assert found == EXPECTED_VARIABLE_DEFAULTS

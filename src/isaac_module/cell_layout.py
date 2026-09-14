@@ -101,8 +101,9 @@ SCATTER_CENTRE_MM = (
     TABLE_TOP_Z_MM,
 )
 
-# scene overview: pulled back far enough to frame all three tables
-SCENE_CAMERA_POSITION_MM = (3200.0, 3200.0, 2600.0)
+# scene overview: close and low enough that the three tables fill the frame
+# against the dome backdrop, whose apparent scale is fixed at capture
+SCENE_CAMERA_POSITION_MM = (0.0, 2500.0, 1500.0)
 SCENE_CAMERA_TARGET_M = (0.0, 0.0, 0.3)
 
 

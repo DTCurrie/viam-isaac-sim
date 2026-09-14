@@ -107,6 +107,131 @@ def test_lighting_dome_zero_intensity_rejected():
         IsaacWorld.validate_config(cfg)
 
 
+def test_valid_lighting_dome_texture_passes():
+    cfg = _config(
+        {
+            "lighting": {
+                "dome": {
+                    "intensity": 1000,
+                    "color": [1, 1, 1],
+                    "texture": "module://assets/sky.hdr",
+                    "texture_format": "latlong",
+                    "rotation_deg": 90,
+                }
+            }
+        }
+    )
+    IsaacWorld.validate_config(cfg)
+
+
+def test_lighting_dome_texture_empty_rejected():
+    cfg = _config({"lighting": {"dome": {"texture": ""}}})
+    with pytest.raises(ValueError, match="texture"):
+        IsaacWorld.validate_config(cfg)
+
+
+def test_lighting_dome_texture_non_string_rejected():
+    cfg = _config({"lighting": {"dome": {"texture": 5}}})
+    with pytest.raises(ValueError, match="texture"):
+        IsaacWorld.validate_config(cfg)
+
+
+def test_lighting_dome_texture_format_unknown_rejected():
+    cfg = _config({"lighting": {"dome": {"texture_format": "spherical"}}})
+    with pytest.raises(ValueError, match="texture_format"):
+        IsaacWorld.validate_config(cfg)
+
+
+def test_lighting_dome_rotation_deg_bool_rejected():
+    cfg = _config({"lighting": {"dome": {"rotation_deg": True}}})
+    with pytest.raises(ValueError, match="rotation_deg"):
+        IsaacWorld.validate_config(cfg)
+
+
+def test_lighting_dome_unknown_key_rejected():
+    cfg = _config({"lighting": {"dome": {"glow": 1}}})
+    with pytest.raises(ValueError, match="glow"):
+        IsaacWorld.validate_config(cfg)
+
+
+def test_valid_ground_passes():
+    cfg = _config(
+        {
+            "ground": {
+                "kind": "plane",
+                "color": [0.4, 0.4, 0.4],
+                "size": 50,
+                "friction": 0.5,
+                "restitution": 0,
+            }
+        }
+    )
+    IsaacWorld.validate_config(cfg)
+
+
+def test_ground_kind_none_passes():
+    cfg = _config({"ground": {"kind": "none"}})
+    IsaacWorld.validate_config(cfg)
+
+
+def test_ground_empty_passes():
+    cfg = _config({"ground": {}})
+    IsaacWorld.validate_config(cfg)
+
+
+def test_ground_unknown_key_rejected():
+    cfg = _config({"ground": {"texture": "foo"}})
+    with pytest.raises(ValueError, match="texture"):
+        IsaacWorld.validate_config(cfg)
+
+
+def test_ground_bad_kind_rejected():
+    cfg = _config({"ground": {"kind": "sand"}})
+    with pytest.raises(ValueError, match="kind"):
+        IsaacWorld.validate_config(cfg)
+
+
+def test_ground_size_zero_rejected():
+    cfg = _config({"ground": {"kind": "plane", "size": 0}})
+    with pytest.raises(ValueError, match="size"):
+        IsaacWorld.validate_config(cfg)
+
+
+def test_ground_friction_negative_rejected():
+    cfg = _config({"ground": {"kind": "plane", "friction": -1}})
+    with pytest.raises(ValueError, match="friction"):
+        IsaacWorld.validate_config(cfg)
+
+
+def test_ground_restitution_out_of_range_rejected():
+    cfg = _config({"ground": {"kind": "plane", "restitution": 1.5}})
+    with pytest.raises(ValueError, match="restitution"):
+        IsaacWorld.validate_config(cfg)
+
+
+def test_ground_color_out_of_range_rejected():
+    cfg = _config({"ground": {"kind": "plane", "color": [1.5, 0, 0]}})
+    with pytest.raises(ValueError, match="color"):
+        IsaacWorld.validate_config(cfg)
+
+
+def test_ground_plane_only_key_on_non_plane_kind_rejected():
+    cfg = _config({"ground": {"kind": "grid", "size": 10}})
+    with pytest.raises(ValueError, match="size"):
+        IsaacWorld.validate_config(cfg)
+
+
+def test_ground_matte_true_passes():
+    cfg = _config({"ground": {"kind": "plane", "matte": True}})
+    IsaacWorld.validate_config(cfg)
+
+
+def test_ground_matte_non_bool_rejected():
+    cfg = _config({"ground": {"kind": "plane", "matte": "yes"}})
+    with pytest.raises(ValueError, match="matte"):
+        IsaacWorld.validate_config(cfg)
+
+
 def test_prop_physics_pick_cell_values_pass():
     cfg = _config(
         {
@@ -145,6 +270,169 @@ def test_prop_rest_offset_above_contact_offset_rejected():
 def test_prop_nonnumeric_friction_rejected():
     cfg = _config({"props": [{"name": "block", "friction": "slippery"}]})
     with pytest.raises(ValueError, match="friction"):
+        IsaacWorld.validate_config(cfg)
+
+
+def test_visual_prop_with_scale_passes():
+    cfg = _config(
+        {
+            "props": [
+                {
+                    "name": "dressed_table",
+                    "type": "visual",
+                    "usd_path": "data://assets/table.usd",
+                    "scale": [1.2, 0.8, 0.75],
+                }
+            ]
+        }
+    )
+    IsaacWorld.validate_config(cfg)
+
+
+def test_visual_prop_with_fit_true_passes():
+    cfg = _config(
+        {
+            "props": [
+                {
+                    "name": "dressed_table",
+                    "type": "visual",
+                    "usd_path": "data://assets/table.usd",
+                    "fit": "true",
+                }
+            ]
+        }
+    )
+    IsaacWorld.validate_config(cfg)
+
+
+def test_visual_prop_with_fit_collider_passes():
+    cfg = _config(
+        {
+            "props": [
+                {
+                    "name": "table_cube",
+                    "type": "cube",
+                    "size": 1.0,
+                },
+                {
+                    "name": "dressed_table",
+                    "type": "visual",
+                    "usd_path": "data://assets/table.usd",
+                    "fit": {"collider": "table_cube"},
+                },
+            ]
+        }
+    )
+    IsaacWorld.validate_config(cfg)
+
+
+def test_visual_prop_missing_usd_path_rejected():
+    cfg = _config({"props": [{"name": "dressed_table", "type": "visual"}]})
+    with pytest.raises(ValueError, match="usd_path"):
+        IsaacWorld.validate_config(cfg)
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("size", 0.1),
+        ("color", [1, 0, 0]),
+        ("mass", 0.05),
+        ("fixed", True),
+        ("box_dims", [0.1, 0.1, 0.1]),
+        ("friction", 0.5),
+    ],
+)
+def test_visual_prop_rejected_key_rejected(key: str, value: object) -> None:
+    cfg = _config(
+        {
+            "props": [
+                {
+                    "name": "dressed_table",
+                    "type": "visual",
+                    "usd_path": "data://assets/table.usd",
+                    key: value,
+                }
+            ]
+        }
+    )
+    with pytest.raises(ValueError, match=key):
+        IsaacWorld.validate_config(cfg)
+
+
+def test_fit_on_cube_prop_rejected():
+    cfg = _config({"props": [{"name": "block", "type": "cube", "fit": "true"}]})
+    with pytest.raises(ValueError, match="fit"):
+        IsaacWorld.validate_config(cfg)
+
+
+def test_visual_prop_scale_and_fit_together_rejected():
+    cfg = _config(
+        {
+            "props": [
+                {
+                    "name": "dressed_table",
+                    "type": "visual",
+                    "usd_path": "data://assets/table.usd",
+                    "scale": [1.0, 1.0, 1.0],
+                    "fit": "true",
+                }
+            ]
+        }
+    )
+    with pytest.raises(ValueError, match="scale"):
+        IsaacWorld.validate_config(cfg)
+
+
+def test_visual_prop_fit_bool_rejected():
+    cfg = _config(
+        {
+            "props": [
+                {
+                    "name": "dressed_table",
+                    "type": "visual",
+                    "usd_path": "data://assets/table.usd",
+                    "fit": True,
+                }
+            ]
+        }
+    )
+    with pytest.raises(ValueError, match="fit"):
+        IsaacWorld.validate_config(cfg)
+
+
+def test_visual_prop_fit_collider_unknown_rejected():
+    cfg = _config(
+        {
+            "props": [
+                {
+                    "name": "dressed_table",
+                    "type": "visual",
+                    "usd_path": "data://assets/table.usd",
+                    "fit": {"collider": "no_such_prop"},
+                }
+            ]
+        }
+    )
+    with pytest.raises(ValueError, match="no_such_prop"):
+        IsaacWorld.validate_config(cfg)
+
+
+def test_visual_prop_fit_collider_is_usd_prop_rejected():
+    cfg = _config(
+        {
+            "props": [
+                {"name": "table_usd", "type": "usd", "usd_path": "omniverse://table.usd"},
+                {
+                    "name": "dressed_table",
+                    "type": "visual",
+                    "usd_path": "data://assets/table.usd",
+                    "fit": {"collider": "table_usd"},
+                },
+            ]
+        }
+    )
+    with pytest.raises(ValueError, match="table_usd"):
         IsaacWorld.validate_config(cfg)
 
 
@@ -190,3 +478,26 @@ def test_world_identity_frame_accepted():
 def test_world_with_no_frame_accepted():
     cfg = _config({})
     IsaacWorld.validate_config(cfg)
+
+
+def test_visual_prop_with_empty_usd_path_is_accepted_as_a_skip():
+    cfg = _config(
+        {
+            "props": [
+                {"name": "table", "type": "cube"},
+                {
+                    "name": "dressing",
+                    "type": "visual",
+                    "usd_path": "",
+                    "fit": {"collider": "table"},
+                },
+            ]
+        }
+    )
+    IsaacWorld.validate_config(cfg)
+
+
+def test_visual_prop_with_non_string_usd_path_is_rejected():
+    cfg = _config({"props": [{"name": "dressing", "type": "visual", "usd_path": 3}]})
+    with pytest.raises(ValueError, match="must be a string"):
+        IsaacWorld.validate_config(cfg)

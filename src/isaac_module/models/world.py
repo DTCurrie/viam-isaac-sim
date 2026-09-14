@@ -23,6 +23,7 @@ from .world_config_validation import (
     FLOOR_LABEL,
     FLOOR_SIDE_MM,
     FLOOR_THICKNESS_MM,
+    validate_ground,
     validate_kit_log_level,
     validate_lighting,
     validate_props,
@@ -75,6 +76,7 @@ def sim_config_from_attrs(attrs: Mapping[str, Any]) -> SimConfig:
         props=[dict(p) for p in attrs.get("props", [])],
         lighting=dict(attrs["lighting"]) if attrs.get("lighting") is not None else None,
         render=dict(attrs["render"]) if attrs.get("render") is not None else None,
+        ground=dict(attrs["ground"]) if attrs.get("ground") is not None else None,
     )
 
 
@@ -174,14 +176,24 @@ class IsaacWorld(Generic, EasyResource):  # type: ignore[misc]  # SDK: API is Fi
         props (list)                      - objects spawned into the scene at boot:
                                             {"name": non-empty str, unique after
                                               sanitizing to a USD prim name,
-                                             "type": "cube"|"usd" (default "cube"),
+                                             "type": "cube"|"usd"|"visual" (default
+                                              "cube"; "visual" is a referenced USD
+                                              with a pose and a scale and no physics,
+                                              absent from every prop verb),
                                              "position": [x,y,z] meters (3 numbers),
                                              "size" (m, > 0), "scale" [sx,sy,sz]
                                               (3 numbers),
                                              "color" [r,g,b] each in [0, 1],
                                              "fixed" (bool),
                                              "usd_path" (non-empty str, required
-                                              when type is "usd"),
+                                              when type is "usd" or "visual"; a
+                                              "visual" path may use module:// or
+                                              data://),
+                                             "fit" ("visual" only, exclusive with
+                                              "scale"): "true" keeps the asset's
+                                              authored size, {"collider": "<cube
+                                              prop name>"} scales its bounds onto
+                                              that cube's size x scale box,
                                              "orientation_rpy_deg" [r,p,y] degrees,
                                              "orientation_wxyz" [w,x,y,z] (not all
                                               zero); at most one of the two,
@@ -198,15 +210,28 @@ class IsaacWorld(Generic, EasyResource):  # type: ignore[misc]  # SDK: API is Fi
                                                        "color": [1, 1, 1]},
                                              "sphere_intensity": 30000}. Both keys
                                             optional; unset means leave the stage's
-                                            lights alone.
+                                            lights alone. dome also takes "texture"
+                                            (a path, URL, module:// or data://
+                                            HDRI), "texture_format" (UsdLux dome
+                                            format, default "latlong") and
+                                            "rotation_deg" (yaw about Z).
+        ground (object)                   - the floor the module adds when it owns
+                                            the stage: {"kind": "grid"|"plane"|
+                                            "none", "color": [r,g,b], "size": m,
+                                            "friction": f, "restitution": r}.
+                                            Unset means "grid" (today's default
+                                            environment). Ignored with a warning
+                                            when usd_stage is set.
         render (object)                   - render-cost levers applied at boot,
                                             best-effort: {"motion_bvh":
-                                            bool, "disable_viewport_updates": bool}.
-                                            Both keys optional; unset means leave
+                                            bool, "disable_viewport_updates": bool,
+                                            "viewport_grid": bool}.
+                                            All keys optional; unset means leave
                                             the renderer's defaults alone.
                                             disable_viewport_updates: true requires
                                             livestream: false (the livestream needs
-                                            viewport updates).
+                                            viewport updates). viewport_grid: false
+                                            hides the viewport grid overlay.
         """
         validate_world_frame(config)
         attrs: dict[str, Any] = dict(struct_to_dict(config.attributes))
@@ -219,6 +244,8 @@ class IsaacWorld(Generic, EasyResource):  # type: ignore[misc]  # SDK: API is Fi
             validate_lighting(attrs["lighting"])
         if "render" in attrs:
             validate_render(attrs["render"], bool(attrs.get("livestream", True)))
+        if "ground" in attrs:
+            validate_ground(attrs["ground"])
         if "kit_log_level" in attrs:
             validate_kit_log_level(attrs["kit_log_level"])
         if "wait_for_finalizer" in attrs and not isinstance(attrs["wait_for_finalizer"], bool):
