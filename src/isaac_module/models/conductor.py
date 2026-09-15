@@ -109,7 +109,13 @@ from pickcell.measurement import (
     top_face_centre_m,
 )
 from pickcell.movers import RealMover
-from pickcell.obstacles import obstacles_from_prop_geometries, support_obstacle, world_state
+from pickcell.obstacles import (
+    KEEPOUT_HEIGHT_MM,
+    obstacles_from_prop_geometries,
+    pick_area_keepout,
+    support_obstacle,
+    world_state,
+)
 from pickcell.pipeline import (
     JAW_MAX_BLOCK_MM,
     Detector,
@@ -249,6 +255,65 @@ def _place_zone_mm() -> tuple[tuple[float, float, float], tuple[float, float, fl
             cell_layout.PAD_TOP_Z_MM,
         ),
     )
+
+
+# clearance above the tallest block a census keep-out has to leave, so the box
+# tops out over the blocks rather than through them
+CENSUS_KEEPOUT_CLEARANCE_MM = 30.0
+
+
+def _blocks_standing_in(
+    geometries: Sequence[Mapping[str, Any]],
+    region_mm: tuple[Sequence[float], Sequence[float]],
+) -> list[float]:
+    """Pure. The top-face z of every prop whose centre sits inside
+    ``region_mm`` in x and y. A table or a pad tops out at the region's own
+    surface, so it contributes nothing above it."""
+    (x0, y0, _z0), (x1, y1, _z1) = region_mm
+    lo_x, hi_x = min(x0, x1), max(x0, x1)
+    lo_y, hi_y = min(y0, y1), max(y0, y1)
+    tops_mm: list[float] = []
+    for geometry in geometries:
+        pose = geometry["pose_in_world_mm"]
+        x_mm, y_mm = float(pose["x"]), float(pose["y"])
+        if lo_x <= x_mm <= hi_x and lo_y <= y_mm <= hi_y:
+            tops_mm.append(float(pose["z"]) + float(geometry["box_dims_mm"][2]) / 2.0)
+    return tops_mm
+
+
+def census_keepout_height_mm(
+    geometries: Sequence[Mapping[str, Any]],
+    region_mm: tuple[Sequence[float], Sequence[float]],
+) -> float | None:
+    """Pure. How tall a no-fly box over ``region_mm`` has to be to clear
+    everything standing in it, or None when the zone holds nothing.
+
+    The census only looks, from well above the table, so it has no reason to
+    fly at block height over either work zone. Without this the planner is
+    free to thread between the individual block boxes and the gripper sweeps
+    through them (GPU 2026-09-15), which moves the blocks and makes the
+    per-pick verify fail as if detection had. Heights come from the same
+    ``prop_geometries`` reply the obstacles do, so no extra scan is paid."""
+    tops_mm = _blocks_standing_in(geometries, region_mm)
+    if not tops_mm:
+        return None
+    surface_z_mm = float(region_mm[0][2])
+    return max(KEEPOUT_HEIGHT_MM, max(tops_mm) - surface_z_mm + CENSUS_KEEPOUT_CLEARANCE_MM)
+
+
+def _census_keepouts(geometries: Sequence[Mapping[str, Any]]) -> list[Any]:
+    """The pick-zone and place-zone no-fly boxes the census plans against.
+    Both stay up for the whole census; the pipeline drops its own only when
+    it is ready to descend on a block."""
+    keepouts: list[Any] = []
+    for region_mm, label in (
+        (_scatter_region_mm(), "pick_area_keepout"),
+        (_place_zone_mm(), "place_area_keepout"),
+    ):
+        height_mm = census_keepout_height_mm(geometries, region_mm)
+        if height_mm is not None:
+            keepouts.append(pick_area_keepout(region_mm, height_mm, label=label))
+    return keepouts
 
 
 def _census_look_points_mm() -> tuple[tuple[float, float], ...]:
@@ -908,7 +973,10 @@ class IsaacConductor(Generic, EasyResource):  # type: ignore[misc]  # SDK: API i
         obstacles = obstacles_from_prop_geometries(
             cast("Sequence[Mapping[str, Any]]", geometries), set()
         )
-        return world_state(None, obstacles, support_obstacle(cell_layout.TABLE_TOP_Z_MM))
+        keepouts = _census_keepouts(cast("Sequence[Mapping[str, Any]]", geometries))
+        return world_state(
+            None, (*obstacles, *keepouts), support_obstacle(cell_layout.TABLE_TOP_Z_MM)
+        )
 
     async def _detect_color(self, color: str) -> list[WorkItem]:
         """One vision call per color, every returned segment kept (unlike
