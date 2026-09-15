@@ -553,3 +553,152 @@ def test_reconfigure_prefetches_kinematics_in_the_background(world):
     while arm._kinematics is None and time.monotonic() < deadline:
         time.sleep(0.01)
     assert arm._kinematics is not None, "reconfigure did not prefetch kinematics in the background"
+
+
+@pytest.mark.parametrize(
+    ("measured_deg", "min_deg", "max_deg", "expected_deg"),
+    [
+        # the value a sorting run actually measured on a joint limited to 360
+        (4135.62, -360.0, 360.0, 175.62),
+        (-400.0, -360.0, 360.0, -40.0),
+        (725.0, -180.0, 180.0, 5.0),
+        # already legal, including exactly at a limit: nothing moves
+        (360.0, -360.0, 360.0, 360.0),
+        (0.0, -360.0, 360.0, 0.0),
+        # no whole turn lands inside, so the caller sees the real value
+        (200.0, -10.0, 10.0, 200.0),
+    ],
+)
+def test_wound_joint_angles_report_the_same_pose_inside_the_declared_range(
+    measured_deg: float, min_deg: float, max_deg: float, expected_deg: float
+) -> None:
+    """PhysX accumulates a revolute joint's angle, so an arm that keeps turning
+    the same way reads past the range its kinematics declares and the motion
+    service refuses to plan from it. A whole turn is the identity for a
+    revolute joint, so the reported angle moves by whole turns only."""
+    from isaac_module.models.arm import _wrapped_into_range
+
+    wrapped = _wrapped_into_range(measured_deg, min_deg, max_deg)
+    assert wrapped == pytest.approx(expected_deg)
+    # whatever it reports has to be the same physical pose
+    assert (wrapped - measured_deg) % 360.0 == pytest.approx(0.0, abs=1e-9)
+
+
+def test_settle_drift_past_a_limit_reports_the_limit_rather_than_a_whole_turn_away():
+    """A joint resting a hair past its limit is at that limit. Winding it by a
+    turn would describe the same pose but move the reported number across the
+    whole range, which is not what a drift of 3e-5 degrees means."""
+    from isaac_module.models.arm import _JOINT_LIMIT_TOLERANCE_DEG, _wrapped_into_range
+
+    drifted = -360.00003
+    assert abs(drifted - (-360.0)) < _JOINT_LIMIT_TOLERANCE_DEG
+    # the wrap on its own would move it a full turn, which is why
+    # get_joint_positions checks the drift tolerance first
+    assert _wrapped_into_range(drifted, -360.0, 360.0) == pytest.approx(-0.00003)
+
+
+def test_an_isolated_waypoint_stall_does_not_abandon_the_trajectory(world):
+    """A constrained path arrives as dozens of waypoints a couple of
+    millimetres apart, and the arm sits still on a small residual at each one,
+    which reads exactly like a blocked arm at that waypoint. Before this, the
+    first such waypoint aborted the whole move."""
+    arm = IsaacArm.new(
+        _config(
+            "arm-waypoint-flows-on",
+            {"world": "isaac-world", "asset": "ur20", "mock_dof": 6, "mock_stall_fraction": 0.5},
+        ),
+        {},
+    )
+
+    async def scenario():
+        # this mock closes half the remaining gap per waypoint, so the early
+        # ones stall short and the later ones converge, which is the shape of
+        # a real dense path
+        target = JointPositions(values=[10, -20, 30, 0, 5, -5])
+        await arm.move_through_joint_positions([target] * 8)
+        reached = (await arm.get_joint_positions()).values
+        assert reached == pytest.approx([10, -20, 30, 0, 5, -5], abs=0.5)
+
+    asyncio.run(scenario())
+
+
+def test_a_run_of_stalled_waypoints_fails_rather_than_grinding_through_the_path(world):
+    """The other half of the rule: a genuinely blocked arm must still fail
+    fast, rather than walking every remaining waypoint first."""
+    from isaac_module.models.arm import _MAX_CONSECUTIVE_WAYPOINT_STALLS
+
+    assert _MAX_CONSECUTIVE_WAYPOINT_STALLS > 1
+
+    arm = IsaacArm.new(
+        _config(
+            "arm-waypoint-run-of-stalls",
+            {"world": "isaac-world", "asset": "ur20", "mock_dof": 6, "mock_stall_fraction": 0.5},
+        ),
+        {},
+    )
+
+    async def scenario():
+        # each waypoint steps further than the last, so closing half the gap
+        # never catches up and every waypoint stalls, which is what a blocked
+        # arm looks like
+        waypoints = [
+            JointPositions(values=[10.0 * k, -20.0 * k, 30.0 * k, 0.0, 0.0, 0.0])
+            for k in range(1, _MAX_CONSECUTIVE_WAYPOINT_STALLS + 6)
+        ]
+        with pytest.raises(ArmMoveStalledError) as excinfo:
+            await arm.move_through_joint_positions(waypoints)
+        message = str(excinfo.value)
+        assert f"{_MAX_CONSECUTIVE_WAYPOINT_STALLS} consecutive" in message
+        # it gave up at the cap instead of walking the rest of the path
+        assert f"waypoint {_MAX_CONSECUTIVE_WAYPOINT_STALLS}/{len(waypoints)}" in message
+
+    asyncio.run(scenario())
+
+
+def test_home_joints_place_the_arm_without_driving_it_there(world):
+    """A UR asset's default pose is every joint at zero, which is the arm fully
+    extended horizontally. In a cell with a tall object in front of it that is
+    the arm resting on that object, and the first commanded move shoves it
+    aside. The home pose has to be a placement, so the arm is already there
+    when the first client connects rather than sweeping toward it."""
+    home = [0.0, -90.0, 0.0, -90.0, 0.0, 0.0]
+    arm = IsaacArm.new(
+        _config(
+            "arm-homed",
+            {"world": "isaac-world", "asset": "ur20", "mock_dof": 6, "home_joints_deg": home},
+        ),
+        {},
+    )
+
+    async def scenario():
+        # no settle wait: placed, not driven, so it reads home immediately
+        assert (await arm.get_joint_positions()).values == pytest.approx(home, abs=1e-6)
+        assert await arm.is_moving() is False
+
+    asyncio.run(scenario())
+
+
+def test_an_arm_without_a_home_pose_keeps_the_assets_default(world):
+    arm = IsaacArm.new(
+        _config("arm-unhomed", {"world": "isaac-world", "asset": "ur20", "mock_dof": 6}), {}
+    )
+
+    async def scenario():
+        assert (await arm.get_joint_positions()).values == pytest.approx([0.0] * 6, abs=1e-6)
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("bad", ["notalist", [], [1.0, "two"], [True, 2.0]])
+def test_a_malformed_home_pose_is_refused_at_build(world, bad):
+    """A bad home pose would otherwise spawn the arm somewhere nobody asked
+    for, and the failure would read as a physics problem rather than a config
+    one."""
+    with pytest.raises(ValueError, match="home_joints_deg"):
+        IsaacArm.new(
+            _config(
+                f"arm-bad-home-{abs(hash(str(bad)))}",
+                {"world": "isaac-world", "asset": "ur20", "mock_dof": 6, "home_joints_deg": bad},
+            ),
+            {},
+        )

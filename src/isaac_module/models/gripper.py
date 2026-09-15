@@ -28,7 +28,7 @@ from viam.resource.types import Model, ModelFamily
 from viam.utils import ValueTypes
 
 from .. import DEFAULT_WORLD_NAME, FAMILY, NAMESPACE
-from ..sim_manager import KNOWN_ASSETS, GripperHandle, SimManager, prim_name
+from ..sim_manager import KNOWN_ASSETS, JawGripperHandle, SimManager, prim_name
 from .component_frame_pose import get_attrs
 
 DEFAULT_GRIPPER_ASSET = "robotiq_2f_85"
@@ -134,7 +134,7 @@ class IsaacGripper(Gripper, EasyResource):  # type: ignore[misc]  # SDK: API is 
 
     def __init__(self, name: str) -> None:
         super().__init__(name)
-        self._handle: GripperHandle | None = None
+        self._handle: JawGripperHandle | None = None
         self._attrs: dict[str, Any] = {}
         self._grab_timeout = DEFAULT_GRAB_TIMEOUT_S
         self._tcp_offset_m = DEFAULT_TCP_OFFSET_M
@@ -219,7 +219,7 @@ class IsaacGripper(Gripper, EasyResource):  # type: ignore[misc]  # SDK: API is 
         SimManager.get().release_handle(self.name)
         self._handle = None
 
-    def _h(self) -> GripperHandle:
+    def _h(self) -> JawGripperHandle:
         if self._handle is None:
             raise RuntimeError(f"gripper {self.name} is not attached to the sim")
         return self._handle
@@ -234,7 +234,7 @@ class IsaacGripper(Gripper, EasyResource):  # type: ignore[misc]  # SDK: API is 
 
         deadline = time.monotonic() + self._deadline_s(timeout)
         while time.monotonic() < deadline:
-            _jaw, moving, _holding = await asyncio.to_thread(handle.poll_state)
+            moving, _holding = await asyncio.to_thread(handle.poll_state)
             if not moving:
                 return
             await asyncio.sleep(GRAB_POLL_INTERVAL_S)
@@ -252,19 +252,19 @@ class IsaacGripper(Gripper, EasyResource):  # type: ignore[misc]  # SDK: API is 
         is why the wait ends before the jaw settles, raises
         GripperMoveTimeoutError instead of guessing at a result."""
         handle = self._h()
-        await asyncio.to_thread(handle.close)
+        await asyncio.to_thread(handle.grab)
 
         deadline = time.monotonic() + self._deadline_s(timeout)
         try:
             while time.monotonic() < deadline:
-                _jaw, moving, _holding = await asyncio.to_thread(handle.poll_state)
+                moving, _holding = await asyncio.to_thread(handle.poll_state)
                 if not moving:
                     break
                 await asyncio.sleep(GRAB_POLL_INTERVAL_S)
 
             _, closed_rad = await asyncio.to_thread(handle.jaw_limits)
             while time.monotonic() < deadline:
-                jaw, _moving, holding = await asyncio.to_thread(handle.poll_state)
+                jaw, _moving, holding = await asyncio.to_thread(handle.poll_jaw_state)
                 if holding:
                     return True
                 if abs(jaw - closed_rad) <= JAW_CLOSED_TOLERANCE_RAD:
@@ -344,7 +344,7 @@ class IsaacGripper(Gripper, EasyResource):  # type: ignore[misc]  # SDK: API is 
 
         deadline = time.monotonic() + self._deadline_s(timeout)
         while time.monotonic() < deadline:
-            _jaw, moving, _holding = await asyncio.to_thread(handle.poll_state)
+            moving, _holding = await asyncio.to_thread(handle.poll_state)
             if not moving:
                 return
             await asyncio.sleep(GRAB_POLL_INTERVAL_S)

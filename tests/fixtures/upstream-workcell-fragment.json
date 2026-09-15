@@ -1,0 +1,187 @@
+{
+  "components": [
+    {
+      "name": "pallet",
+      "namespace": "rdk",
+      "type": "generic",
+      "model": "viam:workcell-components:pallet",
+      "attributes": {
+        "width_mm": 500,
+        "length_mm": 350,
+        "thickness_mm": 100,
+        "tray_dock": "tray-dock"
+      },
+      "frame": {
+        "parent": "world",
+        "translation": { "x": 200, "y": 500, "z": 200 },
+        "orientation": { "type": "ov_degrees", "value": { "x": 0, "y": 0, "z": 1, "th": 0 } }
+      }
+    },
+    {
+      "name": "pick-station",
+      "namespace": "rdk",
+      "type": "generic",
+      "model": "viam:workcell-components:pick-station",
+      "attributes": {
+        "length_mm": 1100,
+        "box_origin_offset_mm": { "y": 900, "x": 200 },
+        "pick_home_z_offset_mm": 120,
+        "infeed_box_color": { "r": 70, "g": 150, "b": 175, "a": 1 },
+        "roller_spin_period_s": 2,
+        "box_theta_deg": 0,
+        "lowest_point_height_mm": 200,
+        "infeed_box_detect": "box-detect"
+      },
+      "frame": {
+        "parent": "world",
+        "translation": { "x": 400, "y": -650, "z": 200 },
+        "orientation": { "type": "ov_degrees", "value": { "x": 0, "y": 0, "z": 1, "th": 0 } }
+      }
+    },
+    {
+      "name": "pallet-empty",
+      "api": "rdk:component:sensor",
+      "model": "viam:workcell-components:pallet-empty",
+      "attributes": {}
+    },
+    {
+      "name": "robot-pedestal",
+      "api": "rdk:component:generic",
+      "model": "viam:workcell-components:robot-pedestal",
+      "attributes": { "diameter_mm": 220, "height_mm": 150 },
+      "frame": { "parent": "world", "translation": { "x": 0, "y": 0, "z": 0 } }
+    },
+    {
+      "name": "fence-back-left",
+      "api": "rdk:component:generic",
+      "model": "viam:workcell-components:safety-fence",
+      "attributes": { "height_mm": 1200, "length_mm": 1100 },
+      "frame": { "parent": "world", "translation": { "x": -600, "y": -950, "z": 0 } }
+    },
+    {
+      "name": "fence-back-right",
+      "api": "rdk:component:generic",
+      "model": "viam:workcell-components:safety-fence",
+      "attributes": { "length_mm": 400, "height_mm": 1200 },
+      "frame": { "parent": "world", "translation": { "x": 1050, "y": -950, "z": 0 } }
+    },
+    {
+      "name": "fence-left",
+      "api": "rdk:component:generic",
+      "model": "viam:workcell-components:safety-fence",
+      "attributes": { "height_mm": 1200, "length_mm": 1200 },
+      "frame": {
+        "parent": "world",
+        "translation": { "x": -1150, "y": -350, "z": 0 },
+        "orientation": { "type": "ov_degrees", "value": { "x": 0, "y": 0, "z": 1, "th": 90 } }
+      }
+    },
+    {
+      "name": "fence-right",
+      "api": "rdk:component:generic",
+      "model": "viam:workcell-components:safety-fence",
+      "attributes": { "length_mm": 1200, "height_mm": 1200 },
+      "frame": {
+        "parent": "world",
+        "translation": { "x": 1250, "y": -350, "z": 0 },
+        "orientation": { "type": "ov_degrees", "value": { "x": 0, "y": 0, "z": 1, "th": 90 } }
+      }
+    },
+    {
+      "name": "scan-tunnel",
+      "api": "rdk:component:generic",
+      "model": "viam:workcell-components:scan-tunnel",
+      "attributes": { "span_mm": 700, "height_mm": 500 },
+      "frame": { "parent": "world", "translation": { "x": 400, "y": -950, "z": 0 } }
+    },
+    {
+      "name": "hmi-cabinet",
+      "api": "rdk:component:generic",
+      "model": "viam:workcell-components:hmi-cabinet",
+      "attributes": {
+        "post_height_mm": 700,
+        "body_dims_mm": { "x": 450, "z": 350, "y": 200 }
+      },
+      "frame": {
+        "parent": "world",
+        "translation": { "x": -850, "y": 1050, "z": 0 },
+        "orientation": { "type": "ov_degrees", "value": { "x": 0, "y": 0, "z": 1, "th": 0 } }
+      }
+    },
+    {
+      "name": "stack-light",
+      "api": "rdk:component:generic",
+      "model": "viam:workcell-components:stack-light",
+      "attributes": { "post_height_mm": 1000 },
+      "frame": { "parent": "world", "translation": { "x": 1100, "y": 1050, "z": 0 } }
+    },
+    {
+      "name": "caution-tape",
+      "api": "rdk:component:generic",
+      "model": "viam:workcell-components:floor-decal",
+      "attributes": {
+        "color": { "g": 190, "b": 30, "a": 1, "r": 240 },
+        "length_mm": 2400,
+        "thickness_mm": 3,
+        "width_mm": 80
+      },
+      "frame": { "parent": "world", "translation": { "x": 50, "y": 1250, "z": 0 } }
+    },
+    {
+      "name": "tray-dock",
+      "api": "rdk:component:sensor",
+      "model": "viam:workcell-components:tray-dock",
+      "attributes": { "exchange_seconds": 10 }
+    }
+  ],
+  "services": [
+    {
+      "name": "workcell-scene",
+      "namespace": "rdk",
+      "type": "world_state_store",
+      "model": "viam:workcell-components:workcell-scene",
+      "attributes": {
+        "component_names": [
+          "robot-pedestal",
+          "fence-back-left",
+          "fence-back-right",
+          "fence-left",
+          "fence-right",
+          "scan-tunnel",
+          "hmi-cabinet",
+          "stack-light",
+          "caution-tape"
+        ],
+        "pick_station_names": ["pick-station"],
+        "pallet_names": ["pallet"],
+        "tick_interval_secs": 0.15
+      }
+    },
+    {
+      "name": "pack-sequencer",
+      "namespace": "rdk",
+      "type": "world_state_store",
+      "model": "viam:pack-sequencer:sequencer",
+      "attributes": {
+        "box_width_mm": 200,
+        "box_color": { "b": 80, "opacity": 1, "r": 176, "g": 136 },
+        "box_height_mm": 100,
+        "box_length_mm": 150
+      }
+    }
+  ],
+  "modules": [
+    {
+      "type": "registry",
+      "name": "workcell-components",
+      "module_id": "viam:workcell-components",
+      "version": "0.7.0-rc14"
+    },
+    {
+      "type": "registry",
+      "name": "pack-sequencer-module",
+      "module_id": "viam:pack-sequencer",
+      "version": "0.3.0"
+    }
+  ]
+}

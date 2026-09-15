@@ -8,6 +8,7 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[1]
 README = REPO_ROOT / "README.md"
 BLOCK_SORTING = REPO_ROOT / "docs" / "BLOCK_SORTING.md"
+PALLETIZING = REPO_ROOT / "docs" / "PALLETIZING.md"
 SRC = REPO_ROOT / "src" / "isaac_module"
 
 WORLD_MODEL_FILE = SRC / "models" / "world.py"
@@ -22,6 +23,9 @@ GRIPPER_HANDLE_FILE = SRC / "handles" / "gripper.py"
 CAMERA_HANDLE_FILE = SRC / "handles" / "camera.py"
 MOCK_CAMERA_FILE = SRC / "handles" / "camera.py"
 CONDUCTOR_MODEL_FILE = SRC / "models" / "conductor.py"
+VACUUM_MODEL_FILE = SRC / "models" / "vacuum.py"
+VACUUM_HANDLE_FILE = SRC / "handles" / "vacuum.py"
+PALLETIZER_MODEL_FILE = SRC / "models" / "palletizer.py"
 SORTER_SENSOR_MODEL_FILE = SRC / "models" / "sorter_sensor.py"
 META_JSON = REPO_ROOT / "meta.json"
 
@@ -126,15 +130,32 @@ CONDUCTOR_CODE_KEYS = _keys_from_whole_file(CONDUCTOR_MODEL_FILE) | {
     "motion",
 }
 
+VACUUM_CODE_KEYS = (
+    _keys_from_whole_file(VACUUM_MODEL_FILE)
+    | _keys_from_defs(SIM_MANAGER_FILE, ["create_vacuum_gripper", "_create_vacuum_gripper_isaac"])
+    | _keys_from_defs(VACUUM_HANDLE_FILE, ["MockVacuumHandle"])
+)
+
+PALLETIZER_CODE_KEYS = _keys_from_whole_file(PALLETIZER_MODEL_FILE) | {
+    # validate_config/reconfigure read these through `_DEPENDENCY_ATTRS`
+    # (a loop over a tuple of key names) rather than a literal
+    # `attrs["world"]`, so the literal-string regex can't see them.
+    "world",
+    "arm",
+    "motion",
+}
+
 SORTER_SENSOR_CODE_KEYS = _keys_from_whole_file(SORTER_SENSOR_MODEL_FILE)
 
 CODE_KEYS = {
     "world": WORLD_CODE_KEYS,
     "arm": ARM_CODE_KEYS,
     "gripper": GRIPPER_CODE_KEYS,
+    "vacuum": VACUUM_CODE_KEYS,
     "camera": CAMERA_CODE_KEYS,
     "conductor": CONDUCTOR_CODE_KEYS,
     "sorter-sensor": SORTER_SENSOR_CODE_KEYS,
+    "palletizer": PALLETIZER_CODE_KEYS,
 }
 
 # Keys the code reads that are deliberately absent from the README table:
@@ -154,6 +175,7 @@ ALLOWLIST: dict[str, set[str]] = {
         "parent_prim",
     },
     "gripper": set(),
+    "vacuum": set(),
     "camera": {
         # apply_frame_to_attrs() (models/component_frame_pose.py) derives this from the
         # standard frame config when parent_prim + frame are both set; it is
@@ -163,15 +185,18 @@ ALLOWLIST: dict[str, set[str]] = {
     },
     "conductor": set(),
     "sorter-sensor": set(),
+    "palletizer": set(),
 }
 
 SECTION_HEADINGS = {
     "world": "### world attributes",
     "arm": "### arm attributes",
     "gripper": "### gripper attributes",
+    "vacuum": "### vacuum attributes",
     "camera": "### camera attributes",
     "conductor": "## conductor attributes",
     "sorter-sensor": "## sorter-sensor attributes",
+    "palletizer": "## palletizer attributes",
 }
 
 # The demo cell's two models are documented with the cell, not in the README.
@@ -179,9 +204,11 @@ SECTION_DOCS = {
     "world": README,
     "arm": README,
     "gripper": README,
+    "vacuum": README,
     "camera": README,
     "conductor": BLOCK_SORTING,
     "sorter-sensor": BLOCK_SORTING,
+    "palletizer": PALLETIZING,
 }
 
 
@@ -237,9 +264,9 @@ def readme_lines() -> list[str]:
     return README.read_text().splitlines()
 
 
-@pytest.mark.parametrize(
-    "model", ["world", "arm", "gripper", "camera", "conductor", "sorter-sensor"]
-)
+# derived from CODE_KEYS rather than restated, so a model added there is
+# always checked against its documented table
+@pytest.mark.parametrize("model", sorted(CODE_KEYS))
 def test_readme_attribute_table_matches_code(model: str) -> None:
     documented = documented_attributes(model)
     expected_code_keys = CODE_KEYS[model] - ALLOWLIST[model]

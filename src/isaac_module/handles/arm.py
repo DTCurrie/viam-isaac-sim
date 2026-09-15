@@ -118,6 +118,19 @@ class ArmHandle:
         own limit."""
         raise NotImplementedError
 
+    def home(self, positions: list[float]) -> None:
+        """Place the arm's named joints AT ``positions`` (radians) without
+        driving there, and hold them.
+
+        A UR asset's own default pose is every joint at zero, which is the arm
+        fully extended horizontally. In a cell with anything tall in front of
+        it that is the arm lying across its own workspace, and the first
+        commanded move sweeps whatever is there aside before any of it can be
+        picked up. Spawning at a folded pose is the fix, and it has to be a
+        state write rather than a move, since there is nothing to plan around
+        yet and a driven sweep is the very thing being avoided."""
+        raise NotImplementedError
+
     def is_moving(self) -> bool:
         """True while any named joint's |velocity| > VEL_EPS_RAD_S OR any
         |target - measured| > SETTLE_TOL_RAD. A stalled arm that
@@ -287,6 +300,21 @@ class IsaacArmHandle(ArmHandle):
 
     def set_joint_targets(self, positions: list[float], max_vel_rad_s: float | None = None) -> None:
         self._sim.run(lambda: self._apply_joint_targets_on_sim_thread(positions, max_vel_rad_s))
+
+    def home(self, positions: list[float]) -> None:
+        def _place() -> None:
+            values = np.array(positions, dtype=float)
+            set_positions = getattr(self._art, "set_joint_positions", None)
+            if set_positions is not None:
+                set_positions(values, joint_indices=self._joint_indices)
+            set_velocities = getattr(self._art, "set_joint_velocities", None)
+            if set_velocities is not None:
+                set_velocities(np.zeros(len(positions), dtype=float), self._joint_indices)
+            # holding the same values keeps gravity from folding the arm back
+            # down, and records them as the targets post_reset restores
+            self._apply_joint_targets_on_sim_thread(positions, None)
+
+        self._sim.run(_place, allow_during_initialization=True)
 
     def _apply_joint_targets_on_sim_thread(
         self, positions: list[float], max_vel_rad_s: float | None
@@ -681,6 +709,20 @@ class MockArmHandle(ArmHandle):
                 self._target[i] = p
             self._t0 = now
             self._speed = self.SPEED if max_vel_rad_s is None else min(self.SPEED, max_vel_rad_s)
+
+    def home(self, positions: list[float]) -> None:
+        with self._lock:
+            selected = self._selected()
+            if len(positions) != len(selected):
+                raise ValueError(f"expected {len(selected)} joint positions, got {len(positions)}")
+            placed = self._positions_at(time.monotonic())
+            for i, p in zip(selected, positions, strict=True):
+                placed[i] = p
+            # start and target both at the home pose, so the arm is there now
+            # rather than travelling toward it
+            self._start = list(placed)
+            self._target = list(placed)
+            self._t0 = time.monotonic()
 
     def is_moving(self) -> bool:
         with self._lock:

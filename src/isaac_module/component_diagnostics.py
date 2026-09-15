@@ -15,7 +15,7 @@ from typing import Any, Protocol
 
 from .length_units import MM_PER_M, to_millimeters
 from .models.gripper import DEFAULT_TCP_OFFSET_M
-from .sim_manager import ArmHandle, GripperHandle
+from .sim_manager import ArmHandle, GripperHandle, JawGripperHandle
 from .spatial import Quat, Vec3, quat_rotate, quat_to_ov
 
 
@@ -66,7 +66,7 @@ def prim_pose(attrs: dict[str, Any], handle: _PrimPoseHandle, prim_path: str) ->
     }
 
 
-def jaw_deg(attrs: dict[str, Any], handle: GripperHandle) -> dict[str, Any]:
+def jaw_deg(attrs: dict[str, Any], handle: JawGripperHandle) -> dict[str, Any]:
     open_rad, closed_rad = handle.jaw_limits()
     return {
         "jaw_deg": math.degrees(handle.get_jaw()),
@@ -75,7 +75,7 @@ def jaw_deg(attrs: dict[str, Any], handle: GripperHandle) -> dict[str, Any]:
     }
 
 
-def tcp_pose(attrs: dict[str, Any], handle: GripperHandle) -> dict[str, Any]:
+def tcp_pose(attrs: dict[str, Any], handle: JawGripperHandle) -> dict[str, Any]:
     """The fingertip midpoint's offset from the mount link along the tool
     +Z, in mm, next to the configured tcp_offset_m, so the TCP is corrected
     in one place if they differ."""

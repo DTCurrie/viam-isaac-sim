@@ -23,11 +23,13 @@ an empty stage to a sorting cell that runs itself.
 | `viam:isaac-sim-devin:camera` | `rdk:component:camera` | Creates (or attaches to) a camera prim and serves RGB, depth (`image/vnd.viam.dep`) and point clouds (`pointcloud/pcd`). |
 | `viam:isaac-sim-devin:base` | `rdk:component:base` | Spawns a differential-drive robot (e.g. jetbot) and drives it. |
 | `viam:isaac-sim-devin:gripper` | `rdk:component:gripper` | Bolts a parallel-jaw gripper (e.g. Robotiq 2F-85) onto an arm's link and drives it open/closed. |
+| `viam:isaac-sim-devin:vacuum` | `rdk:component:gripper` | Bolts a suction tool onto an arm's link and takes hold by welding whatever is under the cup to it. |
 | `viam:isaac-sim-devin:conductor` | `rdk:service:generic` | Sorts a scattered pool of colored blocks onto per-color pads end to end via DoCommand (`start`/`stop`/`status`), single-shot, N loops, or continuous. |
 | `viam:isaac-sim-devin:sorter-sensor` | `rdk:component:sensor` | Proxies a conductor's `status` for data management, emitting each new loop record at most once. |
+| `viam:isaac-sim-devin:palletizer` | `rdk:service:generic` | Picks a box off the pick station and places it on the pallet via DoCommand (`start`/`stop`/`status`). |
 
-The conductor is a service, not a component, so it belongs in a config's
-`services` array. Every other model above is a component.
+The conductor and the palletizer are services, not components, so they belong in a
+config's `services` array. Every other model above is a component.
 
 Known assets (usable via the `asset` attribute): `ur3e`, `ur5e`, `ur10`,
 `ur10e`, `ur16e`, `ur20`, `franka`, `jetbot`. Anything else can be loaded with
@@ -638,6 +640,34 @@ rewritten copy, saved under `$VIAM_MODULE_DATA/viam-isaac-sim-assets/`
 the copy, so the gripper attaches in about a second. The module log line
 `gripper '<name>' asset layer prepared|cached|...` says which path was taken.
 Delete the directory to redo the preparation.
+
+
+### vacuum attributes
+
+`world` (default `isaac-world`), `arm` (required, name of the `viam:isaac-sim-devin:arm`
+component this tool is bolted to). The tool is geometry this module authors rather than an
+asset on the content server, so there is no `asset` attribute.
+
+| attribute | default | notes |
+|---|---|---|
+| `world` | `isaac-world` | name of the world component, defaults to this module's world name |
+| `arm` | _required_ | name of the arm it is bolted to |
+| `parent_prim` | `<arm prim>/wrist_3_link` | link it is bolted to |
+| `local_position` | _unset (identity)_ | `[x,y,z]` meters, mount pose of the tool on `parent_prim` |
+| `local_orientation_rpy_deg` | _unset (identity)_ | the tool sits flush on the flange |
+| `tcp_offset_m` | `0.196` | flange -> cup face along tool +Z, the Robotiq EPick's own reach |
+| `grab_delay_ms` | `1000` | how long `grab()` waits after engaging before it reports a hold, standing in for the pump cycle a real cup needs. `is_moving()` is true for that window |
+| `max_payload_gap_m` | `0.01` | how far a candidate's top face may sit from the cup face and still count as contact, in either direction, since a descending cup often presses slightly into its payload |
+| `mock_attach_prop` | _unset_ | mock only: name of the prop the cup finds under it (unset = nothing to grab, so `grab()` returns `false`) |
+
+**Frame**: like the parallel-jaw gripper, the vacuum's frame is its TCP, which is the cup
+face, so the motion service plans the cup onto the payload rather than the flange. Set
+`frame.parent` to the arm.
+
+**Holding versus engaged**: a cup commanded to take hold with nothing under it is engaged and
+holding nothing, which a jaw cannot be. `get_current_inputs` reports the command, matching the
+parallel-jaw model, where a jaw closed on nothing still reads at its commanded position.
+`is_holding_something` reports the catch, and its `meta` carries both.
 
 ### camera attributes
 

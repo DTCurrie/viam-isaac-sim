@@ -1,0 +1,217 @@
+{
+  "modules": [
+    {
+      "type": "registry",
+      "name": "viam_isaac-sim-devin",
+      "module_id": "viam:isaac-sim-devin",
+      "version": "0.4.1"
+    }
+  ],
+  "components": [
+    {
+      "name": "isaac-world",
+      "api": "rdk:component:generic",
+      "model": "viam:isaac-sim-devin:world",
+      "attributes": {
+        "headless": true,
+        "livestream": false,
+        "wait_for_finalizer": true,
+        "physics_dt": 0.008333333333333333,
+        "rendering_dt": 0.03333333333333333,
+        "ground": {
+          "kind": "plane",
+          "matte": true
+        },
+        "render": {
+          "viewport_grid": false
+        },
+        "props": [
+          {
+            "_comment": "xy is the pick-station frame (400, -650 mm) plus its box_origin_offset_mm (200, 900 mm), giving (600, 250) mm. z assumes the conveyor surface sits at lowest_point_height_mm (200 mm) with the box centred half a box height above it. The vendored package settles neither the surface height nor pick_home_z_offset_mm's role for a resting box, so z is a GPU-time question, not a sourced number the way xy is.",
+            "name": "infeed_box",
+            "type": "cube",
+            "size": 0.05,
+            "scale": [
+              3.0,
+              4.0,
+              2.0
+            ],
+            "position": [
+              0.6,
+              0.25,
+              0.25
+            ],
+            "mass": 5.0,
+            "friction": 0.7,
+            "restitution": 0,
+            "contact_offset": 0.005
+          }
+        ],
+        "lighting": {
+          "dome": {
+            "intensity": 1000,
+            "color": [
+              1,
+              1,
+              1
+            ],
+            "texture": {
+              "$variable": {
+                "name": "hdri-path",
+                "default_value": "module://hdri/empty_warehouse_01_1k.hdr"
+              }
+            },
+            "rotation_deg": 150
+          },
+          "sphere_intensity": 30000
+        }
+      }
+    },
+    {
+      "name": "arm-1",
+      "api": "rdk:component:arm",
+      "model": "viam:isaac-sim-devin:arm",
+      "frame": {
+        "parent": "world",
+        "translation": {
+          "x": 0,
+          "y": 0,
+          "z": 150
+        }
+      },
+      "attributes": {
+        "world": "isaac-world",
+        "asset": "ur5e",
+        "home_joints_deg": [
+          0,
+          -90,
+          0,
+          -90,
+          0,
+          0
+        ]
+      }
+    },
+    {
+      "name": "gripper-1",
+      "api": "rdk:component:gripper",
+      "model": "viam:isaac-sim-devin:vacuum",
+      "frame": {
+        "parent": "arm-1",
+        "translation": {
+          "x": 0,
+          "y": 0,
+          "z": 196
+        }
+      },
+      "attributes": {
+        "world": "isaac-world",
+        "arm": "arm-1",
+        "grab_delay_ms": 250
+      }
+    },
+    {
+      "name": "scene-cam",
+      "api": "rdk:component:camera",
+      "model": "viam:isaac-sim-devin:camera",
+      "frame": {
+        "parent": "world",
+        "translation": {
+          "x": 0,
+          "y": 2500,
+          "z": 1500
+        }
+      },
+      "attributes": {
+        "world": "isaac-world",
+        "target": [
+          0,
+          0,
+          0.3
+        ],
+        "width": 848,
+        "height": 480,
+        "image_format": "jpeg"
+      }
+    },
+    {
+      "name": "wrist-cam",
+      "api": "rdk:component:camera",
+      "model": "viam:isaac-sim-devin:camera",
+      "frame": {
+        "parent": "arm-1",
+        "translation": {
+          "x": 0,
+          "y": 0,
+          "z": 60
+        },
+        "orientation": {
+          "type": "ov_degrees",
+          "value": {
+            "x": 0,
+            "y": 0,
+            "z": 1,
+            "th": 180
+          }
+        },
+        "geometry": {
+          "type": "box",
+          "x": 90,
+          "y": 25,
+          "z": 25
+        }
+      },
+      "attributes": {
+        "world": "isaac-world",
+        "parent_prim": "/World/arm_1/wrist_3_link",
+        "depth": true,
+        "width": 848,
+        "height": 480,
+        "fov_deg": 90.5,
+        "image_format": "jpeg"
+      }
+    },
+    {
+      "name": "scene-finalizer",
+      "api": "rdk:component:generic",
+      "model": "viam:isaac-sim-devin:scene-finalizer",
+      "depends_on": [
+        "isaac-world",
+        "arm-1",
+        "gripper-1",
+        "scene-cam",
+        "wrist-cam",
+        "pallet",
+        "pick-station",
+        "robot-pedestal",
+        "fence-back-left",
+        "fence-back-right",
+        "fence-left",
+        "fence-right",
+        "scan-tunnel",
+        "hmi-cabinet",
+        "stack-light",
+        "caution-tape"
+      ]
+    }
+  ],
+  "services": [
+    {
+      "name": "box-palletizer",
+      "api": "rdk:service:generic",
+      "model": "viam:isaac-sim-devin:palletizer",
+      "attributes": {
+        "world": "isaac-world",
+        "arm": "arm-1",
+        "gripper": "gripper-1",
+        "motion": "builtin",
+        "box_prop": "infeed_box",
+        "place_pose_mm": {
+          "x": 200,
+          "y": 500,
+          "z": 355
+        }
+      }
+    }
+  ]
+}

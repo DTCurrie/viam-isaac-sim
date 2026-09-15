@@ -149,7 +149,7 @@ def test_gripper_open_then_close_moves_the_jaw(arm_and_gripper):
     assert _poll_until_not_moving(gripper.is_moving, ARM_SETTLE_TIMEOUT_S, MockArmHandle.STEP_S)
     assert gripper.get_jaw() == pytest.approx(open_rad, abs=1e-3)
 
-    gripper.close()
+    gripper.grab()
     assert _poll_until_not_moving(gripper.is_moving, ARM_SETTLE_TIMEOUT_S, MockArmHandle.STEP_S)
     assert gripper.get_jaw() > open_rad
 

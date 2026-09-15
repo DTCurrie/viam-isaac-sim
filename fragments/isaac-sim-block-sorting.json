@@ -25,7 +25,11 @@
           "x": 3600,
           "y": 800,
           "z": 740,
-          "translation": { "x": 0, "y": 0, "z": 370 }
+          "translation": {
+            "x": 0,
+            "y": 0,
+            "z": 370
+          }
         }
       },
       "attributes": {
@@ -34,8 +38,13 @@
         "wait_for_finalizer": true,
         "physics_dt": 0.008333333333333333,
         "rendering_dt": 0.03333333333333333,
-        "ground": { "kind": "plane", "matte": true },
-        "render": { "viewport_grid": false },
+        "ground": {
+          "kind": "plane",
+          "matte": true
+        },
+        "render": {
+          "viewport_grid": false
+        },
         "props": [
           {
             "name": "table_source",
@@ -46,11 +55,22 @@
               1.2,
               0.8,
               {
-                "$variable": { "name": "table-height-m", "default_value": 0.75 }
+                "$variable": {
+                  "name": "table-height-m",
+                  "default_value": 0.75
+                }
               }
             ],
-            "position": [-1.2, 0.0, 0.375],
-            "color": [0.32, 0.3, 0.28],
+            "position": [
+              -1.2,
+              0.0,
+              0.375
+            ],
+            "color": [
+              0.32,
+              0.3,
+              0.28
+            ],
             "friction": 0.7,
             "restitution": 0,
             "contact_offset": 0.005
@@ -64,11 +84,22 @@
               1.2,
               0.8,
               {
-                "$variable": { "name": "table-height-m", "default_value": 0.75 }
+                "$variable": {
+                  "name": "table-height-m",
+                  "default_value": 0.75
+                }
               }
             ],
-            "position": [0.0, 0.0, 0.375],
-            "color": [0.32, 0.3, 0.28],
+            "position": [
+              0.0,
+              0.0,
+              0.375
+            ],
+            "color": [
+              0.32,
+              0.3,
+              0.28
+            ],
             "friction": 0.7,
             "restitution": 0,
             "contact_offset": 0.005
@@ -82,11 +113,22 @@
               1.2,
               0.8,
               {
-                "$variable": { "name": "table-height-m", "default_value": 0.75 }
+                "$variable": {
+                  "name": "table-height-m",
+                  "default_value": 0.75
+                }
               }
             ],
-            "position": [1.2, 0.0, 0.375],
-            "color": [0.32, 0.3, 0.28],
+            "position": [
+              1.2,
+              0.0,
+              0.375
+            ],
+            "color": [
+              0.32,
+              0.3,
+              0.28
+            ],
             "friction": 0.7,
             "restitution": 0,
             "contact_offset": 0.005
@@ -96,9 +138,22 @@
             "type": "cube",
             "fixed": true,
             "size": 1.0,
-            "scale": [0.3, 0.3, 0.01],
-            "position": [0.72, -0.18, 0.755],
-            "color": [0.9, 0.1, 0.1],
+            "scale": [
+              0.3,
+              0.3,
+              0.01
+            ],
+            "position": [
+              0.72,
+              -0.18,
+              0.755
+            ],
+            "color": [
+              0.9,
+              0.1,
+              0.1
+            ],
+            "material": "painted_mat",
             "friction": 0.7,
             "restitution": 0
           },
@@ -107,9 +162,22 @@
             "type": "cube",
             "fixed": true,
             "size": 1.0,
-            "scale": [0.3, 0.3, 0.01],
-            "position": [1.05, -0.18, 0.755],
-            "color": [0.05, 0.65, 0.1],
+            "scale": [
+              0.3,
+              0.3,
+              0.01
+            ],
+            "position": [
+              1.05,
+              -0.18,
+              0.755
+            ],
+            "color": [
+              0.05,
+              0.65,
+              0.1
+            ],
+            "material": "painted_mat",
             "friction": 0.7,
             "restitution": 0
           },
@@ -118,9 +186,22 @@
             "type": "cube",
             "fixed": true,
             "size": 1.0,
-            "scale": [0.3, 0.3, 0.01],
-            "position": [1.38, -0.18, 0.755],
-            "color": [0.05, 0.1, 0.9],
+            "scale": [
+              0.3,
+              0.3,
+              0.01
+            ],
+            "position": [
+              1.38,
+              -0.18,
+              0.755
+            ],
+            "color": [
+              0.05,
+              0.1,
+              0.9
+            ],
+            "material": "painted_mat",
             "friction": 0.7,
             "restitution": 0
           },
@@ -129,9 +210,22 @@
             "type": "cube",
             "fixed": true,
             "size": 1.0,
-            "scale": [0.3, 0.3, 0.01],
-            "position": [0.72, 0.18, 0.755],
-            "color": [0.9, 0.75, 0.05],
+            "scale": [
+              0.3,
+              0.3,
+              0.01
+            ],
+            "position": [
+              0.72,
+              0.18,
+              0.755
+            ],
+            "color": [
+              0.9,
+              0.75,
+              0.05
+            ],
+            "material": "painted_mat",
             "friction": 0.7,
             "restitution": 0
           },
@@ -140,9 +234,22 @@
             "type": "cube",
             "fixed": true,
             "size": 1.0,
-            "scale": [0.3, 0.3, 0.01],
-            "position": [1.05, 0.18, 0.755],
-            "color": [0.55, 0.1, 0.75],
+            "scale": [
+              0.3,
+              0.3,
+              0.01
+            ],
+            "position": [
+              1.05,
+              0.18,
+              0.755
+            ],
+            "color": [
+              0.55,
+              0.1,
+              0.75
+            ],
+            "material": "painted_mat",
             "friction": 0.7,
             "restitution": 0
           },
@@ -151,23 +258,45 @@
             "type": "cube",
             "fixed": true,
             "size": 1.0,
-            "scale": [0.3, 0.3, 0.01],
-            "position": [1.38, 0.18, 0.755],
-            "color": [1.0, 0.4, 0.05],
+            "scale": [
+              0.3,
+              0.3,
+              0.01
+            ],
+            "position": [
+              1.38,
+              0.18,
+              0.755
+            ],
+            "color": [
+              1.0,
+              0.4,
+              0.05
+            ],
+            "material": "painted_mat",
             "friction": 0.7,
             "restitution": 0
           },
           {
             "name": "block_red_1",
             "type": "cube",
-            "position": [-1.25, -1.0, 0.0305],
+            "position": [
+              -1.25,
+              -1.0,
+              0.0305
+            ],
             "size": 0.06,
             "color": {
               "$variable": {
                 "name": "block-color-red",
-                "default_value": [0.9, 0.1, 0.1]
+                "default_value": [
+                  0.9,
+                  0.1,
+                  0.1
+                ]
               }
             },
+            "material": "painted_wood",
             "mass": 0.05,
             "friction": 0.7,
             "restitution": 0,
@@ -176,14 +305,23 @@
           {
             "name": "block_red_2",
             "type": "cube",
-            "position": [-1.25, -1.2, 0.0305],
+            "position": [
+              -1.25,
+              -1.2,
+              0.0305
+            ],
             "size": 0.06,
             "color": {
               "$variable": {
                 "name": "block-color-red",
-                "default_value": [0.9, 0.1, 0.1]
+                "default_value": [
+                  0.9,
+                  0.1,
+                  0.1
+                ]
               }
             },
+            "material": "painted_wood",
             "mass": 0.05,
             "friction": 0.7,
             "restitution": 0,
@@ -192,14 +330,23 @@
           {
             "name": "block_red_3",
             "type": "cube",
-            "position": [-1.25, -1.4, 0.0305],
+            "position": [
+              -1.25,
+              -1.4,
+              0.0305
+            ],
             "size": 0.06,
             "color": {
               "$variable": {
                 "name": "block-color-red",
-                "default_value": [0.9, 0.1, 0.1]
+                "default_value": [
+                  0.9,
+                  0.1,
+                  0.1
+                ]
               }
             },
+            "material": "painted_wood",
             "mass": 0.05,
             "friction": 0.7,
             "restitution": 0,
@@ -208,14 +355,23 @@
           {
             "name": "block_green_1",
             "type": "cube",
-            "position": [-0.75, -1.0, 0.0305],
+            "position": [
+              -0.75,
+              -1.0,
+              0.0305
+            ],
             "size": 0.06,
             "color": {
               "$variable": {
                 "name": "block-color-green",
-                "default_value": [0.05, 0.65, 0.1]
+                "default_value": [
+                  0.05,
+                  0.65,
+                  0.1
+                ]
               }
             },
+            "material": "painted_wood",
             "mass": 0.05,
             "friction": 0.7,
             "restitution": 0,
@@ -224,14 +380,23 @@
           {
             "name": "block_green_2",
             "type": "cube",
-            "position": [-0.75, -1.2, 0.0305],
+            "position": [
+              -0.75,
+              -1.2,
+              0.0305
+            ],
             "size": 0.06,
             "color": {
               "$variable": {
                 "name": "block-color-green",
-                "default_value": [0.05, 0.65, 0.1]
+                "default_value": [
+                  0.05,
+                  0.65,
+                  0.1
+                ]
               }
             },
+            "material": "painted_wood",
             "mass": 0.05,
             "friction": 0.7,
             "restitution": 0,
@@ -240,14 +405,23 @@
           {
             "name": "block_green_3",
             "type": "cube",
-            "position": [-0.75, -1.4, 0.0305],
+            "position": [
+              -0.75,
+              -1.4,
+              0.0305
+            ],
             "size": 0.06,
             "color": {
               "$variable": {
                 "name": "block-color-green",
-                "default_value": [0.05, 0.65, 0.1]
+                "default_value": [
+                  0.05,
+                  0.65,
+                  0.1
+                ]
               }
             },
+            "material": "painted_wood",
             "mass": 0.05,
             "friction": 0.7,
             "restitution": 0,
@@ -256,14 +430,23 @@
           {
             "name": "block_blue_1",
             "type": "cube",
-            "position": [-0.25, -1.0, 0.0305],
+            "position": [
+              -0.25,
+              -1.0,
+              0.0305
+            ],
             "size": 0.06,
             "color": {
               "$variable": {
                 "name": "block-color-blue",
-                "default_value": [0.05, 0.1, 0.9]
+                "default_value": [
+                  0.05,
+                  0.1,
+                  0.9
+                ]
               }
             },
+            "material": "painted_wood",
             "mass": 0.05,
             "friction": 0.7,
             "restitution": 0,
@@ -272,14 +455,23 @@
           {
             "name": "block_blue_2",
             "type": "cube",
-            "position": [-0.25, -1.2, 0.0305],
+            "position": [
+              -0.25,
+              -1.2,
+              0.0305
+            ],
             "size": 0.06,
             "color": {
               "$variable": {
                 "name": "block-color-blue",
-                "default_value": [0.05, 0.1, 0.9]
+                "default_value": [
+                  0.05,
+                  0.1,
+                  0.9
+                ]
               }
             },
+            "material": "painted_wood",
             "mass": 0.05,
             "friction": 0.7,
             "restitution": 0,
@@ -288,14 +480,23 @@
           {
             "name": "block_blue_3",
             "type": "cube",
-            "position": [-0.25, -1.4, 0.0305],
+            "position": [
+              -0.25,
+              -1.4,
+              0.0305
+            ],
             "size": 0.06,
             "color": {
               "$variable": {
                 "name": "block-color-blue",
-                "default_value": [0.05, 0.1, 0.9]
+                "default_value": [
+                  0.05,
+                  0.1,
+                  0.9
+                ]
               }
             },
+            "material": "painted_wood",
             "mass": 0.05,
             "friction": 0.7,
             "restitution": 0,
@@ -304,14 +505,23 @@
           {
             "name": "block_yellow_1",
             "type": "cube",
-            "position": [0.25, -1.0, 0.0305],
+            "position": [
+              0.25,
+              -1.0,
+              0.0305
+            ],
             "size": 0.06,
             "color": {
               "$variable": {
                 "name": "block-color-yellow",
-                "default_value": [0.9, 0.75, 0.05]
+                "default_value": [
+                  0.9,
+                  0.75,
+                  0.05
+                ]
               }
             },
+            "material": "painted_wood",
             "mass": 0.05,
             "friction": 0.7,
             "restitution": 0,
@@ -320,14 +530,23 @@
           {
             "name": "block_yellow_2",
             "type": "cube",
-            "position": [0.25, -1.2, 0.0305],
+            "position": [
+              0.25,
+              -1.2,
+              0.0305
+            ],
             "size": 0.06,
             "color": {
               "$variable": {
                 "name": "block-color-yellow",
-                "default_value": [0.9, 0.75, 0.05]
+                "default_value": [
+                  0.9,
+                  0.75,
+                  0.05
+                ]
               }
             },
+            "material": "painted_wood",
             "mass": 0.05,
             "friction": 0.7,
             "restitution": 0,
@@ -336,14 +555,23 @@
           {
             "name": "block_yellow_3",
             "type": "cube",
-            "position": [0.25, -1.4, 0.0305],
+            "position": [
+              0.25,
+              -1.4,
+              0.0305
+            ],
             "size": 0.06,
             "color": {
               "$variable": {
                 "name": "block-color-yellow",
-                "default_value": [0.9, 0.75, 0.05]
+                "default_value": [
+                  0.9,
+                  0.75,
+                  0.05
+                ]
               }
             },
+            "material": "painted_wood",
             "mass": 0.05,
             "friction": 0.7,
             "restitution": 0,
@@ -352,14 +580,23 @@
           {
             "name": "block_purple_1",
             "type": "cube",
-            "position": [0.75, -1.0, 0.0305],
+            "position": [
+              0.75,
+              -1.0,
+              0.0305
+            ],
             "size": 0.06,
             "color": {
               "$variable": {
                 "name": "block-color-purple",
-                "default_value": [0.55, 0.1, 0.75]
+                "default_value": [
+                  0.55,
+                  0.1,
+                  0.75
+                ]
               }
             },
+            "material": "painted_wood",
             "mass": 0.05,
             "friction": 0.7,
             "restitution": 0,
@@ -368,14 +605,23 @@
           {
             "name": "block_purple_2",
             "type": "cube",
-            "position": [0.75, -1.2, 0.0305],
+            "position": [
+              0.75,
+              -1.2,
+              0.0305
+            ],
             "size": 0.06,
             "color": {
               "$variable": {
                 "name": "block-color-purple",
-                "default_value": [0.55, 0.1, 0.75]
+                "default_value": [
+                  0.55,
+                  0.1,
+                  0.75
+                ]
               }
             },
+            "material": "painted_wood",
             "mass": 0.05,
             "friction": 0.7,
             "restitution": 0,
@@ -384,14 +630,23 @@
           {
             "name": "block_purple_3",
             "type": "cube",
-            "position": [0.75, -1.4, 0.0305],
+            "position": [
+              0.75,
+              -1.4,
+              0.0305
+            ],
             "size": 0.06,
             "color": {
               "$variable": {
                 "name": "block-color-purple",
-                "default_value": [0.55, 0.1, 0.75]
+                "default_value": [
+                  0.55,
+                  0.1,
+                  0.75
+                ]
               }
             },
+            "material": "painted_wood",
             "mass": 0.05,
             "friction": 0.7,
             "restitution": 0,
@@ -400,14 +655,23 @@
           {
             "name": "block_orange_1",
             "type": "cube",
-            "position": [1.25, -1.0, 0.0305],
+            "position": [
+              1.25,
+              -1.0,
+              0.0305
+            ],
             "size": 0.06,
             "color": {
               "$variable": {
                 "name": "block-color-orange",
-                "default_value": [1.0, 0.4, 0.05]
+                "default_value": [
+                  1.0,
+                  0.4,
+                  0.05
+                ]
               }
             },
+            "material": "painted_wood",
             "mass": 0.05,
             "friction": 0.7,
             "restitution": 0,
@@ -416,14 +680,23 @@
           {
             "name": "block_orange_2",
             "type": "cube",
-            "position": [1.25, -1.2, 0.0305],
+            "position": [
+              1.25,
+              -1.2,
+              0.0305
+            ],
             "size": 0.06,
             "color": {
               "$variable": {
                 "name": "block-color-orange",
-                "default_value": [1.0, 0.4, 0.05]
+                "default_value": [
+                  1.0,
+                  0.4,
+                  0.05
+                ]
               }
             },
+            "material": "painted_wood",
             "mass": 0.05,
             "friction": 0.7,
             "restitution": 0,
@@ -432,14 +705,23 @@
           {
             "name": "block_orange_3",
             "type": "cube",
-            "position": [1.25, -1.4, 0.0305],
+            "position": [
+              1.25,
+              -1.4,
+              0.0305
+            ],
             "size": 0.06,
             "color": {
               "$variable": {
                 "name": "block-color-orange",
-                "default_value": [1.0, 0.4, 0.05]
+                "default_value": [
+                  1.0,
+                  0.4,
+                  0.05
+                ]
               }
             },
+            "material": "painted_wood",
             "mass": 0.05,
             "friction": 0.7,
             "restitution": 0,
@@ -450,9 +732,21 @@
             "type": "cube",
             "fixed": true,
             "size": 1.0,
-            "scale": [0.025, 0.09, 0.025],
-            "position": [-1.7635, 0, 0.9],
-            "color": [0.2, 0.2, 0.2],
+            "scale": [
+              0.025,
+              0.09,
+              0.025
+            ],
+            "position": [
+              -1.7635,
+              0,
+              0.9
+            ],
+            "color": [
+              0.2,
+              0.2,
+              0.2
+            ],
             "friction": 0.7,
             "restitution": 0,
             "contact_offset": 0.005
@@ -462,9 +756,21 @@
             "type": "cube",
             "fixed": true,
             "size": 1.0,
-            "scale": [0.04, 0.04, 0.1375],
-            "position": [-1.7635, 0, 0.81875],
-            "color": [0.32, 0.3, 0.28],
+            "scale": [
+              0.04,
+              0.04,
+              0.1375
+            ],
+            "position": [
+              -1.7635,
+              0,
+              0.81875
+            ],
+            "color": [
+              0.32,
+              0.3,
+              0.28
+            ],
             "friction": 0.7,
             "restitution": 0,
             "contact_offset": 0.005
@@ -473,36 +779,70 @@
             "name": "table_source_visual",
             "type": "visual",
             "usd_path": {
-              "$variable": { "name": "table-usd-path", "default_value": "" }
+              "$variable": {
+                "name": "table-usd-path",
+                "default_value": ""
+              }
             },
-            "position": [-1.2, 0, 0.75],
-            "fit": { "collider": "table_source" }
+            "position": [
+              -1.2,
+              0,
+              0.75
+            ],
+            "fit": {
+              "collider": "table_source"
+            }
           },
           {
             "name": "table_arm_visual",
             "type": "visual",
             "usd_path": {
-              "$variable": { "name": "table-usd-path", "default_value": "" }
+              "$variable": {
+                "name": "table-usd-path",
+                "default_value": ""
+              }
             },
-            "position": [0, 0, 0.75],
-            "fit": { "collider": "table_arm" }
+            "position": [
+              0,
+              0,
+              0.75
+            ],
+            "fit": {
+              "collider": "table_arm"
+            }
           },
           {
             "name": "table_place_visual",
             "type": "visual",
             "usd_path": {
-              "$variable": { "name": "table-usd-path", "default_value": "" }
+              "$variable": {
+                "name": "table-usd-path",
+                "default_value": ""
+              }
             },
-            "position": [1.2, 0, 0.75],
-            "fit": { "collider": "table_place" }
+            "position": [
+              1.2,
+              0,
+              0.75
+            ],
+            "fit": {
+              "collider": "table_place"
+            }
           }
         ],
         "lighting": {
           "dome": {
             "intensity": 1000,
-            "color": [1, 1, 1],
+            "color": [
+              1,
+              1,
+              1
+            ],
             "texture": {
-              "$variable": { "name": "hdri-path", "default_value": "module://hdri/empty_warehouse_01_1k.hdr" }
+              "$variable": {
+                "name": "hdri-path",
+                "default_value": "module://hdri/empty_warehouse_01_1k.hdr"
+              }
             },
             "rotation_deg": 150
           },
@@ -516,7 +856,11 @@
       "model": "viam:isaac-sim-devin:arm",
       "frame": {
         "parent": "world",
-        "translation": { "x": 0, "y": 0, "z": 750 }
+        "translation": {
+          "x": 0,
+          "y": 0,
+          "z": 750
+        }
       },
       "attributes": {
         "world": "isaac-world",
@@ -529,7 +873,11 @@
       "model": "viam:isaac-sim-devin:gripper",
       "frame": {
         "parent": "pick-arm",
-        "translation": { "x": 0, "y": 0, "z": 134 }
+        "translation": {
+          "x": 0,
+          "y": 0,
+          "z": 134
+        }
       },
       "attributes": {
         "world": "isaac-world",
@@ -542,11 +890,19 @@
       "model": "viam:isaac-sim-devin:camera",
       "frame": {
         "parent": "world",
-        "translation": { "x": 0, "y": 2500, "z": 1500 }
+        "translation": {
+          "x": 0,
+          "y": 2500,
+          "z": 1500
+        }
       },
       "attributes": {
         "world": "isaac-world",
-        "target": [0, 0, 0.3],
+        "target": [
+          0,
+          0,
+          0.3
+        ],
         "width": 848,
         "height": 480,
         "image_format": "jpeg"
@@ -558,10 +914,19 @@
       "model": "viam:isaac-sim-devin:camera",
       "frame": {
         "parent": "world",
-        "translation": { "x": -1750, "y": 0, "z": 900 },
+        "translation": {
+          "x": -1750,
+          "y": 0,
+          "z": 900
+        },
         "orientation": {
           "type": "ov_degrees",
-          "value": { "x": 725, "y": 0, "z": -150, "th": -90 }
+          "value": {
+            "x": 725,
+            "y": 0,
+            "z": -150,
+            "th": -90
+          }
         },
         "geometry": {
           "type": "box",
@@ -585,10 +950,19 @@
       "model": "viam:isaac-sim-devin:camera",
       "frame": {
         "parent": "pick-arm",
-        "translation": { "x": 0, "y": 0, "z": 60 },
+        "translation": {
+          "x": 0,
+          "y": 0,
+          "z": 60
+        },
         "orientation": {
           "type": "ov_degrees",
-          "value": { "x": 0, "y": 0, "z": 1, "th": 180 }
+          "value": {
+            "x": 0,
+            "y": 0,
+            "z": 1,
+            "th": 180
+          }
         },
         "geometry": {
           "type": "box",
@@ -614,13 +988,22 @@
       "attributes": {
         "conductor": "block-sorter"
       },
-      "depends_on": ["block-sorter"]
+      "depends_on": [
+        "block-sorter"
+      ]
     },
     {
       "name": "scene-finalizer",
       "api": "rdk:component:generic",
       "model": "viam:isaac-sim-devin:scene-finalizer",
-      "depends_on": ["isaac-world", "pick-arm", "pick-grip", "scene-cam", "side-cam", "wrist-cam"]
+      "depends_on": [
+        "isaac-world",
+        "pick-arm",
+        "pick-grip",
+        "scene-cam",
+        "side-cam",
+        "wrist-cam"
+      ]
     }
   ],
   "services": [
@@ -630,11 +1013,17 @@
       "model": "color_detector",
       "attributes": {
         "detect_color": {
-          "$variable": { "name": "detect-color", "default_value": "#EA8D8D" }
+          "$variable": {
+            "name": "detect-color",
+            "default_value": "#EA8D8D"
+          }
         },
         "camera_name": "wrist-cam",
         "hue_tolerance_pct": {
-          "$variable": { "name": "hue-tolerance-pct", "default_value": 0.05 }
+          "$variable": {
+            "name": "hue-tolerance-pct",
+            "default_value": 0.05
+          }
         },
         "segment_size_px": 100,
         "value_cutoff_pct": 0.15
@@ -848,7 +1237,10 @@
           "purple": "purple-segmenter",
           "orange": "orange-segmenter"
         },
-        "size_range_mm": [50, 80]
+        "size_range_mm": [
+          50,
+          80
+        ]
       }
     }
   ]

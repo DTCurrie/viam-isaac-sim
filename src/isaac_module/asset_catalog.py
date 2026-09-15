@@ -118,3 +118,22 @@ KNOWN_ASSETS: dict[str, dict[str, Any]] = {
         "body_prim": "chassis",
     },
 }
+
+# The vacuum end effector, deliberately not a KNOWN_ASSETS row: it references
+# no USD on the content server, because a suction plate is a box the module
+# authors itself. That keeps it off the nucleus round trip and off the
+# reference-repair path the Robotiq asset needs, and it keeps simulates.json
+# free of a real-hardware row nobody has verified.
+#
+#   box_mm        the tool body, flange face to cup face, along tool +Z
+#   tcp_offset_m  flange -> cup face, the frame the planner drives
+#   cup_side_mm   the square suction face, the contact patch a payload has to
+#                 overlap for the cup to take hold
+VACUUM_TOOL: dict[str, Any] = {
+    "kind": "gripper",
+    "box_mm": (80.0, 80.0, 196.0),
+    "tcp_offset_m": 0.196,
+    "cup_side_mm": 70.0,
+}
+# the prim name the vacuum tool is authored at, under the arm it rides
+VACUUM_TOOL_PRIM = "VacuumTool"

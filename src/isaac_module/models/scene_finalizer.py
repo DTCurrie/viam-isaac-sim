@@ -23,6 +23,7 @@ from viam.resource.types import Model, ModelFamily
 
 from .. import FAMILY, NAMESPACE
 from ..sim_manager import SimManager
+from ..workcell_client import generic_dependencies, materialise_workcell
 
 
 class IsaacSceneFinalizer(Generic, EasyResource):  # type: ignore[misc]  # SDK: API is Final on the component, redeclared by EasyResource
@@ -33,7 +34,7 @@ class IsaacSceneFinalizer(Generic, EasyResource):  # type: ignore[misc]  # SDK: 
         cls, config: ComponentConfig, dependencies: Mapping[ResourceName, ResourceBase]
     ) -> Self:
         finalizer = cls(config.name)
-        SimManager.get().finalize_scene()
+        finalizer.reconfigure(config, dependencies)
         return finalizer
 
     @classmethod
@@ -50,4 +51,19 @@ class IsaacSceneFinalizer(Generic, EasyResource):  # type: ignore[misc]  # SDK: 
     def reconfigure(
         self, config: ComponentConfig, dependencies: Mapping[ResourceName, ResourceBase]
     ) -> None:
+        """Materialises every ``viam:workcell-components`` dependency's
+        scenery before signalling the scene complete.
+
+        Every ``rdk:component:generic`` dependency is probed
+        (``workcell_client.generic_dependencies`` and
+        ``materialise_workcell``'s own ``get_schema`` check), so a
+        dependency that is not workcell scenery, this cell's own world
+        included, is skipped with no config of its own required to tell it
+        apart. A cell with no workcell components in its dependencies
+        materialises nothing and behaves exactly as before this capability
+        existed.
+        """
+        SimManager.get().materialise_components(
+            materialise_workcell(generic_dependencies(dependencies), logger=self.logger)
+        )
         SimManager.get().finalize_scene()

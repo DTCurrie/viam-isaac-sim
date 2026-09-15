@@ -145,6 +145,7 @@ over unchanged.
 | `viam:universal-robots:ur20` | `rdk:component:arm` | `viam:isaac-sim-devin:arm` | `{"asset": "ur20"}` | `speed_degs_per_sec` → `max_vel_degs_per_sec` | yes |
 | `viam:franka:panda` | `rdk:component:arm` | `viam:isaac-sim-devin:arm` | `{"asset": "franka"}` | `{}` | no |
 | `viam:robotiq:2f-grippers` | `rdk:component:gripper` | `viam:isaac-sim-devin:gripper` | `{"asset": "robotiq_2f_85", "arm": "$frame.parent"}` | `{}` | yes |
+| `viam:robotiq:epick` | `rdk:component:gripper` | `viam:isaac-sim-devin:vacuum` | `{"arm": "$frame.parent"}` | `{}` | yes |
 | `rdk:builtin:wheeled` | `rdk:component:base` | `viam:isaac-sim-devin:base` | `{"asset": "jetbot"}` | `width_mm` → `width_mm`, `wheel_circumference_mm` → `wheel_circumference_mm` | yes |
 | `viam:camera:realsense` | `rdk:component:camera` | `viam:isaac-sim-devin:camera` | `{}` | `width_px` → `width`, `height_px` → `height` | yes |
 | `*` (catch-all) | `*` | `rdk:builtin:fake` | `{}` | `{}` | yes |

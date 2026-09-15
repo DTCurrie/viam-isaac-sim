@@ -9,7 +9,14 @@ from viam.utils import ValueTypes
 from .. import component_diagnostics
 from ..length_units import MM_PER_M
 from ..prim_paths import default_base_prim_path, default_ee_prim_path
-from ..sim_manager import ArmHandle, BaseHandle, GripperHandle, SimManager, WorldHandle
+from ..sim_manager import (
+    ArmHandle,
+    BaseHandle,
+    GripperHandle,
+    JawGripperHandle,
+    SimManager,
+    WorldHandle,
+)
 from ..spatial import Quat, quat_from_euler_deg, quat_to_ov, to_vec3
 from .world_config_validation import (
     _require_name,
@@ -325,8 +332,8 @@ def _cmd_tcp_pose(
 ) -> dict[str, ValueTypes]:
     name = _require_name(command)
     attrs, entry_handle = SimManager.get().handle_entry(name)
-    if not isinstance(entry_handle, GripperHandle):
-        raise ValueError(f"{name!r} is a {type(entry_handle).__name__}, not a gripper")
+    if not isinstance(entry_handle, JawGripperHandle):
+        raise ValueError(f"{name!r} is a {type(entry_handle).__name__}, not a jaw gripper")
     return cast("Any", component_diagnostics.tcp_pose(attrs, entry_handle))
 
 
@@ -335,8 +342,8 @@ def _cmd_jaw_deg(
 ) -> dict[str, ValueTypes]:
     name = _require_name(command)
     attrs, entry_handle = SimManager.get().handle_entry(name)
-    if not isinstance(entry_handle, GripperHandle):
-        raise ValueError(f"{name!r} is a {type(entry_handle).__name__}, not a gripper")
+    if not isinstance(entry_handle, JawGripperHandle):
+        raise ValueError(f"{name!r} is a {type(entry_handle).__name__}, not a jaw gripper")
     return cast("Any", component_diagnostics.jaw_deg(attrs, entry_handle))
 
 

@@ -23,11 +23,11 @@ def test_create_gripper_unknown_arm_raises(sim):
         sim.create_gripper("gripper-bad-arm", {"world": "isaac-world", "arm": "no-such-arm"})
 
 
-def test_close_with_no_object_reaches_closed_rad(sim):
+def test_grab_with_no_object_reaches_closed_rad(sim):
     sim.create_arm("gripper-arm-a", {"world": "isaac-world", "asset": "ur5e"})
     gripper = sim.create_gripper("gripper-a", {"world": "isaac-world", "arm": "gripper-arm-a"})
 
-    gripper.close()
+    gripper.grab()
     assert _wait_until(lambda: not gripper.is_moving())
 
     assert gripper.get_jaw() == pytest.approx(math.radians(47.0), abs=1e-6)
@@ -35,7 +35,7 @@ def test_close_with_no_object_reaches_closed_rad(sim):
     assert gripper.is_holding() is False
 
 
-def test_close_on_object_stalls_at_contact_angle_and_holds(sim):
+def test_grab_on_object_stalls_at_contact_angle_and_holds(sim):
     sim.create_arm("gripper-arm-b", {"world": "isaac-world", "asset": "ur5e"})
     gripper = sim.create_gripper(
         "gripper-b",
@@ -46,7 +46,7 @@ def test_close_on_object_stalls_at_contact_angle_and_holds(sim):
     closed_rad = math.radians(47.0)
     expected_contact = open_rad + (closed_rad - open_rad) * (1.0 - 0.05 / GRIPPER_OPEN_WIDTH_M)
 
-    gripper.close()
+    gripper.grab()
     assert _wait_until(lambda: not gripper.is_moving())
 
     assert gripper.get_jaw() == pytest.approx(expected_contact, abs=1e-6)
@@ -63,7 +63,7 @@ def test_stop_mid_travel_freezes_jaw(sim):
     sim.create_arm("gripper-arm-c", {"world": "isaac-world", "asset": "ur5e"})
     gripper = sim.create_gripper("gripper-c", {"world": "isaac-world", "arm": "gripper-arm-c"})
 
-    gripper.close()
+    gripper.grab()
     time.sleep(0.1)
     gripper.stop()
 
@@ -120,33 +120,33 @@ def test_mock_arm_speed_constant_used_by_gripper_interpolation():
     assert MockArmHandle.SPEED == 1.0
 
 
-def test_poll_state_reports_moving_and_not_holding_mid_travel(sim):
+def test_poll_jaw_state_reports_moving_and_not_holding_mid_travel(sim):
     sim.create_arm("gripper-arm-h", {"world": "isaac-world", "asset": "ur5e"})
     gripper = sim.create_gripper(
         "gripper-h",
         {"world": "isaac-world", "arm": "gripper-arm-h", "mock_object_width_m": 0.05},
     )
 
-    gripper.close()
+    gripper.grab()
     time.sleep(0.05)  # still travelling toward the contact angle
 
-    jaw, moving, holding = gripper.poll_state()
+    jaw, moving, holding = gripper.poll_jaw_state()
     assert math.radians(0.0) < jaw < math.radians(47.0)
     assert moving is True
     assert holding is False
 
 
-def test_poll_state_reports_holding_once_stalled_on_an_object(sim):
+def test_poll_jaw_state_reports_holding_once_stalled_on_an_object(sim):
     sim.create_arm("gripper-arm-i", {"world": "isaac-world", "asset": "ur5e"})
     gripper = sim.create_gripper(
         "gripper-i",
         {"world": "isaac-world", "arm": "gripper-arm-i", "mock_object_width_m": 0.05},
     )
 
-    gripper.close()
+    gripper.grab()
     assert _wait_until(gripper.is_holding)
 
-    jaw, moving, holding = gripper.poll_state()
+    jaw, moving, holding = gripper.poll_jaw_state()
     assert jaw == pytest.approx(gripper.get_jaw(), abs=1e-3)
     assert moving is False
     assert holding is True

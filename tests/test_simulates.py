@@ -12,6 +12,7 @@ from isaac_module.models.arm import IsaacArm
 from isaac_module.models.base import IsaacBase
 from isaac_module.models.camera import IsaacCamera
 from isaac_module.models.gripper import IsaacGripper
+from isaac_module.models.vacuum import IsaacVacuum
 from isaac_module.sim_manager import KNOWN_ASSETS
 from test_readme_tables import documented_attributes
 
@@ -19,7 +20,7 @@ SIMULATES_PATH = Path(__file__).resolve().parent.parent / "simulates.json"
 META_PATH = Path(__file__).resolve().parent.parent / "meta.json"
 SIMULATION_DOC_PATH = Path(__file__).resolve().parent.parent / "docs" / "SIMULATION.md"
 
-SIM_MODEL_CLASSES = (IsaacArm, IsaacGripper, IsaacBase, IsaacCamera)
+SIM_MODEL_CLASSES = (IsaacArm, IsaacGripper, IsaacVacuum, IsaacBase, IsaacCamera)
 
 REAL_MODEL_PATTERN = re.compile(r"^[a-z0-9-]+:[a-z0-9_-]+:[a-z0-9_-]+$")
 

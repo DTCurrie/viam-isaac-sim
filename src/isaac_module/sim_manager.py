@@ -19,7 +19,7 @@ import queue
 import signal
 import threading
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import Future
 from dataclasses import dataclass, field
 from typing import Any, cast
@@ -27,7 +27,7 @@ from typing import Any, cast
 from viam.logging import getLogger
 
 from . import FAMILY, NAMESPACE
-from .asset_catalog import KNOWN_ASSETS
+from .asset_catalog import KNOWN_ASSETS, VACUUM_TOOL, VACUUM_TOOL_PRIM
 from .asset_catalog import UR_JOINT_NAMES as UR_JOINT_NAMES
 from .assets import REMOTE_ASSET_SCHEMES
 from .compat import IsaacAPI, caps, import_isaac, isaac_version
@@ -59,9 +59,22 @@ from .handles.camera import (
 )
 from .handles.gripper import (
     DEFAULT_HOLDING_TOLERANCE_DEG,
-    GripperHandle,
     IsaacGripperHandle,
+    JawGripperHandle,
     MockGripperHandle,
+)
+
+# re-exported for the world's diagnostic verbs, which narrow on the
+# mechanism-neutral protocol; nothing in this module names it
+from .handles.gripper import (
+    GripperHandle as GripperHandle,
+)
+from .handles.vacuum import (
+    DEFAULT_GRAB_DELAY_MS,
+    DEFAULT_MAX_PAYLOAD_GAP_M,
+    IsaacVacuumHandle,
+    MockVacuumHandle,
+    VacuumGripperHandle,
 )
 from .handles.world import IsaacWorldHandle, MockWorldHandle, WorldHandle
 from .materials import MATERIAL_SPEC_KEY, build_material, material_spec, prop_display_color
@@ -169,6 +182,7 @@ from .usd_assets import (
     _bucket_candidate as _bucket_candidate,
 )
 from .visual_props import VISUAL_PROP_KIND, status_row
+from .workcell_scenery import scenery_props
 
 LOGGER = getLogger("viam-isaac-sim")
 
@@ -423,6 +437,50 @@ def _forget_scene_object(scene: Any, name: str) -> None:
     attribute edit never comes up."""
     if scene.get_object(name) is not None:
         scene.remove_object(name, registry_only=True)
+
+
+def _home_joints_rad(attrs: dict[str, Any]) -> list[float] | None:
+    """``home_joints_deg`` in radians, or None when the arm keeps its asset's
+    own default pose.
+
+    Raises ValueError for anything that is not a list of numbers, since a
+    malformed home pose would otherwise spawn the arm somewhere nobody asked
+    for and the failure would look like a physics problem."""
+    value = attrs.get("home_joints_deg")
+    if value is None:
+        return None
+    if isinstance(value, (str, bytes)) or not isinstance(value, Sequence):
+        raise ValueError(
+            f'"home_joints_deg" must be a list of joint angles in degrees, got {value!r}'
+        )
+    out: list[float] = []
+    for entry in value:
+        if isinstance(entry, bool) or not isinstance(entry, (int, float)):
+            raise ValueError(f'"home_joints_deg" entries must be numbers in degrees, got {entry!r}')
+        out.append(math.radians(float(entry)))
+    if not out:
+        raise ValueError('"home_joints_deg" must name at least one joint')
+    return out
+
+
+@dataclass(frozen=True)
+class ComponentScenery:
+    """One configured workcell component, as ``materialise_components`` needs
+    it: its model, its two shape replies, its attributes, and the frame it
+    sits in.
+
+    ``frame_position_m`` and ``frame_orientation_wxyz`` are the component's
+    own frame in the cell (metres, world-frame quaternion), since
+    ``workcell_scenery.scenery_props`` returns every primitive's pose in the
+    component's own frame and only the caller knows where that frame sits.
+    """
+
+    model: str
+    visuals: Mapping[str, Any]
+    geometries: Sequence[Mapping[str, Any]]
+    attrs: Mapping[str, Any]
+    frame_position_m: Vec3 = (0.0, 0.0, 0.0)
+    frame_orientation_wxyz: Quat = (1.0, 0.0, 0.0, 0.0)
 
 
 class SimManager:
@@ -1006,6 +1064,10 @@ class SimManager:
         if kind != "cube":
             raise ValueError(f"prop {name}: unknown type {kind!r} (cube or usd)")
 
+        if prop.get("collision") is False:
+            self._spawn_render_only_cube(prop, name, prim_path, position, orientation)
+            return
+
         kwargs: dict[str, Any] = dict(
             prim_path=prim_path,
             name=name,
@@ -1033,6 +1095,47 @@ class SimManager:
             "spawn_orientation": orientation,
             MATERIAL_SPEC_KEY: spec,
         }
+
+    def _spawn_render_only_cube(
+        self,
+        prop: dict[str, Any],
+        name: str,
+        prim_path: str,
+        position: list[float],
+        orientation: tuple[float, float, float, float],
+    ) -> None:
+        """A box-shaped prop carrying ``"collision": False``: posed and
+        coloured on the stage, with no collider and no rigid body.
+
+        Built the same way a fixed cube is, then stripped of the two USD
+        Physics schemas that make it collide, so PhysX never sees it. Like
+        ``_spawn_visual_prop``'s referenced mesh, it is never added to
+        ``world.scene``, never run through ``apply_prop_physics``, and never
+        registered in ``_prop_specs``: a render prop has nothing for a scene
+        verb (``set_prop_pose``, ``randomize_props``, ...) to find by name,
+        the same split ``visual_props.py`` keeps for a visual prop.
+        """
+        import numpy as np
+
+        kwargs: dict[str, Any] = dict(
+            prim_path=prim_path,
+            name=name,
+            position=np.array(position),
+            orientation=np.array(orientation),
+            size=float(prop.get("size", 0.05)),
+        )
+        if prop.get("scale") is not None:
+            kwargs["scale"] = np.array([float(v) for v in prop["scale"]])
+        display = prop_display_color(prop)
+        if display is not None:
+            kwargs["color"] = np.array(display)
+        self._isaac.FixedCuboid(**kwargs)
+
+        get_prim = getattr(self._isaac, "get_prim_at_path", None)
+        prim = get_prim(prim_path) if get_prim is not None else None
+        if prim is not None and self._isaac.UsdPhysics is not None:
+            prim.RemoveAPI(self._isaac.UsdPhysics.CollisionAPI)
+            prim.RemoveAPI(self._isaac.UsdPhysics.RigidBodyAPI)
 
     def _cube_material(
         self, name: str, prop: Mapping[str, Any]
@@ -1147,6 +1250,41 @@ class SimManager:
             mesh_dims_m=mesh_dims_m,
             bounds_m=bounds_m,
         )
+
+    def materialise_components(self, components: Mapping[str, ComponentScenery]) -> None:
+        """Turn every configured workcell component's scenery into stage
+        prims (runs on the sim thread, before the initial world.reset).
+
+        One component at a time, in ``components``' iteration order:
+        ``scenery_props`` gives colliders first and render props after, and
+        that order is kept so a render prop's ``fit.collider`` always finds
+        its cube already spawned. Each primitive's pose comes back in the
+        component's own frame, so it is composed onto the component's world
+        frame (``spatial.compose_pose``) before it reaches ``_spawn_prop``.
+        """
+        for component, scenery in components.items():
+            for prop in scenery_props(
+                component,
+                scenery.model,
+                visuals=scenery.visuals,
+                geometries=scenery.geometries,
+                attrs=scenery.attrs,
+            ):
+                local_position = to_vec3(prop.get("position"))
+                local_orientation = prop_spawn_orientation(prop)
+                world_position, world_orientation = compose_pose(
+                    scenery.frame_position_m,
+                    scenery.frame_orientation_wxyz,
+                    local_position,
+                    local_orientation,
+                )
+                self._spawn_prop(
+                    {
+                        **prop,
+                        "position": world_position,
+                        "orientation_wxyz": world_orientation,
+                    }
+                )
 
     def _require_booted(self) -> None:
         if self._stopped:
@@ -1320,10 +1458,14 @@ class SimManager:
 
     def create_arm(self, name: str, attrs: dict[str, Any]) -> "ArmHandle":
         self._require_booted()
+        home_rad = _home_joints_rad(attrs)
         if self.mock:
 
             def factory():
-                return MockArmHandle(name, attrs)
+                handle = MockArmHandle(name, attrs)
+                if home_rad is not None:
+                    handle.home(home_rad)
+                return handle
         else:
 
             def factory():
@@ -1338,6 +1480,13 @@ class SimManager:
                     return handle
 
                 handle = self.run(_spawn, timeout=120.0, allow_during_initialization=True)
+                if home_rad is not None:
+                    handle.home(home_rad)
+                    LOGGER.info(
+                        "arm %r placed at its home pose (deg): %s",
+                        name,
+                        [round(math.degrees(v), 2) for v in home_rad],
+                    )
                 self.register_post_reset(lambda: handle.post_reset(), owner=name)
                 return handle
 
@@ -1736,7 +1885,7 @@ class SimManager:
         self.world.add_physics_callback(f"{name}_drive", handle._on_physics_step)
         return handle
 
-    def create_gripper(self, name: str, attrs: dict[str, Any]) -> "GripperHandle":
+    def create_gripper(self, name: str, attrs: dict[str, Any]) -> "JawGripperHandle":
         """Attach a gripper to an arm that is already in the sim.
 
         attrs: world, arm (Viam name of the arm it rides - validate_config
@@ -2043,6 +2192,121 @@ class SimManager:
         except Exception:
             LOGGER.exception("could not read the drive joint limits for %r", drive_joint)
         return None, None
+
+    def create_vacuum_gripper(self, name: str, attrs: dict[str, Any]) -> "VacuumGripperHandle":
+        """Attach a vacuum cup to an arm that is already in the sim.
+
+        attrs: world, arm (Viam name of the arm it rides), parent_prim
+        (default the arm's ee_prim, <arm prim>/wrist_3_link for a known UR
+        asset), local_position / local_orientation_rpy_deg (mount pose of
+        the tool on parent_prim, default identity), tcp_offset_m (default
+        VACUUM_TOOL's), max_payload_gap_m (default DEFAULT_MAX_PAYLOAD_GAP_M),
+        mock_attach_prop (mock only - the prop name grab() finds under the
+        cup)."""
+        self._require_booted()
+        arm_name = str(attrs.get("arm", ""))
+        arm_entry = self._handles.get(arm_name)
+        if arm_entry is None:
+            raise ValueError(
+                f"vacuum gripper {name!r}: arm {arm_name!r} is not attached to the sim "
+                '(set "arm" to the name of the isaac-sim arm component it rides)'
+            )
+        _arm_attrs, arm_handle = arm_entry
+        if not isinstance(arm_handle, ArmHandle):
+            raise ValueError(f"vacuum gripper {name!r}: {arm_name!r} is not an arm")
+
+        if self.mock:
+
+            def factory():
+                return MockVacuumHandle(name, attrs, arm_handle)
+        else:
+
+            def factory():
+                handle = self.run(
+                    lambda: self._create_vacuum_gripper_isaac(name, attrs, arm_handle),
+                    timeout=120.0,
+                    allow_during_initialization=True,
+                )
+                # mirrors create_gripper's GPU checklist item 6: re-weld the
+                # suction joint after a reset mid-pick, so it doesn't drop
+                # whatever it was holding.
+                self.register_post_reset(lambda: handle.post_reset(), owner=name)
+                return handle
+
+        return self._cached_handle(name, attrs, factory)
+
+    def _create_vacuum_gripper_isaac(
+        self, name: str, attrs: dict[str, Any], arm: "ArmHandle"
+    ) -> "IsaacVacuumHandle":
+        """Sim thread. Author the tool as plain USD geometry parented under
+        parent_prim, with no physics of its own.
+
+        The tool needs no rigid body and no collider. It is not what holds a
+        payload: grab() welds the payload straight to the arm LINK, and it
+        decides what to weld from prim poses rather than from contact. Giving
+        the tool physics instead costs twice. A collider sitting exactly where
+        the cup meets a box makes PhysX push the two apart while the weld holds
+        them together, which tilts the payload and drags the arm. And a rigid
+        body bolted on with its own fixed joint puts two maximal-coordinate
+        joints in series off the end of an articulation, which PhysX resolves
+        with an impulse big enough to throw the arm across the cell. As a plain
+        USD child of the link it simply inherits the link's transform, which is
+        all a tool has to do."""
+        from pxr import Gf, UsdGeom
+
+        if not isinstance(arm, IsaacArmHandle):
+            raise ValueError(
+                f"vacuum gripper {name!r}: arm handle for {attrs.get('arm')!r} "
+                "is not an Isaac arm handle"
+            )
+
+        arm_prim = arm._prim_path
+        parent_prim = attrs.get("parent_prim") or f"{arm_prim}/wrist_3_link"
+        tool_prim = f"{parent_prim}/{VACUUM_TOOL_PRIM}"
+        # The cube's prim origin is its CENTRE, so placing it at the flange
+        # would sink half of it into the link and leave the cup face floating
+        # half a tool-length past its own body. Hanging it by half its length
+        # puts the face exactly at tcp_offset_m, which is what the frame and
+        # the planner are told.
+        tool_half_length_m = float(VACUUM_TOOL["box_mm"][2]) / 2000.0
+        local_position = to_vec3(
+            attrs.get("local_position"), default=(0.0, 0.0, tool_half_length_m)
+        )
+        roll, pitch, yaw = to_vec3(attrs.get("local_orientation_rpy_deg"), default=(0.0, 0.0, 0.0))
+        local_quat = quat_from_euler_deg(roll, pitch, yaw)
+
+        stage = self._isaac.get_prim_at_path(parent_prim).GetStage()
+        cube = UsdGeom.Cube.Define(stage, tool_prim)
+        cube.CreateSizeAttr(1.0)
+        xform = UsdGeom.Xformable(cube)
+        xform.ClearXformOpOrder()
+        px, py, pz = (float(v) for v in local_position)
+        xform.AddTranslateOp().Set(Gf.Vec3d(px, py, pz))
+        quat_w, quat_x, quat_y, quat_z = (float(v) for v in local_quat)
+        xform.AddOrientOp().Set(Gf.Quatf(quat_w, Gf.Vec3f(quat_x, quat_y, quat_z)))
+        size_m = [float(v) / 1000.0 for v in VACUUM_TOOL["box_mm"]]
+        xform.AddScaleOp().Set(Gf.Vec3f(*size_m))
+        LOGGER.info(
+            "authored vacuum tool geometry %s under %s at local %s",
+            tool_prim,
+            parent_prim,
+            (px, py, pz),
+        )
+
+        cup_side_m = float(VACUUM_TOOL["cup_side_mm"]) / 1000.0
+        max_payload_gap_m = float(attrs.get("max_payload_gap_m", DEFAULT_MAX_PAYLOAD_GAP_M))
+        grab_delay_ms = float(attrs.get("grab_delay_ms", DEFAULT_GRAB_DELAY_MS))
+        handle = IsaacVacuumHandle(
+            self,
+            name,
+            tool_prim,
+            cup_side_m,
+            max_payload_gap_m,
+            tool_half_length_m,
+            grab_delay_ms=grab_delay_ms,
+        )
+        handle.parent_prim_path = parent_prim
+        return handle
 
     def _prepared_asset_layer(
         self, sdf: Any, usd_utils: Any, usd: str

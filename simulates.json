@@ -85,6 +85,18 @@
       "note": "the sim gripper needs the arm it is bolted to. The real entry carries that only as its frame parent, so the template copies it from there. The real model also covers the 2F-140, which differs from the 2F-85 in stroke and TCP offset, and nothing in the real entry's config distinguishes the two, so every resolved gripper becomes a 2F-85 with the 2F-85's measured TCP offset"
     },
     {
+      "real_model": "viam:robotiq:epick",
+      "api": "rdk:component:gripper",
+      "sim_model": "viam:isaac-sim-devin:vacuum",
+      "template": {
+        "arm": "$frame.parent"
+      },
+      "carry": {},
+      "verified": true,
+      "source": "https://github.com/viam-labs/robotiq-epick epick/gripper.go, read 2026-09-15",
+      "note": "the sim vacuum needs the arm it is bolted to, carried from the frame parent the same way the 2f-grippers row does. host, port, mode, max_pressure_pct, min_pressure_pct, timeout_ms and include_realsense configure a URCap socket connection and real pressure registers the sim has no equivalent for, so nothing carries. grab_delay_ms is not a real epick attribute at all, it belongs to this module's own simulated-epick-vacuum-gripper model, so it is not listed here even though the sim's own grab_delay_ms attribute matches its name and default"
+    },
+    {
       "real_model": "rdk:builtin:wheeled",
       "api": "rdk:component:base",
       "sim_model": "viam:isaac-sim-devin:base",

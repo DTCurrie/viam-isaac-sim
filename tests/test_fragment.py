@@ -676,3 +676,31 @@ def test_blue_detectors_saturation_cutoff_clears_the_arm_silhouette_and_admits_b
     detector = next(s for s in _fragment()["services"] if s["name"] == "blue-detector")
     cutoff = detector["attributes"]["saturation_cutoff_pct"]
     assert cell_layout.ARM_SILHOUETTE_MAX_SATURATION < cutoff < 0.42
+
+
+BLOCK_MATERIAL = "painted_wood"
+PAD_MATERIAL = "painted_mat"
+
+
+def test_every_block_and_pad_carries_its_bundled_pbr_material():
+    """The cell's look has to live in the fragment, not only in a machine's
+    own part config. A material assignment that exists on a running machine
+    and not here is lost the moment that machine is repurposed, which is how
+    these twenty-four went missing once already. Both sets ship with the
+    module (`materials.BUNDLED_MATERIAL_NAMES`), so naming them here costs no
+    machine-local asset."""
+    from isaac_module.materials import BUNDLED_MATERIAL_NAMES
+
+    props = _world_props()
+    expected = {
+        cell_layout.pool_block_name(color, index): BLOCK_MATERIAL
+        for color in cell_layout.BLOCK_COLORS
+        for index in range(1, cell_layout.POOL_BLOCKS_PER_COLOR + 1)
+    }
+    expected |= {cell_layout.pad_name(color): PAD_MATERIAL for color in cell_layout.BLOCK_COLORS}
+
+    for name, material in expected.items():
+        assert props[name].get("material") == material, (
+            f"{name} should carry the {material!r} material"
+        )
+        assert material in BUNDLED_MATERIAL_NAMES

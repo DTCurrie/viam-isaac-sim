@@ -50,10 +50,71 @@ DEFAULT_HOLDING_TOLERANCE_DEG = 2.0  # holding_tolerance_deg attrs default
 
 
 class GripperHandle:
-    """A parallel-jaw gripper riding an arm. Angles are radians on the drive
-    joint (finger_joint on the 2F-85), increasing from open toward closed.
-    The Viam edge (models/gripper.py) owns the [0,1]-normalised inputs and
-    degrees. All methods are safe from any thread."""
+    """What every gripper riding an arm has, whatever mechanism does the
+    holding: a command to take hold, a command to let go, and a way to ask
+    whether it is still moving and whether it has something. A parallel jaw
+    and a vacuum cup both answer these; only the jaw answers
+    ``JawGripperHandle``'s. The Viam edge (models/gripper.py,
+    models/vacuum.py) owns the normalised inputs and degrees. All methods are
+    safe from any thread."""
+
+    def grab(self) -> None:
+        """Command a hold - the jaw closes, the cup engages. Returns at
+        once; the caller polls ``poll_state`` for the outcome."""
+        raise NotImplementedError
+
+    def open(self) -> None:
+        """Command a let-go. Returns at once."""
+        raise NotImplementedError
+
+    def stop(self) -> None:
+        """Hold whatever state the mechanism is in now."""
+        raise NotImplementedError
+
+    def is_moving(self) -> bool:
+        """True while the mechanism is travelling. False once it has settled,
+        whether at its target or stopped short on an object."""
+        raise NotImplementedError
+
+    def is_holding(self) -> bool:
+        """True when the gripper has something. Each mechanism decides this
+        its own way: the jaw off a stall short of its target, the cup off
+        whether its attachment joint exists."""
+        raise NotImplementedError
+
+    def poll_state(self) -> tuple[bool, bool]:
+        """(is_moving(), is_holding()) in one round trip - a grab poll loop
+        reads both every iteration and this collapses that to a single call
+        instead of two."""
+        raise NotImplementedError
+
+    def dof_names(self) -> list[str]:
+        """The gripper's own DOF names as PhysX reports them after attach.
+        A mechanism with no joints of its own returns an empty list."""
+        raise NotImplementedError
+
+    def link_world_poses(self) -> dict[str, tuple[Vec3, Quat]]:
+        """World poses ((x,y,z) m, (w,x,y,z)) of the mount link the gripper is
+        bolted to ("parent") and of the gripper's own links, keyed by link
+        name - what the GPU checklists measure the TCP from. The mocks return
+        a synthetic set consistent with tcp_offset_m."""
+        raise NotImplementedError
+
+    def post_reset(self) -> None:
+        """Re-assert whatever a world reset drops, so a reset mid-pick doesn't
+        let go. No-op by default (a mock has no such state)."""
+        return None
+
+    def release(self) -> None:
+        """Drop callbacks. The prim stays attached to the arm."""
+        return None
+
+
+class JawGripperHandle(GripperHandle):
+    """The parallel-jaw extension. Angles are radians on the drive joint
+    (finger_joint on the 2F-85), increasing from open toward closed. A caller
+    that needs these has to narrow to this type first, which is the point of
+    the split: a vacuum handle has no jaw to ask about."""
 
     def jaw_limits(self) -> tuple[float, float]:
         """(open_rad, closed_rad) of the drive joint - the ends of the [0,1]
@@ -68,66 +129,20 @@ class GripperHandle:
         """Command the drive joint (clamped to jaw_limits). Returns at once."""
         raise NotImplementedError
 
-    def open(self) -> None:
-        raise NotImplementedError
-
-    def close(self) -> None:
-        raise NotImplementedError
-
-    def stop(self) -> None:
-        """Hold the current jaw angle."""
-        raise NotImplementedError
-
-    def is_moving(self) -> bool:
-        """True while the jaw is travelling. False once it has settled, whether
-        at its target or stalled on an object."""
-        raise NotImplementedError
-
-    def is_holding(self) -> bool:
-        """Stall predicate, version-neutral (no Isaac contact query):
-        the jaw is still AND |commanded - measured| > holding tolerance for
-        GRIPPER_HOLDING_STEPS consecutive steps - i.e. it closed onto
-        something short of its target. False while moving or when the jaw
-        reached its target."""
-        raise NotImplementedError
-
-    def poll_state(self) -> tuple[float, bool, bool]:
-        """(get_jaw(), is_moving(), is_holding()) in one round trip - grab()'s
-        poll loop reads all three every iteration and this collapses that to
-        a single call instead of three."""
-        raise NotImplementedError
-
-    def dof_names(self) -> list[str]:
-        """The gripper's own DOF names as PhysX reports them after attach
-        (finger_joint first). The mock returns its drive joint only."""
-        raise NotImplementedError
-
-    def link_world_poses(self) -> dict[str, tuple[Vec3, Quat]]:
-        """World poses ((x,y,z) m, (w,x,y,z)) of the mount link the gripper is
-        bolted to ("parent") and its two fingertip links ("left_inner_finger",
-        "right_inner_finger") - the GPU checklist's TCP measurement (item 4).
-        The mock returns a synthetic set consistent with tcp_offset_m."""
+    def poll_jaw_state(self) -> tuple[float, bool, bool]:
+        """(get_jaw(), is_moving(), is_holding()) in one round trip, for the
+        one caller that needs the angle alongside the predicates."""
         raise NotImplementedError
 
     def fingertip_world_bounds(self) -> dict[str, tuple[Vec3, Vec3]]:
         """World-space axis-aligned bounds (min, max) in meters of the two
         fingertip PAD meshes, keyed "left"/"right". The 2F-85 asset authors
         every link frame at the base, so link origins say nothing about where
-        the pads are - the mesh bounds do (item 4, see jaw_box_mm)."""
+        the pads are - the mesh bounds do (see jaw_box_mm)."""
         raise NotImplementedError
 
-    def post_reset(self) -> None:
-        """Re-command the last commanded jaw target after a world
-        reset, so a reset mid-pick doesn't drop the object. No-op by
-        default (the mock has no such state)."""
-        return None
 
-    def release(self) -> None:
-        """Drop callbacks. The prim stays attached to the arm."""
-        return None
-
-
-class IsaacGripperHandle(GripperHandle):
+class IsaacGripperHandle(JawGripperHandle):
     """Drives the finger_joint DOF of the ARM's articulation: the gripper is
     referenced with articulationEnabled=False, so its joints join the arm's
     DOF list and are addressed by name, never by position."""
@@ -233,7 +248,7 @@ class IsaacGripperHandle(GripperHandle):
     def open(self) -> None:
         self.set_jaw(self._open_rad)
 
-    def close(self) -> None:
+    def grab(self) -> None:
         self.set_jaw(self._closed_rad)
 
     def stop(self) -> None:
@@ -282,7 +297,7 @@ class IsaacGripperHandle(GripperHandle):
 
         return self._sim.run(_check)
 
-    def poll_state(self) -> tuple[float, bool, bool]:
+    def poll_jaw_state(self) -> tuple[float, bool, bool]:
         def _poll() -> tuple[float, bool, bool]:
             jaw = float(self._art.get_joint_positions(joint_indices=[self._idx])[0])
             gap, stalled = self._gap_and_stall()
@@ -291,6 +306,12 @@ class IsaacGripperHandle(GripperHandle):
             return jaw, moving, holding
 
         return self._sim.run(_poll)
+
+    def poll_state(self) -> tuple[bool, bool]:
+        """One round trip, since poll_jaw_state is already a single sim-thread
+        call and _gap_and_stall's progress window must only advance once."""
+        _jaw, moving, holding = self.poll_jaw_state()
+        return moving, holding
 
     def dof_names(self) -> list[str]:
         def _names() -> list[str]:
@@ -392,7 +413,7 @@ class IsaacGripperHandle(GripperHandle):
         return self._sim.run(_bounds)
 
 
-class MockGripperHandle(GripperHandle):
+class MockGripperHandle(JawGripperHandle):
     """The jaw interpolates at MockArmHandle.SPEED toward its target. With
     attrs["mock_object_width_m"] set, the jaw stalls at the angle where the
     jaws would touch that object (GRIPPER_OPEN_WIDTH_M at open_rad, linear
@@ -468,7 +489,7 @@ class MockGripperHandle(GripperHandle):
     def open(self) -> None:
         self.set_jaw(self.open_rad)
 
-    def close(self) -> None:
+    def grab(self) -> None:
         self.set_jaw(self.closed_rad)
 
     def stop(self) -> None:
@@ -495,7 +516,7 @@ class MockGripperHandle(GripperHandle):
             still_duration = now - arrival
             return still_duration >= GRIPPER_HOLDING_STEPS * MockArmHandle.STEP_S
 
-    def poll_state(self) -> tuple[float, bool, bool]:
+    def poll_jaw_state(self) -> tuple[float, bool, bool]:
         with self._lock:
             now = time.monotonic()
             jaw = self._jaw_at(now)
@@ -507,6 +528,10 @@ class MockGripperHandle(GripperHandle):
                 if abs(self._target - measured) > self.holding_tolerance_rad:
                     holding = (now - arrival) >= GRIPPER_HOLDING_STEPS * MockArmHandle.STEP_S
             return jaw, moving, holding
+
+    def poll_state(self) -> tuple[bool, bool]:
+        _jaw, moving, holding = self.poll_jaw_state()
+        return moving, holding
 
     def dof_names(self) -> list[str]:
         return [self._drive_joint]

@@ -40,6 +40,9 @@ from .sim_component_validation import validate_sim_component
 _TOLERANCE_RAD = SETTLE_TOL_RAD
 _WAYPOINT_TOLERANCE_RAD = math.radians(2.0)
 _WAYPOINT_DEADLINE_S = 10.0
+# How many waypoints in a row may stall before a trajectory is abandoned. One
+# stall is a dense path's normal residual; a run of them is a blocked arm.
+_MAX_CONSECUTIVE_WAYPOINT_STALLS = 5
 # observed settle drift past a limit is ~3e-5 deg (wrist_2 at
 # -360.00003). 0.01 covers it by orders of magnitude while a genuinely wrong
 # target still raises
@@ -108,6 +111,33 @@ def _pose_within_tolerance(
     dot = sum(a * b for a, b in zip(quat, target_quat, strict=True))
     angular_error = 2 * math.acos(min(1.0, abs(dot)))
     return position_error < _POSITION_SKIP_TOL_M and angular_error < _ANGULAR_SKIP_TOL_RAD
+
+
+def _wrapped_into_range(deg: float, min_deg: float, max_deg: float) -> float:
+    """``deg`` moved by whole turns into ``[min_deg, max_deg]`` when a turn
+    lands it there, else unchanged.
+
+    PhysX reports a revolute joint's accumulated angle, so an arm that keeps
+    rotating the same way reads past the range its kinematics declares: a
+    sorting run measured 4135.62 degrees on a joint limited to 360. The motion
+    service then plans from a state its own solver calls illegal and refuses
+    every later move through that joint. A whole turn is the identity for a
+    revolute joint's pose, so reporting the wrapped angle describes the same
+    physical arm in terms the planner accepts. A value no turn can bring into
+    range is left alone, since that is a genuinely out-of-range joint and the
+    caller needs to see it."""
+    turn = 360.0
+    if max_deg <= min_deg or min_deg <= deg <= max_deg:
+        return deg
+    fewest_turns = math.ceil((min_deg - deg) / turn)
+    most_turns = math.floor((max_deg - deg) / turn)
+    if fewest_turns > most_turns:
+        return deg
+    # a range wider than a turn accepts several, so take the one landing
+    # nearest the middle of the range rather than nearest whichever end
+    middle = (min_deg + max_deg) / 2.0
+    turns = min(range(fewest_turns, most_turns + 1), key=lambda k: abs(deg + k * turn - middle))
+    return deg + turns * turn
 
 
 def _stuck_joint_detail(
@@ -203,6 +233,15 @@ class IsaacArm(Arm, EasyResource):  # type: ignore[misc]  # SDK: API is Final on
         end_effector_prim (string) - prim whose pose, in the arm base frame, is
                                      reported by GetEndPosition (default
                                      <arm prim>/wrist_3_link for UR assets)
+        home_joints_deg ([deg])    - joint angles the arm is PLACED at on build,
+                                     rather than driven to, and that a world
+                                     reset returns it to. Unset = the asset's
+                                     own default, which for a UR is every joint
+                                     at zero, i.e. fully extended horizontally.
+                                     A cell with anything tall in front of the
+                                     arm wants this set, or the arm boots lying
+                                     across its own workspace and the first
+                                     move sweeps whatever is there aside.
         move_timeout_sec (float)   - max time to wait for a move (default 30)
         max_vel_degs_per_sec (float, positive) - default velocity cap for a move
                                      that carries no MoveOptions cap of its own
@@ -505,6 +544,7 @@ class IsaacArm(Arm, EasyResource):  # type: ignore[misc]  # SDK: API is Final on
         waypoints = list(positions)
         max_vel_rad_s = self._max_vel_rad_s(options)
         move_deadline_s = self._deadline_s(timeout)
+        consecutive_stalls = 0
         try:
             for i, wp in enumerate(waypoints):
                 targets = [math.radians(v) for v in wp.values]
@@ -522,29 +562,42 @@ class IsaacArm(Arm, EasyResource):  # type: ignore[misc]  # SDK: API is Final on
 
                 outcome = await asyncio.to_thread(handle.wait_for_settle, deadline_s, tolerance)
                 if outcome is SettleOutcome.REACHED:
+                    consecutive_stalls = 0
                     continue
 
                 current = await asyncio.to_thread(handle.get_joint_positions)
                 detail = _stuck_joint_detail(current, targets, tolerance)
-                if outcome is SettleOutcome.STALLED or last:
-                    # hold here rather than keep pushing at the unreachable target
-                    await asyncio.to_thread(handle.stop)
-                if outcome is SettleOutcome.STALLED:
+                stalled = outcome is SettleOutcome.STALLED
+                consecutive_stalls = consecutive_stalls + 1 if stalled else 0
+                # A constrained path arrives as dozens of waypoints a couple of
+                # millimetres apart. The arm reaches each one, goes still, and
+                # sits on a residual a little outside the loose waypoint
+                # tolerance, which is indistinguishable from a blocked arm at
+                # that one waypoint. Only a run of them tells the two apart, so
+                # an isolated stall flows on to the next waypoint and a run of
+                # them fails. Measured on a 46-waypoint 100 mm lift, where
+                # single waypoints stalled 2.5 degrees outside a 2 degree
+                # tolerance and the path was clear.
+                if not last and consecutive_stalls < _MAX_CONSECUTIVE_WAYPOINT_STALLS:
+                    self.logger.warning(
+                        "%s: waypoint %d/%d not reached, continuing (%s)",
+                        self.name,
+                        i + 1,
+                        len(waypoints),
+                        detail,
+                    )
+                    continue
+
+                # hold here rather than keep pushing at the unreachable target
+                await asyncio.to_thread(handle.stop)
+                if stalled:
                     raise ArmMoveStalledError(
                         f"arm {self.name} stalled at waypoint {i + 1}/{len(waypoints)} "
-                        f"(stuck joints: {detail})"
+                        f"({consecutive_stalls} consecutive, stuck joints: {detail})"
                     )
-                if last:
-                    raise ArmMoveTimeoutError(
-                        f"arm {self.name} did not reach final waypoint within "
-                        f"{deadline_s:.1f}s (stuck joints: {detail})"
-                    )
-                self.logger.warning(
-                    "%s: waypoint %d/%d not reached, continuing (%s)",
-                    self.name,
-                    i + 1,
-                    len(waypoints),
-                    detail,
+                raise ArmMoveTimeoutError(
+                    f"arm {self.name} did not reach final waypoint within "
+                    f"{deadline_s:.1f}s (stuck joints: {detail})"
                 )
         except asyncio.CancelledError:
             # a dropped RPC holds position instead of continuing toward
@@ -562,11 +615,16 @@ class IsaacArm(Arm, EasyResource):  # type: ignore[misc]  # SDK: API is Final on
                     break
                 _joint_id, min_deg, max_deg = limits[i]
                 # physics settle drifts micro-degrees past a limit; report the
-                # limit itself so the planner never plans from an illegal state
+                # limit itself so the planner never plans from an illegal
+                # state. Drift is checked before winding, since a joint resting
+                # a hair past its limit is at that limit, not a turn away.
                 if min_deg - _JOINT_LIMIT_TOLERANCE_DEG <= deg < min_deg:
-                    degrees[i] = min_deg
+                    deg = min_deg
                 elif max_deg < deg <= max_deg + _JOINT_LIMIT_TOLERANCE_DEG:
-                    degrees[i] = max_deg
+                    deg = max_deg
+                else:
+                    deg = _wrapped_into_range(deg, min_deg, max_deg)
+                degrees[i] = deg
         return JointPositions(values=degrees)
 
     async def stop(self, **kwargs) -> None:

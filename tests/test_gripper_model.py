@@ -144,10 +144,11 @@ def test_grab_cancelled_holds_jaw_position(world):
 
 
 class _FakeGripperHandle:
-    """Enough of GripperHandle to drive grab()'s poll loops. Tracks whether
-    each iteration went through poll_state (one to_thread hop) or one of the
-    old per-field reads (is_moving/is_holding/get_jaw), which should never
-    be called from grab() any more."""
+    """Enough of JawGripperHandle to drive grab()'s poll loops. Tracks whether
+    each iteration went through one of the batched polls (one to_thread hop)
+    or one of the per-field reads (is_moving/is_holding/get_jaw), which should
+    never be called from grab() any more. Both polls draw from one state
+    stream, since grab() makes exactly one of them per iteration."""
 
     def __init__(self, states: list[tuple[float, bool, bool]], closed_rad: float) -> None:
         self._states = iter(states)
@@ -155,7 +156,7 @@ class _FakeGripperHandle:
         self.poll_state_calls = 0
         self.unbatched_read_calls = 0
 
-    def close(self) -> None:
+    def grab(self) -> None:
         pass
 
     def stop(self) -> None:
@@ -164,9 +165,13 @@ class _FakeGripperHandle:
     def jaw_limits(self) -> tuple[float, float]:
         return (0.0, self._closed_rad)
 
-    def poll_state(self) -> tuple[float, bool, bool]:
+    def poll_jaw_state(self) -> tuple[float, bool, bool]:
         self.poll_state_calls += 1
         return next(self._states)
+
+    def poll_state(self) -> tuple[bool, bool]:
+        _jaw, moving, holding = self.poll_jaw_state()
+        return moving, holding
 
     def is_moving(self) -> bool:
         self.unbatched_read_calls += 1

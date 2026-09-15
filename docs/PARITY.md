@@ -74,6 +74,58 @@ The gripper's sim-only introspection verbs (`dof_names`, `jaw_deg`, `tcp_pose`) 
 world's `DoCommand`, keyed by the gripper's component name, so the gripper component itself
 carries no verb a real robotiq gripper could not answer.
 
+## Vacuum gripper
+
+Real driver: `viam:robotiq:epick` (`viam-labs/robotiq-epick`, `epick/gripper.go`), read at
+version `2.2.1` (2026-09-15). This module also ships `viam:robotiq:simulated-epick-vacuum-gripper`
+(`epick/simulated.go`), the module's own no-hardware fake gripper, distinct from this sim. The
+demo machine config configures that fake model directly, not `viam:robotiq:epick`, but the fake
+model's `grab_delay_ms` attribute is called out below since our sim's own `grab_delay_ms` matches
+it, not the real driver's attribute set.
+
+The repo has no `2.2.1` tag to read against, so the `gripper.go` line numbers below are against
+`main` as read on 2026-09-15, and `main` moves. The behaviors they cite were cross-checked against
+`strings` output on the shipped `2.2.1` binary itself: the register names, the JSON field tags,
+and the `max_pressure_pct must be 20-100, got %d` error string all matched. A line number that no
+longer lines up with `main` is `main` having moved, not this table being wrong.
+
+SDK abstract methods: 8 (`get_current_inputs`, `get_kinematics`, `go_to_inputs`, `grab`,
+`is_holding_something`, `is_moving`, `open`, `stop`). All eight are implemented.
+
+| Method | Real driver | Sim | Gap |
+| --- | --- | --- | --- |
+| `open` | Sets `ACT 1`, `GTO 0`, `POS 100`, `GTO 1` in sequence over the URCap socket, releasing vacuum, then polls `OBJ` for up to 5 seconds waiting for "no object", ignoring a poll timeout (`gripper.go:349`). | Removes the suction joint. Returns as soon as the release is commanded (`vacuum.py`). | A real cup bleeds its vacuum over some milliseconds and the driver polls for that to finish. The sim releases instantly, with no bleed-down to wait for. |
+| `grab` | Sends the `ACT`/`GTO`/`MOD`/`POS`/`SPE`/`FOR` register sequence to engage vacuum, then returns `false` immediately unless `extra["blocking"]` is `true`, in which case it waits `timeout_ms + 2000` ms (or 5000 ms with `timeout_ms` unset) for `OBJ` to report a grip and returns whether `OBJ` is 1 or 2 (`gripper.go:365`, `gripper.go:423`). | Authors a `UsdPhysics.FixedJoint` between the tool prim and whatever prop is under the cup, then waits `grab_delay_ms` before reporting whether one was found (`vacuum.py`). | The real driver is non-blocking by default and only waits for the register to settle when the caller opts in. The sim always waits out `grab_delay_ms` before returning. A real cup also builds vacuum over a pump cycle and can lose grip under load. A weld cannot slip, so the sim never reports a grip that fails after it is made. Phase 5's payload limit is where that gets a bound. |
+| `is_holding_something` | Reads the `OBJ` register (holding iff 1 or 2) and separately reads `POS`, treating a register below 90 as holding even if `OBJ` disagrees, with `meta` carrying `object_status`, `object_status_raw`, `pressure_register` and `pressure_kpa` (`gripper.go:439`). | Reports whether the suction joint exists, with `meta` carrying `engaged` and `holding` separately (`vacuum.py`). | The real driver reads two registers and can report holding on either signal. The sim's predicate is exact: a joint exists or it does not. Neither side's `meta` keys match the other's. |
+| `is_moving` | Returns whether the SDK operation manager has an operation running for this resource, not a physical-motion read (`gripper.go:484`). | Returns `true` while a commanded `grab()` is still inside its `grab_delay_ms` window, `false` outside it (`vacuum.py`). | The real driver's signal is "a client-issued operation is in flight". The sim's is a synthetic timer standing in for suction build time, since a weld has no travel to report. |
+| `get_current_inputs` | Not implemented. Always returns an empty slice (`gripper.go:492`). | `[1.0]` when the cup was last commanded to take hold, `[0.0]` after a release (`vacuum.py`). | Real driver never reports a current input. Sim always does, matching the parallel-jaw model where a jaw closed on nothing still reads at its commanded position. |
+| `go_to_inputs` | Not implemented. Returns the error `"GoToInputs not supported"` (`gripper.go:497`). | Validates exactly one value in `[0, 1]`, raising `INVALID_ARGUMENT` otherwise, then engages at or above 0.5 and releases below (`vacuum.py`). | The real driver does not support `GoToInputs` at all. The sim fully implements it, quantising the continuous range to the two points a binary actuator has. |
+| `get_kinematics` | Returns an embedded SVA model describing the cup's collision geometry and TCP offset (`gripper.go:490`). | A one-link, zero-joint SVA describing the tool's bounding box, centred on the tool axis relative to the TCP (`vacuum.py`). | Both sides synthesise a kinematics document, unlike the parallel-jaw real driver, which returns an error here. The two documents describe different, independently measured geometry. |
+| `stop` | Sets `GTO 0`, halting vacuum regulation (`gripper.go:483`). | Holds whatever state the cup is in. There is no travel to halt (`vacuum.py`). | No gap found in this pass. |
+| `DoCommand: get_status` | Returns `object_status_raw`, `pressure_register`, `pressure_kpa`, `fault_code` and `activation_status` read live from the URCap registers (`gripper.go:517`, `gripper.go:582`). | Not implemented. | real-only |
+| `DoCommand: get` | Reads a named register over the socket and returns its raw response string (`gripper.go:522`). | Not implemented. | real-only |
+| `DoCommand: set` | Writes one or more named registers over the socket (`gripper.go:533`). | Not implemented. | real-only |
+
+`host`, `port`, `mode`, `max_pressure_pct`, `min_pressure_pct`, `timeout_ms` and
+`include_realsense` are `viam:robotiq:epick`'s attributes (`gripper.go:40`), confirming the set
+recorded during planning. `host`, `port`, `mode`, `max_pressure_pct`, `min_pressure_pct` and
+`timeout_ms` configure the URCap socket connection and pressure registers, which the sim has no
+counterpart for since it has no socket and no real pressure to regulate. `include_realsense` also
+has no sim counterpart: it is a real-driver visualization flag with nothing in `simulates.json`'s
+`carry` mapping it onto. None of the seven carry into the sim, and `simulates.json` records that
+as an empty `carry` map rather than a mapping that does not exist. The sibling fake model's
+`grab_delay_ms` (`simulated.go:41`) has no equivalent on the real driver either, and is not a row
+here since it is not what `simulates.json`'s `real_model` names.
+
+The tool is geometry this module authors rather than an asset on the content server, so it has no
+`asset` attribute. `simulates.json` carries `arm` from `$frame.parent` instead.
+
+## Palletizer
+
+The palletizer is a service, not a driver, so it has no real counterpart and no rows here. Like
+the conductor, it is a client of the sim models. It drives its gripper only through the Viam
+Gripper API, which is what lets it drive either gripper model without knowing the mechanism.
+
 ## Camera
 
 Real driver: `viam:camera:realsense` (`viam-modules/viam-camera-realsense`, `src/module/realsense.hpp`).

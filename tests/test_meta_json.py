@@ -9,8 +9,10 @@ from isaac_module.models.base import IsaacBase
 from isaac_module.models.camera import IsaacCamera
 from isaac_module.models.conductor import IsaacConductor
 from isaac_module.models.gripper import IsaacGripper
+from isaac_module.models.palletizer import IsaacPalletizer
 from isaac_module.models.scene_finalizer import IsaacSceneFinalizer
 from isaac_module.models.sorter_sensor import SorterSensor
+from isaac_module.models.vacuum import IsaacVacuum
 from isaac_module.models.world import IsaacWorld
 
 META_PATH = Path(__file__).resolve().parent.parent / "meta.json"
@@ -21,8 +23,10 @@ REGISTERED_MODEL_CLASSES = (
     IsaacCamera,
     IsaacBase,
     IsaacGripper,
+    IsaacVacuum,
     IsaacConductor,
     SorterSensor,
+    IsaacPalletizer,
 )
 
 
