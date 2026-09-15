@@ -192,14 +192,16 @@ def documented_attributes(model: str) -> set[str]:
     return _table_keys_for_section(lines, SECTION_HEADINGS[model])
 
 
-def _table_keys_for_section(readme_lines: list[str], heading: str) -> set[str]:
+def _table_keys_for_section(
+    readme_lines: list[str], heading: str, table_prefix: str = "| attribute"
+) -> set[str]:
     start = next(i for i, line in enumerate(readme_lines) if line.strip() == heading)
     table_start = None
     for i in range(start, len(readme_lines)):
-        if readme_lines[i].startswith("| attribute"):
+        if readme_lines[i].startswith(table_prefix):
             table_start = i
             break
-    assert table_start is not None, f"no '| attribute |' table found under {heading!r}"
+    assert table_start is not None, f"no {table_prefix!r} table found under {heading!r}"
 
     keys: set[str] = set()
     # skip the header row and the "|---|---|---|" separator row
@@ -209,6 +211,25 @@ def _table_keys_for_section(readme_lines: list[str], heading: str) -> set[str]:
         first_cell = line.split("|")[1]
         keys.update(re.findall(r"`([a-zA-Z0-9_]+)`", first_cell))
     return keys
+
+
+def _table_rows_for_section(readme_lines: list[str], heading: str, table_prefix: str) -> list[str]:
+    """The raw first-column cell of every data row in the first table found
+    under ``heading`` whose header row starts with ``table_prefix``."""
+    start = next(i for i, line in enumerate(readme_lines) if line.strip() == heading)
+    table_start = None
+    for i in range(start, len(readme_lines)):
+        if readme_lines[i].startswith(table_prefix):
+            table_start = i
+            break
+    assert table_start is not None, f"no {table_prefix!r} table found under {heading!r}"
+
+    rows: list[str] = []
+    for line in readme_lines[table_start + 2 :]:
+        if not line.startswith("|"):
+            break
+        rows.append(line.split("|")[1].strip())
+    return rows
 
 
 @pytest.fixture(scope="module")
@@ -255,3 +276,16 @@ def test_readme_models_table_matches_meta_json(readme_lines: list[str]) -> None:
 
     manifest_models = {entry["model"] for entry in json.loads(META_JSON.read_text())["models"]}
     assert documented == manifest_models
+
+
+def test_readme_bundled_material_sets_table_matches_code(readme_lines: list[str]) -> None:
+    """The `#### Bundled material sets` table's `set` column must equal
+    `isaac_module.materials.BUNDLED_MATERIAL_NAMES`, and list exactly three
+    sets."""
+    from isaac_module.materials import BUNDLED_MATERIAL_NAMES
+
+    rows = _table_rows_for_section(readme_lines, "#### Bundled material sets", table_prefix="| set")
+    documented = {re.sub(r"[`|]", "", cell) for cell in rows}
+
+    assert len(rows) == 3
+    assert documented == set(BUNDLED_MATERIAL_NAMES)

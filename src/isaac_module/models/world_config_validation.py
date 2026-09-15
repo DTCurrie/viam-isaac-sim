@@ -7,6 +7,7 @@ from typing import cast
 from viam.proto.app.robot import ComponentConfig
 from viam.utils import ValueTypes
 
+from ..materials import material_spec
 from ..physics import PROP_PHYSICS_KEYS
 from ..sim_manager import prim_name
 from ..visual_props import FIT_TRUE, PROP_KINDS, VISUAL_PROP_KIND, VISUAL_REJECTED_KEYS
@@ -236,10 +237,25 @@ def validate_props(props: object) -> None:
                 raise ValueError(f"prop {label}: 'size' must be a positive number")
         if "fixed" in prop and not isinstance(prop["fixed"], bool):
             raise ValueError(f"prop {label}: 'fixed' must be a bool")
+        if "material" in prop:
+            if kind != "cube":
+                raise ValueError(f"prop {label}: 'material' is only valid on a \"cube\" prop")
+            _validate_material(f"prop {label}", prop["material"], prop.get("color"))
 
         _validate_orientation(label, prop)
         _validate_box_dims(label, prop)
         _validate_prop_physics(label, prop)
+
+
+def _validate_material(prefix: str, material: object, color: object) -> None:
+    """``material_spec`` as a validator: its ``ValueError`` re-raised with the
+    prop or ground label in front, so the message says where the key sits."""
+    if not isinstance(material, (str, Mapping)):
+        raise ValueError(f"{prefix}: material must be a set name or an object (got {material!r})")
+    try:
+        material_spec(material, color=color)  # type: ignore[arg-type]
+    except ValueError as exc:
+        raise ValueError(f"{prefix}: {exc}") from exc
 
 
 def _validate_number(label: str, key: str, value: object) -> float:
@@ -283,11 +299,13 @@ DEFAULT_DOME_TEXTURE_FORMAT = "latlong"
 # ground: the floor the module adds when it owns the stage (no usd_stage).
 # "grid" is today's default environment, "plane" a plain ground plane with the
 # plane-only keys below, "none" no floor at all.
+# material: a PBR material on the plane, `materials.material_spec`'s shape,
+# plane-only like the other look keys.
 GROUND_KINDS = ("grid", "plane", "none")
-_GROUND_KEYS = {"kind", "color", "size", "friction", "restitution", "matte"}
+_GROUND_KEYS = {"kind", "color", "size", "friction", "restitution", "matte", "material"}
 # matte: the plane is invisible to the camera but catches shadows, so the
 # dome texture's own floor shows through (RTX "Matte Object" post-process).
-_GROUND_PLANE_ONLY_KEYS = {"color", "size", "friction", "restitution", "matte"}
+_GROUND_PLANE_ONLY_KEYS = {"color", "size", "friction", "restitution", "matte", "material"}
 GROUND_DEFAULTS: dict[str, object] = {
     "kind": "grid",
     "color": [0.5, 0.5, 0.5],
@@ -338,6 +356,9 @@ def validate_ground(value: object) -> None:
     if "matte" in value:
         if not isinstance(value["matte"], bool):
             raise ValueError("ground.matte must be a bool")
+
+    if "material" in value:
+        _validate_material("ground", value["material"], value.get("color"))
 
     effective_kind = kind if kind is not None else GROUND_DEFAULTS["kind"]
     if effective_kind != "plane":

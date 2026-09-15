@@ -1,12 +1,23 @@
 from pathlib import Path
 
 import pytest
+from PIL import Image
 
 from isaac_module import assets
+from isaac_module.assets import resolve_asset
+from isaac_module.materials import (
+    BUNDLED_MATERIAL_NAMES,
+    MANIFEST_PATH,
+    MAX_MATERIAL_FILE_BYTES,
+    load_manifest,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 ASSETS_DIR = REPO_ROOT / "assets"
+MATERIALS_DIR = ASSETS_DIR / "materials"
 MAX_ASSET_BYTES = 5 * 1024 * 1024
+PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
+SQUARE_SIDES = {512, 1024}
 
 
 def test_resolve_module_scheme():
@@ -97,3 +108,61 @@ def test_makefile_tar_line_includes_assets():
     )
     args = tar_line.split()
     assert "assets" in args
+
+
+def test_bundled_material_manifest_names_match_constant():
+    manifest = load_manifest(MANIFEST_PATH)
+    assert set(manifest) == set(BUNDLED_MATERIAL_NAMES)
+
+
+def test_bundled_material_maps_exist_and_are_sized_png_files():
+    manifest = load_manifest(MANIFEST_PATH)
+    for material_set in manifest.values():
+        for scheme_path in material_set.maps.values():
+            path = Path(resolve_asset(scheme_path))
+            assert path.is_file(), f"{path} is not a regular file"
+            size = path.stat().st_size
+            assert 1 <= size <= MAX_MATERIAL_FILE_BYTES, f"{path} is {size} bytes"
+            with open(path, "rb") as f:
+                assert f.read(len(PNG_MAGIC)) == PNG_MAGIC, f"{path} is not a PNG"
+
+
+def test_bundled_material_maps_are_square_pillow_images():
+    manifest = load_manifest(MANIFEST_PATH)
+    for material_set in manifest.values():
+        for scheme_path in material_set.maps.values():
+            path = Path(resolve_asset(scheme_path))
+            with Image.open(path) as img:
+                width, height = img.size
+                assert width == height, f"{path} is not square ({img.size})"
+                assert width in SQUARE_SIDES, f"{path} side {width} not in {SQUARE_SIDES}"
+
+
+def test_bundled_material_sets_have_cc0_license_files():
+    manifest = load_manifest(MANIFEST_PATH)
+    for name in manifest:
+        license_path = MATERIALS_DIR / name / "LICENSE.md"
+        assert license_path.exists(), f"{license_path} is missing"
+        assert "CC0" in license_path.read_text()
+
+
+def test_painted_sets_carry_no_albedo_and_concrete_floor_does():
+    manifest = load_manifest(MANIFEST_PATH)
+    assert "albedo" not in manifest["painted_wood"].maps
+    assert "albedo" not in manifest["painted_mat"].maps
+    assert "albedo" in manifest["concrete_floor"].maps
+
+
+def test_material_set_directories_hold_only_manifest_maps_and_license():
+    manifest = load_manifest(MANIFEST_PATH)
+    for name, material_set in manifest.items():
+        set_dir = MATERIALS_DIR / name
+        expected = {Path(resolve_asset(p)).name for p in material_set.maps.values()}
+        expected.add("LICENSE.md")
+        actual = {p.name for p in set_dir.iterdir() if p.is_file()}
+        assert actual == expected, f"{set_dir}: {actual} != {expected}"
+
+
+def test_bundled_material_png_count_is_seven():
+    png_paths = list(MATERIALS_DIR.rglob("*.png"))
+    assert len(png_paths) == 7, [str(p) for p in png_paths]

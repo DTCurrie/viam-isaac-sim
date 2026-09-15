@@ -501,3 +501,194 @@ def test_visual_prop_with_non_string_usd_path_is_rejected():
     cfg = _config({"props": [{"name": "dressing", "type": "visual", "usd_path": 3}]})
     with pytest.raises(ValueError, match="must be a string"):
         IsaacWorld.validate_config(cfg)
+
+
+def test_prop_named_material_passes():
+    cfg = _config({"props": [{"name": "block", "type": "cube", "material": "painted_wood"}]})
+    IsaacWorld.validate_config(cfg)
+
+
+def test_prop_named_material_with_color_passes():
+    cfg = _config(
+        {
+            "props": [
+                {
+                    "name": "block",
+                    "type": "cube",
+                    "color": [0.2, 0.3, 0.4],
+                    "material": "painted_wood",
+                }
+            ]
+        }
+    )
+    IsaacWorld.validate_config(cfg)
+
+
+def test_prop_unknown_named_material_rejected():
+    cfg = _config({"props": [{"name": "block", "type": "cube", "material": "shiny_foo"}]})
+    with pytest.raises(ValueError, match="unknown material"):
+        IsaacWorld.validate_config(cfg)
+
+
+def test_prop_unknown_named_material_names_bundled_sets():
+    cfg = _config({"props": [{"name": "block", "type": "cube", "material": "shiny_foo"}]})
+    with pytest.raises(ValueError, match="painted_wood"):
+        IsaacWorld.validate_config(cfg)
+
+
+def test_prop_explicit_material_with_normal_map_passes():
+    cfg = _config(
+        {
+            "props": [
+                {
+                    "name": "block",
+                    "type": "cube",
+                    "material": {"normal": "module://materials/painted_wood/normal.png"},
+                }
+            ]
+        }
+    )
+    IsaacWorld.validate_config(cfg)
+
+
+def test_prop_explicit_material_with_tint_passes():
+    cfg = _config(
+        {
+            "props": [
+                {"name": "block", "type": "cube", "material": {"tint": [0.2, 0.2, 0.2]}},
+            ]
+        }
+    )
+    IsaacWorld.validate_config(cfg)
+
+
+def test_prop_explicit_material_empty_rejected():
+    cfg = _config({"props": [{"name": "block", "type": "cube", "material": {}}]})
+    with pytest.raises(ValueError, match="prop "):
+        IsaacWorld.validate_config(cfg)
+
+
+def test_prop_material_color_and_tint_both_set_rejected():
+    cfg = _config(
+        {
+            "props": [
+                {
+                    "name": "block",
+                    "type": "cube",
+                    "color": [0.2, 0.2, 0.2],
+                    "material": {"tint": [0.3, 0.3, 0.3]},
+                }
+            ]
+        }
+    )
+    with pytest.raises(ValueError, match="cannot both be set"):
+        IsaacWorld.validate_config(cfg)
+
+
+def test_prop_material_unknown_key_rejected():
+    cfg = _config({"props": [{"name": "block", "type": "cube", "material": {"shine": 1}}]})
+    with pytest.raises(ValueError, match="unknown key"):
+        IsaacWorld.validate_config(cfg)
+
+
+def test_prop_material_tint_above_one_rejected():
+    cfg = _config({"props": [{"name": "block", "type": "cube", "material": {"tint": [1.5, 0, 0]}}]})
+    with pytest.raises(ValueError, match="prop "):
+        IsaacWorld.validate_config(cfg)
+
+
+def test_prop_material_texture_scale_zero_rejected():
+    cfg = _config(
+        {
+            "props": [
+                {
+                    "name": "block",
+                    "type": "cube",
+                    "material": {"tint": [0.2, 0.2, 0.2], "texture_scale": [0, 1]},
+                }
+            ]
+        }
+    )
+    with pytest.raises(ValueError, match="texture_scale"):
+        IsaacWorld.validate_config(cfg)
+
+
+def test_prop_material_on_usd_prop_rejected():
+    cfg = _config(
+        {
+            "props": [
+                {
+                    "name": "block",
+                    "type": "usd",
+                    "usd_path": "omniverse://table.usd",
+                    "material": "painted_wood",
+                }
+            ]
+        }
+    )
+    with pytest.raises(ValueError, match='only valid on a "cube" prop'):
+        IsaacWorld.validate_config(cfg)
+
+
+def test_prop_material_on_visual_prop_rejected():
+    cfg = _config(
+        {
+            "props": [
+                {
+                    "name": "dressing",
+                    "type": "visual",
+                    "usd_path": "omniverse://dressing.usd",
+                    "material": "painted_wood",
+                }
+            ]
+        }
+    )
+    with pytest.raises(ValueError, match='only valid on a "cube" prop'):
+        IsaacWorld.validate_config(cfg)
+
+
+def test_ground_named_material_passes():
+    cfg = _config({"ground": {"kind": "plane", "material": "concrete_floor"}})
+    IsaacWorld.validate_config(cfg)
+
+
+def test_ground_material_on_grid_kind_rejected_as_plane_only():
+    cfg = _config({"ground": {"kind": "grid", "material": "concrete_floor"}})
+    with pytest.raises(ValueError, match="material"):
+        IsaacWorld.validate_config(cfg)
+
+
+def test_ground_color_beside_material_tint_rejected():
+    cfg = _config(
+        {
+            "ground": {
+                "kind": "plane",
+                "color": [0.5, 0.5, 0.5],
+                "material": {"tint": [1, 1, 1]},
+            }
+        }
+    )
+    with pytest.raises(ValueError, match="ground"):
+        IsaacWorld.validate_config(cfg)
+
+
+def test_prop_material_errors_are_labeled_prop():
+    cfg = _config({"props": [{"name": "block", "type": "cube", "material": {}}]})
+    with pytest.raises(ValueError) as excinfo:
+        IsaacWorld.validate_config(cfg)
+    assert str(excinfo.value).startswith("prop ")
+
+
+def test_ground_material_errors_are_labeled_ground():
+    cfg = _config(
+        {
+            "ground": {
+                "kind": "plane",
+                "color": [0.5, 0.5, 0.5],
+                "material": {"tint": [1, 1, 1]},
+            }
+        }
+    )
+    with pytest.raises(ValueError) as excinfo:
+        IsaacWorld.validate_config(cfg)
+    assert str(excinfo.value).startswith("ground")

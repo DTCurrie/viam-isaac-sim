@@ -29,6 +29,7 @@ from viam.logging import getLogger
 from . import FAMILY, NAMESPACE
 from .asset_catalog import KNOWN_ASSETS
 from .asset_catalog import UR_JOINT_NAMES as UR_JOINT_NAMES
+from .assets import REMOTE_ASSET_SCHEMES
 from .compat import IsaacAPI, caps, import_isaac, isaac_version
 from .errors import (
     CameraInitError,
@@ -63,6 +64,7 @@ from .handles.gripper import (
     MockGripperHandle,
 )
 from .handles.world import IsaacWorldHandle, MockWorldHandle, WorldHandle
+from .materials import MATERIAL_SPEC_KEY, build_material, material_spec, prop_display_color
 from .physics import ARM_SOLVER_POSITION_ITERATIONS, apply_prop_physics
 from .prim_paths import prim_name
 from .prop_scatter import (
@@ -192,7 +194,8 @@ class SimConfig:
     # props to spawn into the scene at boot. Each entry:
     #   {"type": "cube"|"usd", "name": ..., "position": [x,y,z] (m),
     #    "size": edge_m, "scale": [sx,sy,sz], "color": [r,g,b] 0-1,
-    #    "fixed": bool, "usd_path": ...}
+    #    "material": "<set>" | {albedo, normal, roughness, metallic, tint,
+    #    texture_scale}, "fixed": bool, "usd_path": ...}
     props: list[dict[str, Any]] = field(default_factory=list)
     # kit console verbosity (verbose/info/warning/error). Kit prints thousands
     # of lines at info, and viam-server records the module's stderr as
@@ -336,9 +339,6 @@ def dome_light_settings(dome: Mapping[str, Any], resolve: Callable[[str], str]) 
         "texture_format": dome.get("texture_format", DEFAULT_DOME_TEXTURE_FORMAT),
         "rotate_xyz": rotate_xyz,
     }
-
-
-REMOTE_ASSET_SCHEMES = ("http://", "https://", "omniverse://")
 
 
 def missing_texture_warning(
@@ -894,6 +894,7 @@ class SimManager:
                     z_position=0.0,
                     **ground_kwargs,
                 )
+                self._apply_ground_material(cfg.ground or {})
                 if ground_is_matte(cfg.ground):
                     self._make_ground_matte()
             except Exception:
@@ -904,6 +905,18 @@ class SimManager:
         # stage, an unowned usd_stage keeps its own floor.
         if not cfg.usd_stage:
             self.world.scene.add_default_ground_plane()
+
+    def _apply_ground_material(self, ground_config: Mapping[str, Any]) -> None:
+        """Bind ``ground.material`` to the plane just added (sim thread). An
+        explicit ``ground.color`` is the tint of a named set. A material that
+        fails to build leaves the plane's flat colour."""
+        ground_material = ground_config.get("material")
+        if ground_material is None:
+            return
+        spec = material_spec(ground_material, color=ground_config.get("color"))
+        material = build_material(self._isaac, name=GROUND_PLANE_NAME, spec=spec)
+        if material is not None:
+            self.world.scene.get_object(GROUND_PLANE_NAME).apply_visual_material(material)
 
     def _make_ground_matte(self) -> None:
         """Flag the ground plane's mesh prims as RTX "Matte Object"s so the
@@ -1002,8 +1015,13 @@ class SimManager:
         )
         if prop.get("scale") is not None:
             kwargs["scale"] = np.array([float(v) for v in prop["scale"]])
-        if prop.get("color") is not None:
-            kwargs["color"] = np.array([float(v) for v in prop["color"]])
+        display = prop_display_color(prop)
+        if display is not None:
+            kwargs["color"] = np.array(display)
+        spec, material = self._cube_material(name, prop)
+        if material is not None:
+            kwargs["visual_material"] = material
+            kwargs.pop("color", None)
         cls = self._isaac.FixedCuboid if prop.get("fixed") else self._isaac.DynamicCuboid
         self.world.scene.add(cls(**kwargs))
         # explicit material + offsets when the prop names them
@@ -1013,7 +1031,20 @@ class SimManager:
             "name": name,
             "position": tuple(position),
             "spawn_orientation": orientation,
+            MATERIAL_SPEC_KEY: spec,
         }
+
+    def _cube_material(
+        self, name: str, prop: Mapping[str, Any]
+    ) -> tuple[dict[str, Any] | None, Any | None]:
+        """The normalised ``material_spec`` record and the built material for a
+        cube prop, both ``None`` without a ``material`` key. A record with a
+        ``None`` material means the build failed and the cube keeps its flat
+        colour."""
+        if prop.get("material") is None:
+            return None, None
+        spec = material_spec(prop["material"], color=prop.get("color"))
+        return spec, build_material(self._isaac, name=name, spec=spec)
 
     def _spawn_visual_prop(
         self,

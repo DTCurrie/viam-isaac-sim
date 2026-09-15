@@ -255,11 +255,14 @@ backdrop through a 60 degree camera. Use a 4k or larger file under `data://`
 for a sharp backdrop.
 
 `ground` takes `{"kind": "grid" | "plane" | "none", "color": [r, g, b],
-"size": m, "friction": f, "restitution": r, "matte": bool}`. `kind` defaults
-to `"grid"`, today's default environment. `"plane"` adds a plain ground
-plane, with plane-only keys `color` (default `[0.5, 0.5, 0.5]`), `size`
-(default `100` m), `friction` (default `0.5`), `restitution` (default `0`)
-and `matte` (default `false`). `"none"` adds no floor at all, so a block
+"size": m, "friction": f, "restitution": r, "matte": bool, "material": ...}`.
+`kind` defaults to `"grid"`, today's default environment. `"plane"` adds a
+plain ground plane, with plane-only keys `color` (default `[0.5, 0.5, 0.5]`),
+`size` (default `100` m), `friction` (default `0.5`), `restitution` (default
+`0`), `matte` (default `false`) and `material` (the same shape as a prop's
+`material`, see "Bundled material sets" above). An explicit `ground.color`
+acts as the tint for a named set, and has no visible effect under
+`matte: true`. `"none"` adds no floor at all, so a block
 knocked off the table falls forever. `ground` is ignored with a warning when
 `usd_stage` is set, since the module adds a floor only to the stage it owns.
 When `matte` is true, the plane is invisible to the camera but still catches
@@ -320,6 +323,7 @@ Each entry in `props` is an object:
 | `size` | meters, the cube's base edge length, > 0 |
 | `scale` | `[sx,sy,sz]`, multiplies `size` per axis |
 | `color` | `[r,g,b]`, each in `[0, 1]` |
+| `material` | `"cube"` only. Either a bundled set name (see "Bundled material sets" below) or an object with `albedo`, `normal`, `roughness`, `metallic` (texture paths, the "Asset paths" schemes apply), `tint` (`[r,g,b]` each in `[0, 1]`, exclusive with `color`) and `texture_scale` (`[u,v]`, each > 0). A named set uses the prop's `color` as its tint |
 | `fixed` | bool, static rather than dynamic and physics-driven |
 | `usd_path` | required when `type` is `"usd"` or `"visual"`. A `"visual"` path may use `module://` or `data://` (see "Asset paths" below). An empty string on a `"visual"` skips the prop, so a fragment variable can default to no asset |
 | `fit` | `"visual"` only, exclusive with `scale`: `"true"` keeps the asset's authored size, `{"collider": "<cube prop name>"}` scales the asset's bounds onto that cube's `size x scale` box, per axis |
@@ -359,6 +363,22 @@ row per prop with `name`, `usd_path`, `resolved_path`, `position`, `scale`,
 `collider_dims_m`, `mesh_dims_m` and `bounds_m`. The last two are `null` in
 the mock, which has no stage to measure.
 
+#### Bundled material sets
+
+| set | maps | default texture_scale | look |
+|---|---|---|---|
+| `painted_wood` | `normal`, `roughness` | `[0.2, 0.2]` | satin painted wood grain in the prop's colour |
+| `painted_mat` | `normal`, `roughness` | `[0.3, 0.3]` | matte rubber mat in the prop's colour |
+| `concrete_floor` | `albedo`, `normal`, `roughness` | `[1.0, 1.0]` | light smooth concrete for a `ground` with `matte: false` |
+
+Every set is CC0 from ambientCG at 1k under `assets/materials/<set>/`, with a
+`LICENSE.md`. The two tinted sets carry no albedo map, so the six hue
+detectors see one flat hue per face. A local map path that is not on disk
+logs a warning, and the prop renders its flat colour. The binding sits on the
+prim, so a material survives `randomize_props`, `scatter_cell`, `clear_cell`
+and `reset`. `texture_scale` stretches with a rescaled prim. The
+`texture_scale` defaults are first guesses that the GPU pass tunes.
+
 The GrabCAD table asset the converter is built for is not committed to this
 repository. Read GrabCAD's terms before committing or publishing a converted
 copy in the module. The converted USD used on the GPU VM lives under
@@ -383,6 +403,12 @@ copy in the module. The converted USD used on the GPU VM lives under
 * at most one of `orientation_rpy_deg` / `orientation_wxyz` may be set, and
   `orientation_wxyz` must not be all zero
 * `box_dims` values must be positive
+* `material` is `"cube"` only
+* a named `material` must be a bundled set (see "Bundled material sets" above)
+* the object form of `material` needs at least one map or a `tint`
+* `color` and `material.tint` are exclusive
+* `material.tint` values must be in `[0, 1]`
+* `material.texture_scale` values must be positive
 
 The world also supports `DoCommand`:
 

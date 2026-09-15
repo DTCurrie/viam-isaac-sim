@@ -49,6 +49,8 @@ class IsaacAPI(Protocol):
     WheeledRobot: Any
     DifferentialController: Any
     PhysicsMaterial: Any
+    OmniPBR: Any
+    PreviewSurface: Any
     PhysxSchema: Any
     UsdPhysics: Any
 
@@ -120,6 +122,16 @@ def import_isaac() -> IsaacAPI:
         ns.PhysicsMaterial = PhysicsMaterial
     except ImportError:
         ns.PhysicsMaterial = None
+    # visual materials (materials.py builds OmniPBR; PreviewSurface is the
+    # flat-colour shader the cuboids carry by default), None when absent
+    try:
+        from isaacsim.core.api.materials import OmniPBR, PreviewSurface
+
+        ns.OmniPBR = OmniPBR
+        ns.PreviewSurface = PreviewSurface
+    except ImportError:
+        ns.OmniPBR = None
+        ns.PreviewSurface = None
     try:
         from pxr import PhysxSchema, UsdPhysics
 

@@ -43,6 +43,7 @@ into. Read it before you add a model or move a file.
 | `src/isaac_module/prim_paths.py` | 37 | Prim naming and the default end-effector and base prim paths. |
 | `src/isaac_module/assets.py` | 59 | `module://` and `data://` asset path schemes for textures, HDRIs and USD files named in world config. |
 | `src/isaac_module/visual_props.py` | 151 | Visual-only props: the `visual` kind's constants, the fit-scale arithmetic and the record shape `status.visual_props` lists. |
+| `src/isaac_module/materials.py` | 411 | PBR materials for cube props and the ground plane: the manifest loader, the config-to-OmniPBR input mapping and the one Isaac binder. |
 | `src/isaac_module/component_diagnostics.py` | 144 | The bodies of the world's per-component introspection verbs. |
 | `src/isaac_module/compat.py` | 241 | The one place Isaac Sim is imported, the `IsaacAPI` protocol and the 5.0 capability row. |
 | `src/isaac_module/spatial.py` | 237 | Quaternion, orientation-vector and pose composition math. |

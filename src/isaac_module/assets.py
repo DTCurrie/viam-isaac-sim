@@ -19,6 +19,8 @@ from pathlib import Path
 
 MODULE_SCHEME = "module://"
 DATA_SCHEME = "data://"
+# paths Isaac's own resolver fetches; nothing local checks their existence
+REMOTE_ASSET_SCHEMES = ("http://", "https://", "omniverse://")
 ASSETS_DIR_NAME = "assets"
 # mirrors run.sh: the module data directory when viam-server does not set one
 DEFAULT_DATA_ROOT = "/opt/viam-isaac-sim"

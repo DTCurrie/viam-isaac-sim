@@ -1,8 +1,9 @@
-"""GPU checklist for the photoreal-workcell HDRI environment (phase 1) and
-fixture-table mesh (phase 2) work. Six items per phase, verified against a
-running world on the GPU machine, or against the module's in-process mock
-with ``--mock`` for the parts that only need a duck-typed world/camera pair.
-Pass ``--phase 1`` or ``--phase 2`` (default) to pick which set runs.
+"""GPU checklist for the photoreal-workcell HDRI environment (phase 1),
+fixture-table mesh (phase 2), and PBR materials (phase 3) work. Six or seven
+items per phase, verified against a running world on the GPU machine, or
+against the module's in-process mock with ``--mock`` for the parts that only
+need a duck-typed world/camera pair. Pass ``--phase 1``, ``--phase 2`` or
+``--phase 3`` (default) to pick which set runs.
 
 Phase-1 checklist items (`.claude/plans/photoreal-workcell/phase-1-hdri-environment.md`):
 
@@ -46,6 +47,25 @@ Phase-2 checklist items (`.claude/plans/photoreal-workcell/phase-2-table-mesh.md
    cost of three instances; note whether the three references share one
    asset load)
 
+Phase-3 checklist items (`.claude/plans/photoreal-workcell/phase-3-pbr-materials.md`):
+
+0. run `examples/list_nvidia_materials.py` with Isaac's python on the VM
+   (`$ISAAC_SIM_PATH/python.sh examples/list_nvidia_materials.py --out
+   nvidia_materials_listing.json`) and record the listing in the phase notes;
+   the bundled ambientCG sets stay the default unless a hosted wood and
+   rubber set exists
+1. six pads with `painted_mat`, eighteen blocks with `painted_wood` in their
+   colours: visible grain and roughness in the scene camera
+2. re-measure the six rendered hues with `sample_color` (CAM-15) as in phase
+   1, refresh `RENDERED_BLOCK_HUE_DEG`, the saturation floor and the six
+   `detect-color*` defaults, record old and new; the yellow/orange
+   conflation stays unless the measurement separates them by more than 15°,
+   in which case record it and leave the routing alone
+3. `randomize_props` with a size range: rescaled blocks keep their material
+4. the seed-20 sorting loop ends `complete` at the baseline
+5. a bogus texture path on one block logs and falls back to the flat colour
+6. cost: cold and warm `ready` times and the 10 s step rate vs phase 2
+
 Usage (real machine)::
 
     python examples/gpu_checklist_photoreal.py --address <machine-address> \\
@@ -77,7 +97,7 @@ import time
 from collections.abc import Mapping, Sequence
 from typing import Any, Protocol
 
-from gpu_checklist_world import WorldApi, run_step_rate_measurement
+from gpu_checklist_world import DEFAULT_RANDOMIZE_REGION_MM, WorldApi, run_step_rate_measurement
 
 CHECKLIST_ITEMS: tuple[str, ...] = (
     "1. boot with the bundled 1k HDRI via `module://` - the scene camera's `get_image` shows "
@@ -117,6 +137,28 @@ PHASE_2_ITEMS: tuple[str, ...] = (
     "cost of three instances; note whether the three references share one asset "
     "load)",
 )
+
+PHASE_3_ITEMS: tuple[str, ...] = (
+    "0. run `examples/list_nvidia_materials.py` with Isaac's python on the VM "
+    "(`$ISAAC_SIM_PATH/python.sh examples/list_nvidia_materials.py --out "
+    "nvidia_materials_listing.json`) and record the listing in the phase notes; the bundled "
+    "ambientCG sets stay the default unless a hosted wood and rubber set exists.",
+    "1. six pads with `painted_mat`, eighteen blocks with `painted_wood` in their colours: "
+    "visible grain and roughness in the scene camera.",
+    "2. re-measure the six rendered hues with `sample_color` (CAM-15) as in phase 1, refresh "
+    "`RENDERED_BLOCK_HUE_DEG`, the saturation floor and the six `detect-color*` defaults, "
+    "record old and new; the yellow/orange conflation stays unless the measurement separates "
+    "them by more than 15°, in which case record it and leave the routing alone.",
+    "3. `randomize_props` with a size range: rescaled blocks keep their material.",
+    "4. the seed-20 sorting loop ends `complete` at the baseline.",
+    "5. a bogus texture path on one block logs and falls back to the flat colour.",
+    "6. cost: cold and warm `ready` times and the 10 s step rate vs phase 2.",
+)
+
+# phase-3 item 3's randomize_props seed and size range (full cube edge, mm);
+# distinct from phase 1's block hue re-measurement and the sorter's seed 20
+PHASE_3_RANDOMIZE_SEED = 40
+PHASE_3_SIZE_RANGE_MM = (40.0, 80.0)
 
 DEFAULT_STEP_RATE_WINDOW_S = 10.0
 DEFAULT_READY_POLL_S = 0.5
@@ -336,9 +378,12 @@ async def _run_confirmation_item(world: WorldApi, index: int) -> None:
 
 
 async def _run_hue_item(
-    world: WorldApi, camera: CameraApi, regions: Mapping[str, tuple[int, int, int, int]] | None
+    world: WorldApi,
+    camera: CameraApi,
+    regions: Mapping[str, tuple[int, int, int, int]] | None,
+    heading: str = CHECKLIST_ITEMS[3],
 ) -> None:
-    print(CHECKLIST_ITEMS[3])
+    print(heading)
     if regions is None:
         print(
             "  skipped: no --regions file given (pass --regions <path> with a pixel box "
@@ -461,6 +506,112 @@ async def _run_phase_2(
     )
 
 
+def _run_phase_3_listing_item() -> None:
+    print(PHASE_3_ITEMS[0])
+    print(
+        "  human: on the GPU machine, run `$ISAAC_SIM_PATH/python.sh "
+        "examples/list_nvidia_materials.py --out nvidia_materials_listing.json` and record its "
+        "listing in the phase notes"
+    )
+
+
+async def _run_phase_3_material_item(world: WorldApi) -> None:
+    from isaac_module.cell_layout import (
+        BLOCK_COLORS,
+        POOL_BLOCKS_PER_COLOR,
+        pad_name,
+        pool_block_name,
+    )
+
+    print(PHASE_3_ITEMS[1])
+    print("  human: set by hand in the props config:")
+    for color in BLOCK_COLORS:
+        print(f'    "{pad_name(color)}": {{"material": "painted_mat"}}')
+    for color in BLOCK_COLORS:
+        for index in range(1, POOL_BLOCKS_PER_COLOR + 1):
+            print(f'    "{pool_block_name(color, index)}": {{"material": "painted_wood"}}')
+    status = await world.do_command({"command": "status"})
+    print(f"  status: {json.dumps(status, default=str, sort_keys=True)}")
+    geometries = await world.do_command({"command": "prop_geometries"})
+    print(f"  prop count: {len(geometries.get('geometries') or [])}")
+
+
+async def _run_phase_3_randomize_item(world: WorldApi) -> None:
+    from isaac_module.cell_layout import BLOCK_COLORS, POOL_BLOCKS_PER_COLOR, pool_block_name
+
+    print(PHASE_3_ITEMS[3])
+    pool_names = [
+        pool_block_name(color, index)
+        for color in BLOCK_COLORS
+        for index in range(1, POOL_BLOCKS_PER_COLOR + 1)
+    ]
+    before = (await world.do_command({"command": "prop_geometries"}))["geometries"]
+    # one block per colour, not the whole pool: the scatter region has no
+    # layout for 18 blocks drawn up to PHASE_3_SIZE_RANGE_MM at the default
+    # separation (GPU 2026-09-15: "no layout after 50 layout attempts"), and
+    # six rescaled blocks show whether a material survives the rescale just
+    # as well as eighteen
+    first_per_colour: dict[str, str] = {}
+    for geometry in before:
+        name = str(geometry["name"])
+        if name in pool_names:
+            first_per_colour.setdefault(name.rsplit("_", 1)[0], name)
+    present_names = sorted(first_per_colour.values())
+    if not present_names:
+        print(
+            "  skipped: no pool blocks (`block_<color>_<n>`) in prop_geometries; this world "
+            "has none configured"
+        )
+        return
+    before_dims = {str(g["name"]): g["box_dims_mm"] for g in before if g["name"] in present_names}
+    print(f"  before: {json.dumps(before_dims, default=str, sort_keys=True)}")
+    await world.do_command(
+        {
+            "command": "randomize_props",
+            "names": present_names,
+            "region": [list(DEFAULT_RANDOMIZE_REGION_MM[0]), list(DEFAULT_RANDOMIZE_REGION_MM[1])],
+            "seed": PHASE_3_RANDOMIZE_SEED,
+            "size_range_mm": list(PHASE_3_SIZE_RANGE_MM),
+        }
+    )
+    after = (await world.do_command({"command": "prop_geometries"}))["geometries"]
+    after_dims = {str(g["name"]): g["box_dims_mm"] for g in after if g["name"] in present_names}
+    print(f"  after: {json.dumps(after_dims, default=str, sort_keys=True)}")
+    print("  human: confirm the grain still shows on the rescaled blocks")
+
+
+async def _run_phase_3_confirmation_item(world: WorldApi, heading: str, instructions: str) -> None:
+    print(heading)
+    print(f"  human: {instructions}")
+    status = await world.do_command({"command": "status"})
+    print(f"  status: {json.dumps(status, default=str, sort_keys=True)}")
+
+
+async def _run_phase_3(
+    world: WorldApi,
+    camera: CameraApi,
+    args: argparse.Namespace,
+    regions: Mapping[str, tuple[int, int, int, int]] | None,
+) -> None:
+    _run_phase_3_listing_item()
+    await _run_phase_3_material_item(world)
+    await _run_hue_item(world, camera, regions, heading=PHASE_3_ITEMS[2])
+    await _run_phase_3_randomize_item(world)
+    await _run_phase_3_confirmation_item(
+        world,
+        PHASE_3_ITEMS[4],
+        f'run {{"command": "start", "loops": 1, "seed": 20}} on '
+        f"`{DEFAULT_BLOCK_SORTER_NAME}` and confirm it ends `complete` at the baseline",
+    )
+    await _run_phase_3_confirmation_item(
+        world,
+        PHASE_3_ITEMS[5],
+        "set a bogus texture path on one block, confirm the module logs and falls back to the "
+        "flat colour",
+    )
+    await _run_cost_item(world, heading=f"{PHASE_3_ITEMS[6]}\n  human: compare against phase 2")
+
+
 async def _run(
     world: WorldApi,
     camera: CameraApi,
@@ -469,8 +620,10 @@ async def _run(
 ) -> None:
     if args.phase == 1:
         await _run_phase_1(world, camera, regions)
-    else:
+    elif args.phase == 2:
         await _run_phase_2(world, camera, args)
+    else:
+        await _run_phase_3(world, camera, args, regions)
 
 
 def _ensure_mock_sim_booted() -> Any:
@@ -560,9 +713,9 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     parser.add_argument(
         "--phase",
         type=int,
-        choices=(1, 2),
-        default=2,
-        help="which phase's checklist items to run (default: 2)",
+        choices=(1, 2, 3),
+        default=3,
+        help="which phase's checklist items to run (default: 3)",
     )
     parser.add_argument(
         "--geometry-baseline",

@@ -1,0 +1,20 @@
+{
+  "painted_wood": {
+    "maps": { "normal": "normal.png", "roughness": "roughness.png" },
+    "texture_scale": [0.2, 0.2],
+    "source": "https://ambientcg.com/a/Wood051",
+    "license": "CC0 1.0"
+  },
+  "painted_mat": {
+    "maps": { "normal": "normal.png", "roughness": "roughness.png" },
+    "texture_scale": [0.3, 0.3],
+    "source": "https://ambientcg.com/a/Rubber004",
+    "license": "CC0 1.0"
+  },
+  "concrete_floor": {
+    "maps": { "albedo": "albedo.png", "normal": "normal.png", "roughness": "roughness.png" },
+    "texture_scale": [1.0, 1.0],
+    "source": "https://ambientcg.com/a/Concrete016",
+    "license": "CC0 1.0"
+  }
+}

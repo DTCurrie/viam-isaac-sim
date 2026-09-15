@@ -8,6 +8,7 @@ import numpy as np
 from viam.logging import getLogger
 
 from ..assets import resolve_asset
+from ..materials import MATERIAL_SPEC_KEY, material_spec, prop_display_color
 from ..prim_paths import prim_name
 from ..prop_scatter import (
     DEFAULT_MIN_SEPARATION_M,
@@ -218,12 +219,16 @@ class MockWorldHandle(WorldHandle):
             raise ValueError(f"prop {name!r} already exists")
         position = to_vec3(prop.get("position"))
         orientation = prop_spawn_orientation(prop)
+        material = prop.get("material")
         self._registry[name] = {
             "spawn": dict(prop),
             "spawn_position": position,
             "spawn_orientation": orientation,
             "position": position,
             "orientation": orientation,
+            MATERIAL_SPEC_KEY: material_spec(material, color=prop.get("color"))
+            if material is not None
+            else None,
         }
 
     def _register_visual(self, prop: dict[str, Any]) -> None:
@@ -292,16 +297,13 @@ class MockWorldHandle(WorldHandle):
         out: list[PropGeometry] = []
         for name, entry in self._registry.items():
             spawn = entry["spawn"]
-            color = spawn.get("color")
             out.append(
                 PropGeometry(
                     name=name,
                     box_dims_m=prop_box_dims(spawn),
                     position_m=entry["position"],
                     orientation_wxyz=entry["orientation"],
-                    color=(float(color[0]), float(color[1]), float(color[2]))
-                    if color is not None
-                    else None,
+                    color=prop_display_color(spawn),
                     fixed=bool(spawn.get("fixed", False)),
                 )
             )
@@ -478,16 +480,13 @@ class IsaacWorldHandle(WorldHandle):
             out: list[PropGeometry] = []
             for name, spec in self._sim._prop_specs.items():
                 pos, quat = self._sim._isaac.SingleXFormPrim(f"/World/{name}").get_world_pose()
-                color = spec.get("color")
                 out.append(
                     PropGeometry(
                         name=name,
                         box_dims_m=prop_box_dims(spec),
                         position_m=(float(pos[0]), float(pos[1]), float(pos[2])),
                         orientation_wxyz=_as_quat(quat),
-                        color=(float(color[0]), float(color[1]), float(color[2]))
-                        if color is not None
-                        else None,
+                        color=prop_display_color(spec),
                         fixed=bool(spec.get("fixed", False)),
                     )
                 )

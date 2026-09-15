@@ -354,9 +354,10 @@ class _FakeXForm:
 
     _STORE: ClassVar[dict[str, tuple[np.ndarray, np.ndarray]]] = {}
 
-    def __init__(self, prim_path: str, name: str = "", position=None, orientation=None, **_ignored):
+    def __init__(self, prim_path: str, name: str = "", position=None, orientation=None, **kwargs):
         self.prim_path = prim_path
         self.name = name
+        self.kwargs = kwargs
         if position is not None or orientation is not None:
             self.set_world_pose(position=position, orientation=orientation)
         elif prim_path not in self._STORE:
