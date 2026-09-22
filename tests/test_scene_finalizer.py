@@ -9,6 +9,10 @@ from viam.utils import dict_to_struct
 import isaac_module.models.scene_finalizer as finalizer_model
 from isaac_module.models.scene_finalizer import IsaacSceneFinalizer
 
+# reconfigure materialises on a background thread now, so every assertion
+# below has to join it first rather than race it
+WAIT_S = 10.0
+
 
 class _FakeWorkcellComponent:
     """Stands in for a viam:workcell-components dependency: answers
@@ -26,7 +30,16 @@ class _FakeWorkcellComponent:
             return {"model": self._model}
         if "get_attributes" in command:
             return {"pose": {"x": 200.0, "y": 500.0, "z": 200.0}}
-        return {"visuals": []}
+        return {
+            "visuals": [
+                {
+                    "type": "frame",
+                    "label": "pallet/group",
+                    "parent_frame": "world",
+                    "pose": {"x": 200.0, "y": 500.0, "z": 200.0},
+                }
+            ]
+        }
 
     async def get_geometries(self, **kwargs: Any) -> list[Any]:
         return []
@@ -46,6 +59,7 @@ def _config(name: str, attrs: dict, depends_on: list[str] | None = None) -> Comp
 
 def _sim_manager_stub(calls: list) -> SimpleNamespace:
     return SimpleNamespace(
+        materialise_frame_system=lambda props: calls.append(("frame_system", props)),
         materialise_components=lambda components: calls.append(("materialise", components)),
         finalize_scene=lambda: calls.append(("finalize", None)),
     )
@@ -56,9 +70,10 @@ def test_new_finalizes_the_scene_once_and_carries_the_configured_name(monkeypatc
     monkeypatch.setattr(finalizer_model.SimManager, "get", lambda: _sim_manager_stub(calls))
 
     finalizer = IsaacSceneFinalizer.new(_config("scene-ready", {}, depends_on=["isaac-world"]), {})
+    finalizer.wait_until_materialised(WAIT_S)
 
     assert finalizer.name == "scene-ready"
-    assert [call[0] for call in calls] == ["materialise", "finalize"]
+    assert [call[0] for call in calls] == ["frame_system", "materialise", "finalize"]
 
 
 def test_reconfigure_finalizes_the_scene_again(monkeypatch):
@@ -66,9 +81,19 @@ def test_reconfigure_finalizes_the_scene_again(monkeypatch):
     monkeypatch.setattr(finalizer_model.SimManager, "get", lambda: _sim_manager_stub(calls))
 
     finalizer = IsaacSceneFinalizer.new(_config("scene-ready", {}, depends_on=["isaac-world"]), {})
+    finalizer.wait_until_materialised(WAIT_S)
+    finalizer.wait_until_materialised(WAIT_S)
     finalizer.reconfigure(_config("scene-ready", {}, depends_on=["isaac-world"]), {})
+    finalizer.wait_until_materialised(WAIT_S)
 
-    assert [call[0] for call in calls] == ["materialise", "finalize", "materialise", "finalize"]
+    assert [call[0] for call in calls] == [
+        "frame_system",
+        "materialise",
+        "finalize",
+        "frame_system",
+        "materialise",
+        "finalize",
+    ]
 
 
 def test_validate_config_returns_depends_on_as_required_dependencies():
@@ -100,10 +125,11 @@ def test_reconfigure_materialises_workcell_component_dependencies_before_finaliz
     }
     config = _config("scene-ready", {}, depends_on=["isaac-world", "pallet"])
 
-    IsaacSceneFinalizer.new(config, dependencies)
+    IsaacSceneFinalizer.new(config, dependencies).wait_until_materialised(WAIT_S)
 
-    assert [call[0] for call in calls] == ["materialise", "finalize"]
-    materialised = calls[0][1]
+    assert [call[0] for call in calls] == ["frame_system", "materialise", "finalize"]
+    # calls[0] is the frame-system colliders, calls[1] the workcell scenery
+    materialised = calls[1][1]
     assert list(materialised) == ["pallet"]
     assert materialised["pallet"].frame_position_m == pytest.approx((0.2, 0.5, 0.2))
 
@@ -116,10 +142,12 @@ def test_reconfigure_with_no_workcell_component_dependencies_materialises_nothin
     )
     dependencies = {world_name: _FakeWorldComponent()}
 
-    IsaacSceneFinalizer.new(_config("scene-ready", {}, depends_on=["isaac-world"]), dependencies)
+    IsaacSceneFinalizer.new(
+        _config("scene-ready", {}, depends_on=["isaac-world"]), dependencies
+    ).wait_until_materialised(WAIT_S)
 
-    assert [call[0] for call in calls] == ["materialise", "finalize"]
-    assert calls[0][1] == {}
+    assert [call[0] for call in calls] == ["frame_system", "materialise", "finalize"]
+    assert calls[1][1] == {}
 
 
 def test_reconfigure_with_no_dependencies_at_all_only_finalizes_after_an_empty_materialise(
@@ -128,7 +156,9 @@ def test_reconfigure_with_no_dependencies_at_all_only_finalizes_after_an_empty_m
     calls: list = []
     monkeypatch.setattr(finalizer_model.SimManager, "get", lambda: _sim_manager_stub(calls))
 
-    IsaacSceneFinalizer.new(_config("scene-ready", {}, depends_on=["isaac-world"]), {})
+    IsaacSceneFinalizer.new(
+        _config("scene-ready", {}, depends_on=["isaac-world"]), {}
+    ).wait_until_materialised(WAIT_S)
 
-    assert [call[0] for call in calls] == ["materialise", "finalize"]
-    assert calls[0][1] == {}
+    assert [call[0] for call in calls] == ["frame_system", "materialise", "finalize"]
+    assert calls[1][1] == {}

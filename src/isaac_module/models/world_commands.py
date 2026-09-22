@@ -294,6 +294,16 @@ def _cmd_joint_state(
     return cast("Any", component_diagnostics.joint_state(attrs, entry_handle))
 
 
+def _cmd_drive_gains(
+    world: "IsaacWorld", handle: WorldHandle, command: Mapping[str, ValueTypes]
+) -> dict[str, ValueTypes]:
+    name = _require_name(command)
+    attrs, entry_handle = SimManager.get().handle_entry(name)
+    if not isinstance(entry_handle, ArmHandle):
+        raise ValueError(f"{name!r} is a {type(entry_handle).__name__}, not an arm")
+    return cast("Any", component_diagnostics.drive_gains(attrs, entry_handle))
+
+
 def _cmd_dof_names(
     world: "IsaacWorld", handle: WorldHandle, command: Mapping[str, ValueTypes]
 ) -> dict[str, ValueTypes]:
@@ -364,6 +374,7 @@ COMMAND_HANDLERS: dict[
     "clear_cell": _cmd_clear_cell,
     "joint_state": _cmd_joint_state,
     "dof_names": _cmd_dof_names,
+    "drive_gains": _cmd_drive_gains,
     "prim_pose": _cmd_prim_pose,
     "tcp_pose": _cmd_tcp_pose,
     "jaw_deg": _cmd_jaw_deg,

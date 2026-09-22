@@ -114,9 +114,13 @@ class Mover(Protocol):
         the detected block's airspace)."""
         ...
 
-    async def move_to(self, pose: Pose, world_state: WorldState, linear: bool = False) -> None:
+    async def move_to(
+        self, pose: Pose, world_state: WorldState, linear: bool = False, level: bool = False
+    ) -> None:
         """Move the gripper's TCP frame to `pose` (mm, world frame). ``linear``
-        asks for a straight-line approach (the grasp descent and the lift)."""
+        asks for a straight-line approach (the grasp descent and the lift).
+        ``level`` asks a free path to keep the tool's orientation on the way,
+        which is how a carried payload travels without being turned over."""
         ...
 
 

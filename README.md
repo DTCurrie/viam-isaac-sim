@@ -26,7 +26,7 @@ an empty stage to a sorting cell that runs itself.
 | `viam:isaac-sim-devin:vacuum` | `rdk:component:gripper` | Bolts a suction tool onto an arm's link and takes hold by welding whatever is under the cup to it. |
 | `viam:isaac-sim-devin:conductor` | `rdk:service:generic` | Sorts a scattered pool of colored blocks onto per-color pads end to end via DoCommand (`start`/`stop`/`status`), single-shot, N loops, or continuous. |
 | `viam:isaac-sim-devin:sorter-sensor` | `rdk:component:sensor` | Proxies a conductor's `status` for data management, emitting each new loop record at most once. |
-| `viam:isaac-sim-devin:palletizer` | `rdk:service:generic` | Picks a box off the pick station and places it on the pallet via DoCommand (`start`/`stop`/`status`). |
+| `viam:isaac-sim-devin:palletizer` | `rdk:service:generic` | Packs a pallet end to end via DoCommand (`start`/`stop`/`status`), taking every place target from a `viam:pack-sequencer:sequencer` service and reporting each box's settled pose back to it. |
 
 The conductor and the palletizer are services, not components, so they belong in a
 config's `services` array. Every other model above is a component.
@@ -456,6 +456,11 @@ The world also supports `DoCommand`:
   bool}` -> `{"dof_names": [...]}`, the named component's DOF names.
   `"all": true` (arms only) returns every DOF of the articulation, including
   anything attached under it, e.g. a gripper
+* `{"command": "drive_gains", "name": "<arm component>"}` -> `{"dof_names":
+  [...], "kp": [...], "kd": [...]}`, the articulation's per-DOF position gain
+  and damping, in PhysX order. Read only: nothing in this module authors
+  them, so what comes back is the asset's own tuning, and a wrist that sags
+  or swings under a payload is asking whether it is high enough for the cell
 * `{"command": "prim_pose", "name": "<arm or base component>",
   "prim_path"?: "..."}` -> `{"prim_path", "position_mm", "quaternion_wxyz",
   "orientation_vector"}`, the world pose of a prim under the named component.

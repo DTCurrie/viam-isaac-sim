@@ -246,6 +246,11 @@ class SimConfig:
 # Each cold step completes only after its shader compile, so three completed
 # steps means the compiles the populated scene provoked are behind us.
 POST_FINALIZER_WARMUP_STEPS = 3
+
+# Materialising a full workcell is one sim-thread task covering every
+# component's prims. The stage gate is not stepping while it runs, so a long
+# task costs nothing, but it must not inherit run()'s ordinary 30 s budget.
+MATERIALISE_TIMEOUT_S = 300.0
 # A world.step that takes longer than this is logged with what it means (a
 # cold shader compile, expected on the first steps after the scene changes).
 # A warm step is ~1/60 s, so anything past a few seconds is never a normal step.
@@ -1251,6 +1256,30 @@ class SimManager:
             bounds_m=bounds_m,
         )
 
+    def materialise_frame_system(self, props: Sequence[Mapping[str, Any]]) -> None:
+        """Spawn one static collider per frame-system part that declares a box.
+
+        These are the machine's own furniture: a component that declares
+        ``frame.geometry`` has told the planner its shape, and this makes the
+        simulator agree. Props the world spawns are not part of this, and
+        neither is anything a component merely draws.
+        """
+        if not props:
+            LOGGER.info("frame system declared no colliders")
+            return
+        LOGGER.info("materialising %d frame-system colliders", len(props))
+        self.run(
+            lambda: self._spawn_frame_system_on_sim_thread(props),
+            timeout=MATERIALISE_TIMEOUT_S,
+            allow_during_initialization=True,
+        )
+
+    def _spawn_frame_system_on_sim_thread(self, props: Sequence[Mapping[str, Any]]) -> None:
+        for prop in props:
+            LOGGER.info("  spawning frame-system collider %r", prop.get("name"))
+            self._spawn_prop(dict(prop))
+        LOGGER.info("materialised every frame-system collider")
+
     def materialise_components(self, components: Mapping[str, ComponentScenery]) -> None:
         """Turn every configured workcell component's scenery into stage
         prims (runs on the sim thread, before the initial world.reset).
@@ -1262,7 +1291,22 @@ class SimManager:
         component's own frame, so it is composed onto the component's world
         frame (``spatial.compose_pose``) before it reaches ``_spawn_prop``.
         """
+        LOGGER.info("materialising %d components: %s", len(components), list(components))
+        # _spawn_prop touches USD directly and does not marshal, so every one
+        # of these has to execute on the sim thread. Called from a module
+        # thread it is a native crash with no Python traceback, which is what
+        # killed the module process the first time this path ever ran on
+        # hardware. run() executes inline when already on the sim thread.
+        self.run(
+            lambda: self._materialise_on_sim_thread(components),
+            timeout=MATERIALISE_TIMEOUT_S,
+            allow_during_initialization=True,
+        )
+
+    def _materialise_on_sim_thread(self, components: Mapping[str, ComponentScenery]) -> None:
         for component, scenery in components.items():
+            started = time.monotonic()
+            spawned = 0
             for prop in scenery_props(
                 component,
                 scenery.model,
@@ -1278,6 +1322,7 @@ class SimManager:
                     local_position,
                     local_orientation,
                 )
+                LOGGER.info("  spawning %r prop %r", component, prop.get("name"))
                 self._spawn_prop(
                     {
                         **prop,
@@ -1285,6 +1330,11 @@ class SimManager:
                         "orientation_wxyz": world_orientation,
                     }
                 )
+                spawned += 1
+            LOGGER.info(
+                "materialised %r: %d prims in %.2fs", component, spawned, time.monotonic() - started
+            )
+        LOGGER.info("materialised every component")
 
     def _require_booted(self) -> None:
         if self._stopped:

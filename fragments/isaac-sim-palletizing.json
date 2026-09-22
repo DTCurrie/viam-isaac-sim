@@ -4,7 +4,7 @@
     "description": "Viam's palletizer workcell fragment, vendored so an upstream edit cannot surprise a GPU run and the workcell is ours to reshape for the two-arm phases. Every component and service is kept, scenery included.",
     "pinned_versions": {
       "viam:workcell-components": "0.7.0",
-      "viam:pack-sequencer": "0.4.0-rc3"
+      "viam:pack-sequencer": "0.3.0"
     },
     "vendored_date": "2026-09-15"
   },
@@ -22,8 +22,26 @@
       },
       "frame": {
         "parent": "world",
-        "translation": { "x": 200, "y": 500, "z": 200 },
-        "orientation": { "type": "ov_degrees", "value": { "x": 0, "y": 0, "z": 1, "th": 0 } }
+        "translation": {
+          "x": 200,
+          "y": 500,
+          "z": 200
+        },
+        "orientation": {
+          "type": "ov_degrees",
+          "value": {
+            "x": 0,
+            "y": 0,
+            "z": 1,
+            "th": 0
+          }
+        },
+        "geometry": {
+          "type": "box",
+          "x": 500,
+          "y": 350,
+          "z": 100
+        }
       }
     },
     {
@@ -33,9 +51,17 @@
       "model": "viam:workcell-components:pick-station",
       "attributes": {
         "length_mm": 1100,
-        "box_origin_offset_mm": { "y": 900, "x": 200 },
+        "box_origin_offset_mm": {
+          "y": 900,
+          "x": 200
+        },
         "pick_home_z_offset_mm": 120,
-        "infeed_box_color": { "r": 70, "g": 150, "b": 175, "a": 1 },
+        "infeed_box_color": {
+          "r": 70,
+          "g": 150,
+          "b": 175,
+          "a": 1
+        },
         "roller_spin_period_s": 2,
         "box_theta_deg": 0,
         "lowest_point_height_mm": 200,
@@ -43,8 +69,35 @@
       },
       "frame": {
         "parent": "world",
-        "translation": { "x": 400, "y": -650, "z": 200 },
-        "orientation": { "type": "ov_degrees", "value": { "x": 0, "y": 0, "z": 1, "th": 0 } }
+        "translation": {
+          "x": 400,
+          "y": -650,
+          "z": 200
+        },
+        "orientation": {
+          "type": "ov_degrees",
+          "value": {
+            "x": 0,
+            "y": 0,
+            "z": 1,
+            "th": 0
+          }
+        },
+        "geometry": {
+          "type": "box",
+          "x": 400,
+          "y": 1100,
+          "z": 40
+        }
+      }
+    },
+    {
+      "name": "box-detect",
+      "api": "rdk:component:sensor",
+      "model": "viam:workcell-components:box-detect",
+      "attributes": {
+        "enabled": false,
+        "interval_seconds": 30
       }
     },
     {
@@ -57,51 +110,176 @@
       "name": "robot-pedestal",
       "api": "rdk:component:generic",
       "model": "viam:workcell-components:robot-pedestal",
-      "attributes": { "diameter_mm": 220, "height_mm": 150 },
-      "frame": { "parent": "world", "translation": { "x": 0, "y": 0, "z": 0 } }
+      "attributes": {
+        "diameter_mm": 220,
+        "height_mm": 150
+      },
+      "frame": {
+        "parent": "world",
+        "translation": {
+          "x": 0,
+          "y": 0,
+          "z": 0
+        },
+        "geometry": {
+          "type": "box",
+          "x": 220,
+          "y": 220,
+          "z": 150,
+          "translation": {
+            "x": 0,
+            "y": 0,
+            "z": 75
+          }
+        }
+      }
     },
     {
       "name": "fence-back-left",
       "api": "rdk:component:generic",
       "model": "viam:workcell-components:safety-fence",
-      "attributes": { "height_mm": 1200, "length_mm": 1100 },
-      "frame": { "parent": "world", "translation": { "x": -600, "y": -950, "z": 0 } }
+      "attributes": {
+        "height_mm": 1200,
+        "length_mm": 1100
+      },
+      "frame": {
+        "parent": "world",
+        "translation": {
+          "x": -600,
+          "y": -950,
+          "z": 0
+        },
+        "geometry": {
+          "type": "box",
+          "x": 1100,
+          "y": 36,
+          "z": 1180,
+          "translation": {
+            "x": 0,
+            "y": 0,
+            "z": 625
+          }
+        }
+      }
     },
     {
       "name": "fence-back-right",
       "api": "rdk:component:generic",
       "model": "viam:workcell-components:safety-fence",
-      "attributes": { "length_mm": 400, "height_mm": 1200 },
-      "frame": { "parent": "world", "translation": { "x": 1050, "y": -950, "z": 0 } }
+      "attributes": {
+        "length_mm": 400,
+        "height_mm": 1200
+      },
+      "frame": {
+        "parent": "world",
+        "translation": {
+          "x": 1050,
+          "y": -950,
+          "z": 0
+        },
+        "geometry": {
+          "type": "box",
+          "x": 400,
+          "y": 36,
+          "z": 1180,
+          "translation": {
+            "x": 0,
+            "y": 0,
+            "z": 625
+          }
+        }
+      }
     },
     {
       "name": "fence-left",
       "api": "rdk:component:generic",
       "model": "viam:workcell-components:safety-fence",
-      "attributes": { "height_mm": 1200, "length_mm": 1200 },
+      "attributes": {
+        "height_mm": 1200,
+        "length_mm": 1200
+      },
       "frame": {
         "parent": "world",
-        "translation": { "x": -1150, "y": -350, "z": 0 },
-        "orientation": { "type": "ov_degrees", "value": { "x": 0, "y": 0, "z": 1, "th": 90 } }
+        "translation": {
+          "x": -1150,
+          "y": -350,
+          "z": 0
+        },
+        "orientation": {
+          "type": "ov_degrees",
+          "value": {
+            "x": 0,
+            "y": 0,
+            "z": 1,
+            "th": 90
+          }
+        },
+        "geometry": {
+          "type": "box",
+          "x": 1200,
+          "y": 36,
+          "z": 1180,
+          "translation": {
+            "x": 0,
+            "y": 0,
+            "z": 625
+          }
+        }
       }
     },
     {
       "name": "fence-right",
       "api": "rdk:component:generic",
       "model": "viam:workcell-components:safety-fence",
-      "attributes": { "length_mm": 1200, "height_mm": 1200 },
+      "attributes": {
+        "length_mm": 1200,
+        "height_mm": 1200
+      },
       "frame": {
         "parent": "world",
-        "translation": { "x": 1250, "y": -350, "z": 0 },
-        "orientation": { "type": "ov_degrees", "value": { "x": 0, "y": 0, "z": 1, "th": 90 } }
+        "translation": {
+          "x": 1250,
+          "y": -350,
+          "z": 0
+        },
+        "orientation": {
+          "type": "ov_degrees",
+          "value": {
+            "x": 0,
+            "y": 0,
+            "z": 1,
+            "th": 90
+          }
+        },
+        "geometry": {
+          "type": "box",
+          "x": 1200,
+          "y": 36,
+          "z": 1180,
+          "translation": {
+            "x": 0,
+            "y": 0,
+            "z": 625
+          }
+        }
       }
     },
     {
       "name": "scan-tunnel",
       "api": "rdk:component:generic",
       "model": "viam:workcell-components:scan-tunnel",
-      "attributes": { "span_mm": 700, "height_mm": 500 },
-      "frame": { "parent": "world", "translation": { "x": 400, "y": -950, "z": 0 } }
+      "attributes": {
+        "span_mm": 700,
+        "height_mm": 500
+      },
+      "frame": {
+        "parent": "world",
+        "translation": {
+          "x": 400,
+          "y": -950,
+          "z": 0
+        }
+      }
     },
     {
       "name": "hmi-cabinet",
@@ -109,38 +287,77 @@
       "model": "viam:workcell-components:hmi-cabinet",
       "attributes": {
         "post_height_mm": 700,
-        "body_dims_mm": { "x": 450, "z": 350, "y": 200 }
+        "body_dims_mm": {
+          "x": 450,
+          "z": 350,
+          "y": 200
+        }
       },
       "frame": {
         "parent": "world",
-        "translation": { "x": -850, "y": 1050, "z": 0 },
-        "orientation": { "type": "ov_degrees", "value": { "x": 0, "y": 0, "z": 1, "th": 0 } }
+        "translation": {
+          "x": -850,
+          "y": 1050,
+          "z": 0
+        },
+        "orientation": {
+          "type": "ov_degrees",
+          "value": {
+            "x": 0,
+            "y": 0,
+            "z": 1,
+            "th": 0
+          }
+        }
       }
     },
     {
       "name": "stack-light",
       "api": "rdk:component:generic",
       "model": "viam:workcell-components:stack-light",
-      "attributes": { "post_height_mm": 1000 },
-      "frame": { "parent": "world", "translation": { "x": -1250, "y": 1050, "z": 0 } }
+      "attributes": {
+        "post_height_mm": 1000
+      },
+      "frame": {
+        "parent": "world",
+        "translation": {
+          "x": -1250,
+          "y": 1050,
+          "z": 0
+        }
+      }
     },
     {
       "name": "caution-tape",
       "api": "rdk:component:generic",
       "model": "viam:workcell-components:floor-decal",
       "attributes": {
-        "color": { "g": 190, "b": 30, "a": 1, "r": 240 },
+        "color": {
+          "g": 190,
+          "b": 30,
+          "a": 1,
+          "r": 240
+        },
         "length_mm": 2400,
         "thickness_mm": 3,
         "width_mm": 80
       },
-      "frame": { "parent": "world", "translation": { "x": 50, "y": 1250, "z": 0 } }
+      "frame": {
+        "parent": "world",
+        "translation": {
+          "x": 50,
+          "y": 1250,
+          "z": 0
+        }
+      }
     },
     {
       "name": "tray-dock",
       "api": "rdk:component:sensor",
       "model": "viam:workcell-components:tray-dock",
-      "attributes": { "exchange_seconds": 10 }
+      "attributes": {
+        "exchange_seconds": 10
+      }
     }
   ],
   "services": [
@@ -161,8 +378,12 @@
           "stack-light",
           "caution-tape"
         ],
-        "pick_station_names": ["pick-station"],
-        "pallet_names": ["pallet"],
+        "pick_station_names": [
+          "pick-station"
+        ],
+        "pallet_names": [
+          "pallet"
+        ],
         "tick_interval_secs": 0.15
       }
     },
@@ -173,9 +394,17 @@
       "model": "viam:pack-sequencer:sequencer",
       "attributes": {
         "box_width_mm": 200,
-        "box_color": { "b": 80, "opacity": 1, "r": 176, "g": 136 },
+        "box_color": {
+          "b": 80,
+          "opacity": 1,
+          "r": 176,
+          "g": 136
+        },
         "box_height_mm": 100,
-        "box_length_mm": 150
+        "box_length_mm": 150,
+        "pallet": "pallet",
+        "pallet_area_height_mm": 200,
+        "quantity": 8
       }
     }
   ],
@@ -190,7 +419,7 @@
       "type": "registry",
       "name": "pack-sequencer-module",
       "module_id": "viam:pack-sequencer",
-      "version": "0.4.0-rc3"
+      "version": "0.3.0"
     }
   ]
 }

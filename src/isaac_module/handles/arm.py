@@ -105,6 +105,16 @@ class ArmHandle:
         target" from "physics fought the target"."""
         raise NotImplementedError
 
+    def drive_gains(self) -> dict[str, Any]:
+        """The articulation's per-DOF position gain and damping, in PhysX
+        order, alongside `all_dof_names`.
+
+        Nothing in this module authors these: an asset's own values apply, and
+        they are tuned for the arm carrying itself. A wrist that visibly sags
+        or swings under a payload is asking whether they are high enough for
+        this cell, and the answer is a number rather than a judgment."""
+        raise NotImplementedError
+
     def get_joint_positions(self) -> list[float]:  # radians
         """Positions of the arm's named joints, in the asset's declared
         order (all DOFs when the asset declares none)."""
@@ -244,6 +254,17 @@ class IsaacArmHandle(ArmHandle):
                 if set_iterations is not None:
                     set_iterations(self._solver_iterations)
             self._gains = self._art.get_articulation_controller().get_gains()
+
+    def drive_gains(self) -> dict[str, Any]:
+        def _read() -> dict[str, Any]:
+            kps, kds = self._art.get_articulation_controller().get_gains()
+            return {
+                "dof_names": list(self._dof_names),
+                "kp": [float(value) for value in kps],
+                "kd": [float(value) for value in kds],
+            }
+
+        return self._sim.run(_read)
 
     def replace_articulation(self, articulation: Any) -> None:
         """Swap in a fresh SingleArticulation wrapper before a reset that
@@ -636,6 +657,16 @@ class MockArmHandle(ArmHandle):
 
     def all_dof_names(self) -> list[str]:
         return list(self._dof_names)
+
+    # a mock articulation has no drives, so it reports the shape of the answer
+    # with none of the numbers. A caller checking the verb's wiring gets a
+    # reply; one reading gains gets Nones rather than an invented stiffness.
+    def drive_gains(self) -> dict[str, Any]:
+        return {
+            "dof_names": list(self._dof_names),
+            "kp": [None] * len(self._dof_names),
+            "kd": [None] * len(self._dof_names),
+        }
 
     def _selected(self) -> list[int]:
         if self._joint_indices is None:

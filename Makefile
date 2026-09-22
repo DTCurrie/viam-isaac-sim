@@ -23,6 +23,7 @@ fmt-check:
 lint:
 	$(PY) -m ruff check src tests tools examples
 	node .claude/scripts/prose-lint.mjs src tools examples
+	node .claude/scripts/silent-handler.mjs
 
 typecheck:
 	$(PY) -m mypy

@@ -792,3 +792,35 @@ def test_validate_config_accepts_bool_wait_for_finalizer():
 
 def test_sim_config_from_attrs_carries_wait_for_finalizer():
     assert sim_config_from_attrs({"wait_for_finalizer": True}).wait_for_finalizer is True
+
+
+def test_do_command_drive_gains(world):
+    """Read only, and a mock articulation has no drives, so the shape is what
+    it guarantees: one kp and one kd per DOF, in the same order as the names."""
+    IsaacArm.new(
+        _config("world-arm-drive-gains", {"world": "isaac-world", "asset": "ur20", "mock_dof": 12}),
+        {},
+    )
+    result = asyncio.run(
+        world.do_command({"command": "drive_gains", "name": "world-arm-drive-gains"})
+    )
+    assert len(result["dof_names"]) == 12
+    assert len(result["kp"]) == 12
+    assert len(result["kd"]) == 12
+
+
+def test_do_command_drive_gains_refuses_a_component_that_is_not_an_arm(world):
+    IsaacArm.new(
+        _config("world-arm-for-gripper-gains", {"world": "isaac-world", "asset": "ur20"}), {}
+    )
+    IsaacGripper.new(
+        _config(
+            "world-gripper-drive-gains",
+            {"world": "isaac-world", "arm": "world-arm-for-gripper-gains"},
+        ),
+        {},
+    )
+    with pytest.raises(ValueError, match="not an arm"):
+        asyncio.run(
+            world.do_command({"command": "drive_gains", "name": "world-gripper-drive-gains"})
+        )

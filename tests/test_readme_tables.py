@@ -140,9 +140,13 @@ PALLETIZER_CODE_KEYS = _keys_from_whole_file(PALLETIZER_MODEL_FILE) | {
     # validate_config/reconfigure read these through `_DEPENDENCY_ATTRS`
     # (a loop over a tuple of key names) rather than a literal
     # `attrs["world"]`, so the literal-string regex can't see them.
+    # "gripper" doesn't need to be listed here too: reconfigure() also
+    # reads `attrs["gripper"]` literally, for `self._gripper_name`, so the
+    # regex already finds it.
     "world",
     "arm",
     "motion",
+    "sequencer",
 }
 
 SORTER_SENSOR_CODE_KEYS = _keys_from_whole_file(SORTER_SENSOR_MODEL_FILE)

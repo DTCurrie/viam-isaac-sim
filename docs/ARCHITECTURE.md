@@ -37,7 +37,8 @@ into. Read it before you add a model or move a file.
 | `src/isaac_module/models/sim_component_validation.py` | 100 | The shared spawned-component validation, including the `<arm>:<link>` frame-parent rule. |
 | `src/isaac_module/models/conductor.py` | 1098 | The block-sorting service. Not a driver, a client of the sim models. |
 | `src/isaac_module/models/sorter_sensor.py` | 112 | A sensor that proxies the conductor's loop records. |
-| `src/isaac_module/models/palletizer.py` | 353 | The palletizing service. Like the conductor, a client of the sim models rather than a driver. |
+| `src/isaac_module/models/palletizer.py` | 521 | The palletizing service. Like the conductor, a client of the sim models rather than a driver. It asks `sequencer_client.py` for the next slot, moves the arm, reports the outcome and publishes the box's settled pose. |
+| `src/isaac_module/sequencer_client.py` | 470 | Typed `SequencerClient` methods over `viam:pack-sequencer:sequencer`'s DoCommand verbs, and the dataclasses that carry its wire shapes. Holds no state of its own: the pack order, the cursor and the placed-set all live in the sequencer. |
 | `src/isaac_module/config_resolver.py` | 478 | Reads a real machine config and writes the sim machine's config, reporting swaps, placeholders, pruned modules and unresolved variables. |
 | `src/isaac_module/asset_catalog.py` | 120 | `KNOWN_ASSETS`: USD candidates, joint names, `ee_prim`, packaged kinematics paths. |
 | `src/isaac_module/kinematics_files/` | | The UR3e, UR5e, UR7e and UR20 SVA files shipped with the module. |
@@ -58,7 +59,7 @@ into. Read it before you add a model or move a file.
 | `src/isaac_module/sdk_patches.py` | 58 | One monkeypatch that adds the `MoveThroughJointPositions` handler the Python SDK 0.80 does not serve. |
 | `src/isaac_module/cell_layout.py` | 156 | The sorting cell's geometry. |
 | `src/isaac_module/sort_plan.py` | 133 | The sorting order. |
-| `src/isaac_module/workcell_scenery.py` | 300 | Viam's workcell components as Isaac props: collider from `GetGeometries`, render from `get_visuals`, derived collider where neither serves. |
+| `src/isaac_module/workcell_scenery.py` | 300 | Viam's workcell components as Isaac props: render primitives from `get_visuals`, a derived collider for `robot-pedestal`. Colliders otherwise come from the frame system (`frame_system.py`). |
 | `src/isaac_module/run_log.py` | 171 | Sorting loop records. |
 | `src/pickcell/` | 1944 | The pick pipeline, a pure Viam-client library with no `isaac_module` import. |
 

@@ -41,6 +41,12 @@ def joint_state(attrs: dict[str, Any], handle: ArmHandle) -> dict[str, Any]:
     return {"joints": joints}
 
 
+def drive_gains(attrs: dict[str, Any], handle: ArmHandle) -> dict[str, Any]:
+    """The articulation's per-DOF position gain and damping. Read only: this
+    module authors neither, so what comes back is the asset's own tuning."""
+    return handle.drive_gains()
+
+
 def dof_names(
     attrs: dict[str, Any], handle: ArmHandle | GripperHandle, *, all_dofs: bool = False
 ) -> dict[str, Any]:

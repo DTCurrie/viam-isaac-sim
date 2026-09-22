@@ -8,6 +8,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+import pytest
 from viam.proto.app.robot import ComponentConfig
 from viam.utils import dict_to_struct
 
@@ -30,12 +31,13 @@ UPSTREAM_FIXTURE_PATH = (
     Path(__file__).resolve().parent / "fixtures" / "upstream-workcell-fragment.json"
 )
 
-# The two changes this phase deliberately makes to the vendored fragment,
-# keyed by the JSON path a diff against the upstream fixture surfaces.
+# The changes this phase deliberately makes to the vendored fragment, keyed
+# by the JSON path a diff against the upstream fixture surfaces. Re-pinning
+# viam:pack-sequencer to 0.3.0 lands it on the same version the upstream
+# fixture itself pins, so that module no longer diverges.
 EXPECTED_DIVERGENCES = {
     ("components", "stack-light", "frame", "translation", "x"),
     ("modules", "viam:workcell-components", "version"),
-    ("modules", "viam:pack-sequencer", "version"),
 }
 
 
@@ -72,13 +74,48 @@ def _diff_paths(prefix: tuple[str, ...], upstream: Any, vendored: Any, found: se
         found.add(prefix)
 
 
+# Upstream's fragment does not carry these, but something in it names them, so
+# a machine built from the fragment alone has a dependency that cannot resolve.
+# Each entry is a name we add back, with the reference that needs it.
+_ADDED_TO_CLOSE_A_DANGLING_REFERENCE = {
+    # pick-station's `infeed_box_detect` names this sensor. Upstream keeps it in
+    # the demo MACHINE config rather than the fragment, so vendoring the fragment
+    # on its own left pick-station unable to build: "dependency box-detect is not
+    # ready yet; reason=resource rdk:component:sensor/box-detect not available".
+    "box-detect",
+}
+
+
 def test_no_upstream_component_or_service_was_dropped():
     fragment = _fragment()
     upstream = _upstream_fixture()
-    assert [c["name"] for c in fragment["components"]] == [
-        c["name"] for c in upstream["components"]
-    ]
+    vendored_names = [c["name"] for c in fragment["components"]]
+    assert set(vendored_names) >= {c["name"] for c in upstream["components"]}
+    assert set(vendored_names) - {c["name"] for c in upstream["components"]} == (
+        _ADDED_TO_CLOSE_A_DANGLING_REFERENCE
+    )
     assert [s["name"] for s in fragment["services"]] == [s["name"] for s in upstream["services"]]
+
+
+def test_every_named_dependency_in_the_fragment_resolves():
+    # The defect this catches cost a GPU run: a component naming a sibling that
+    # the vendoring dropped fails to build, and takes everything downstream of
+    # it with it. Attribute keys that hold a resource NAME, not a value.
+    fragment = _fragment()
+    overlay = _overlay()
+    known = {c["name"] for c in fragment["components"]} | {c["name"] for c in overlay["components"]}
+    known |= {s["name"] for s in fragment["services"]} | {
+        s["name"] for s in overlay.get("services", [])
+    }
+    name_valued_attrs = ("infeed_box_detect", "tray_dock", "pallet")
+    dangling = [
+        (component["name"], attr, component["attributes"][attr])
+        for component in fragment["components"] + fragment["services"]
+        for attr in name_valued_attrs
+        if isinstance(component.get("attributes", {}).get(attr), str)
+        and component["attributes"][attr] not in known
+    ]
+    assert dangling == []
 
 
 def test_the_vendored_fragment_diverges_from_upstream_only_where_expected():
@@ -106,12 +143,45 @@ def test_the_stack_light_mod_landed():
     assert stack_light["frame"]["translation"] == {"x": -1250, "y": 1050, "z": 0}
 
 
-def test_the_modules_are_pinned_to_the_newest_published_versions():
+def test_the_modules_are_pinned_to_the_versions_this_cell_needs():
+    # viam:pack-sequencer is deliberately NOT the newest published version.
+    # 0.3.0 and 0.4.0-rc3 serve different verb sets, and this cell is built
+    # against 0.3.0's.
     modules = {m["module_id"]: m["version"] for m in _fragment()["modules"]}
     assert modules == {
         "viam:workcell-components": "0.7.0",
-        "viam:pack-sequencer": "0.4.0-rc3",
+        "viam:pack-sequencer": "0.3.0",
     }
+
+
+def _pack_sequencer_attributes() -> dict:
+    return next(s for s in _fragment()["services"] if s["name"] == "pack-sequencer")["attributes"]
+
+
+def test_the_pack_sequencer_attributes_fill_a_full_2x2x2_pack_of_8():
+    # packColumn's own formulas (viam-labs/pack-sequencer, 0.3.0), applied to
+    # the vendored pallet (500 x 350 mm) and box (200 x 150 x 100 mm): a
+    # change to either dimension that breaks the 2 x 2 x 2 pack of 8 should
+    # fail here, on the fragment's own numbers, rather than on the GPU.
+    pallet = next(c for c in _fragment()["components"] if c["name"] == "pallet")
+    pack_sequencer = next(s for s in _fragment()["services"] if s["name"] == "pack-sequencer")
+    attrs = pack_sequencer["attributes"]
+
+    pallet_width_mm = pallet["attributes"]["width_mm"]
+    pallet_length_mm = pallet["attributes"]["length_mm"]
+    box_width_mm = attrs["box_width_mm"]
+    box_length_mm = attrs["box_length_mm"]
+    box_height_mm = attrs["box_height_mm"]
+
+    cols = int((pallet_width_mm - box_width_mm) / box_width_mm) + 1
+    rows = int((pallet_length_mm - box_length_mm) / box_length_mm) + 1
+    layers = int(attrs["pallet_area_height_mm"] / box_height_mm)
+    capacity = cols * rows * layers
+
+    assert (cols, rows, layers) == (2, 2, 2)
+    assert capacity == 8
+    assert attrs["quantity"] == 8
+    assert attrs["pallet"] == "pallet"
 
 
 def test_the_provenance_header_names_the_upstream_fragment():
@@ -119,7 +189,7 @@ def test_the_provenance_header_names_the_upstream_fragment():
     assert upstream["fragment_id"] == "e42007f2-5a18-4dd1-aeb1-9e2d7bfd0df9"
     assert upstream["pinned_versions"] == {
         "viam:workcell-components": "0.7.0",
-        "viam:pack-sequencer": "0.4.0-rc3",
+        "viam:pack-sequencer": "0.3.0",
     }
     assert upstream["vendored_date"] == "2026-09-15"
 
@@ -143,30 +213,82 @@ def test_the_overlay_gripper_matches_the_machine_configs_epick_offset_and_delay(
     assert gripper["attributes"]["grab_delay_ms"] == 250
 
 
-def test_the_overlay_world_declares_only_the_box_prop():
+_BOX_PROP_NAMES = [f"infeed_box_{i}" for i in range(1, 9)]
+
+
+def test_the_overlay_world_declares_exactly_the_eight_box_props():
     world = next(c for c in _overlay()["components"] if c["name"] == "isaac-world")
     props = {p["name"]: p for p in world["attributes"]["props"]}
-    assert set(props) == {"infeed_box"}
+    assert set(props) == set(_BOX_PROP_NAMES)
 
-    box = props["infeed_box"]
-    box_dims_mm = tuple(box["size"] * 1000 * scale for scale in box["scale"])
-    # box_length_mm, box_width_mm, box_height_mm from the vendored
-    # pack-sequencer service, in that order.
-    assert box_dims_mm == (150, 200, 100)
+    # A prop's footprint has to sit on the axes pack-sequencer's own slots
+    # assume, or every box arrives at its slot turned ninety degrees. Its
+    # packColumn puts box_width_mm along the pallet's x and box_length_mm
+    # along its y, and the pallet's frame carries no yaw, so pallet x is
+    # world x. A 200 mm box laid along y instead would need 400 mm of a
+    # 350 mm pallet for one row of two.
+    attrs = _pack_sequencer_attributes()
+    expected_dims_mm = (attrs["box_width_mm"], attrs["box_length_mm"], attrs["box_height_mm"])
+    for box in props.values():
+        box_dims_mm = tuple(box["size"] * 1000 * scale for scale in box["scale"])
+        assert box_dims_mm == pytest.approx(expected_dims_mm)
 
 
-def test_the_box_sits_at_the_pick_stations_frame_plus_its_box_origin_offset():
+def test_the_infeed_box_sits_inside_the_pick_stations_declared_footprint():
+    # The check that matters, and the one phase 2 lacked. It read
+    # box_origin_offset_mm against the station's FRAME and got (600, 250),
+    # which is 350 mm past the near edge of a station spanning y -1200..-100,
+    # so the box fell straight through to the floor on the first GPU run.
+    # The station's own summary reports `corner at (200, -1200, 220)`, and the
+    # offset is measured from that corner.
     pick_station = next(c for c in _fragment()["components"] if c["name"] == "pick-station")
-    station_translation = pick_station["frame"]["translation"]
-    offset = pick_station["attributes"]["box_origin_offset_mm"]
+    geometry = pick_station["frame"]["geometry"]
+    centre = pick_station["frame"]["translation"]
+
+    half_x = geometry["x"] / 2.0
+    half_y = geometry["y"] / 2.0
+    top_z_mm = centre["z"] + geometry["z"] / 2.0
 
     world = next(c for c in _overlay()["components"] if c["name"] == "isaac-world")
-    box = next(p for p in world["attributes"]["props"] if p["name"] == "infeed_box")
+    props_by_name = {p["name"]: p for p in world["attributes"]["props"]}
+    box = props_by_name["infeed_box_1"]
+    box_x_mm, box_y_mm, box_z_mm = (value * 1000.0 for value in box["position"])
+    box_height_mm = box["size"] * box["scale"][2] * 1000.0
 
-    expected_x_m = (station_translation["x"] + offset["x"]) / 1000.0
-    expected_y_m = (station_translation["y"] + offset["y"]) / 1000.0
-    assert box["position"][0] == expected_x_m
-    assert box["position"][1] == expected_y_m
+    assert centre["x"] - half_x <= box_x_mm <= centre["x"] + half_x
+    assert centre["y"] - half_y <= box_y_mm <= centre["y"] + half_y
+    # resting ON the deck, not floating above it or sunk into it
+    assert box_z_mm == pytest.approx(top_z_mm + box_height_mm / 2.0)
+
+
+def test_only_the_infeed_box_is_on_the_pick_station():
+    world = next(c for c in _overlay()["components"] if c["name"] == "isaac-world")
+    props_by_name = {p["name"]: p for p in world["attributes"]["props"]}
+    pick_station = next(c for c in _fragment()["components"] if c["name"] == "pick-station")
+    geometry = pick_station["frame"]["geometry"]
+    centre = pick_station["frame"]["translation"]
+
+    on_station = [
+        name
+        for name in _BOX_PROP_NAMES
+        if abs(props_by_name[name]["position"][0] * 1000.0 - centre["x"]) <= geometry["x"] / 2.0
+        and abs(props_by_name[name]["position"][1] * 1000.0 - centre["y"]) <= geometry["y"] / 2.0
+    ]
+    assert on_station == ["infeed_box_1"]
+
+
+def test_the_seven_unpicked_boxes_are_parked_clear_of_the_infeed_box():
+    world = next(c for c in _overlay()["components"] if c["name"] == "isaac-world")
+    props_by_name = {p["name"]: p for p in world["attributes"]["props"]}
+
+    infeed_xy = tuple(props_by_name["infeed_box_1"]["position"][:2])
+    parked_names = _BOX_PROP_NAMES[1:]
+    parked_xy = {tuple(props_by_name[name]["position"][:2]) for name in parked_names}
+
+    # each parked box has its own spot, and none of them doubles as the
+    # infeed pose.
+    assert len(parked_xy) == len(parked_names)
+    assert infeed_xy not in parked_xy
 
 
 def test_the_overlay_carries_no_floor_prop():
@@ -190,30 +312,18 @@ def test_the_overlay_names_our_module_and_the_palletizer_service():
     assert service["attributes"]["gripper"] == gripper_name
 
 
-def test_the_palletizer_service_carries_a_place_pose_the_gripper_can_release_at():
+def test_the_palletizer_service_names_the_sequencer_and_its_boxes_in_pick_order():
     service = next(
         s for s in _overlay()["services"] if s["model"] == "viam:isaac-sim-devin:palletizer"
     )
-    place_pose_mm = service["attributes"]["place_pose_mm"]
-
-    # x, y from the vendored fragment's pallet frame, whose origin is the
-    # bounding-box centroid per the upstream meta.json. z is the pallet's
-    # top face (frame z 200 mm plus half its 100 mm thickness) plus the box
-    # height (100 mm, from pack-sequencer) plus CUP_APPROACH_GAP_MM (the cup
-    # stops short of the top face it is releasing onto, the same offset
-    # pick_grasp_pose uses), all from isaac_module.models.palletizer.
-    fragment = _fragment()
-    pallet = next(c for c in fragment["components"] if c["name"] == "pallet")
-    pallet_translation = pallet["frame"]["translation"]
-    pallet_top_face_z_mm = pallet_translation["z"] + pallet["attributes"]["thickness_mm"] / 2
-
-    pack_sequencer = next(s for s in fragment["services"] if s["name"] == "pack-sequencer")
-    box_height_mm = pack_sequencer["attributes"]["box_height_mm"]
-    cup_approach_gap_mm = 5.0  # isaac_module.models.palletizer.CUP_APPROACH_GAP_MM
-
-    assert place_pose_mm["x"] == pallet_translation["x"]
-    assert place_pose_mm["y"] == pallet_translation["y"]
-    assert place_pose_mm["z"] == pallet_top_face_z_mm + box_height_mm + cup_approach_gap_mm
+    attrs = service["attributes"]
+    assert attrs["sequencer"] == "pack-sequencer"
+    assert attrs["box_props"] == _BOX_PROP_NAMES
+    # obstacle_source is left unset so IsaacPalletizer's own default,
+    # "world_state_store", applies.
+    assert "obstacle_source" not in attrs
+    assert "place_pose_mm" not in attrs
+    assert "box_prop" not in attrs
 
 
 # Every model this module owns, keyed by the fully qualified model string a
@@ -282,3 +392,24 @@ def test_every_overlay_resource_this_module_owns_validates_against_its_model():
     # model rename or an accidental workcell-components entry that silently
     # skipped validation would still be caught by this count.
     assert checked == len(resources)
+
+
+def test_every_box_prop_carries_a_physical_density():
+    """A prop's mass is a physics input, not decoration. The GPU run of
+    2026-09-16 carried 5 kg on a 0.003 cubic metre box, which is 1667 kg per
+    cubic metre, denser than packed sand, and heavier than the UR5e's whole
+    rating once the 196 mm tool's moment is counted. The wrist swung visibly
+    and stalled short of every place waypoint."""
+    overlay = json.loads(OVERLAY_PATH.read_text())
+    props = overlay["components"][0]["attributes"]["props"]
+    assert props
+
+    for prop in props:
+        scale = prop["scale"]
+        size_m = prop["size"]
+        volume_m3 = (size_m * scale[0]) * (size_m * scale[1]) * (size_m * scale[2])
+        density = prop["mass"] / volume_m3
+        # cardboard and its contents: lighter than water, heavier than foam
+        assert 100.0 <= density <= 1000.0, (
+            f"{prop['name']}: {prop['mass']} kg over {volume_m3:.4f} m3 is {density:.0f} kg/m3"
+        )

@@ -1,0 +1,420 @@
+{
+  "_source": "viam-labs/pack-sequencer at 0.3.0, module.go on main (doGetPackOrder, doNextBox, doReportPlacement, doSkipBox, doGetProgress, doSetBoxTransform)",
+  "next_box_seq1": {
+    "seq": 1,
+    "col": 0,
+    "row": 0,
+    "layer": 0,
+    "pose_in_pallet": {
+      "x": 150,
+      "y": 100,
+      "z": 100,
+      "o_x": 0.0,
+      "o_y": 0.0,
+      "o_z": 1.0,
+      "theta": 0.0
+    },
+    "approach_offset_in_pallet": {
+      "x": 29.4744,
+      "y": 0.0,
+      "z": 110.0
+    },
+    "place_end_in_world": {
+      "x": 1150.0,
+      "y": 600.0,
+      "z": 100.0,
+      "o_x": 0.0,
+      "o_y": 0.0,
+      "o_z": 1.0,
+      "theta": 0.0
+    },
+    "place_start_in_world": {
+      "x": 1179.4744,
+      "y": 600.0,
+      "z": 210.0,
+      "o_x": 0.0,
+      "o_y": 0.0,
+      "o_z": 1.0,
+      "theta": 0.0
+    },
+    "box_dimensions_mm": {
+      "width": 200.0,
+      "length": 150.0,
+      "height": 100.0
+    },
+    "is_complete": false,
+    "total": 8,
+    "placed": 0,
+    "failed": 0,
+    "skipped": 0,
+    "remaining": 8
+  },
+  "next_box_complete": {
+    "is_complete": true,
+    "total": 8,
+    "placed": 7,
+    "failed": 0,
+    "skipped": 1,
+    "remaining": 0
+  },
+  "get_pack_order": {
+    "placements": [
+      {
+        "seq": 1,
+        "col": 0,
+        "row": 0,
+        "layer": 0,
+        "x_mm": 150,
+        "y_mm": 100,
+        "z_mm": 100,
+        "label": "",
+        "length_mm": 150.0,
+        "width_mm": 200.0,
+        "height_mm": 100.0,
+        "pose_in_pallet": {
+          "x": 150,
+          "y": 100,
+          "z": 100,
+          "o_x": 0.0,
+          "o_y": 0.0,
+          "o_z": 1.0,
+          "theta": 0.0
+        },
+        "pose_in_world": {
+          "x": 1150.0,
+          "y": 600.0,
+          "z": 100.0,
+          "o_x": 0.0,
+          "o_y": 0.0,
+          "o_z": 1.0,
+          "theta": 0.0
+        },
+        "approach_offset_in_pallet": {
+          "x": 29.4744,
+          "y": 0.0,
+          "z": 110.0
+        }
+      },
+      {
+        "seq": 2,
+        "col": 1,
+        "row": 0,
+        "layer": 0,
+        "x_mm": 350,
+        "y_mm": 100,
+        "z_mm": 100,
+        "label": "",
+        "length_mm": 150.0,
+        "width_mm": 200.0,
+        "height_mm": 100.0,
+        "pose_in_pallet": {
+          "x": 350,
+          "y": 100,
+          "z": 100,
+          "o_x": 0.0,
+          "o_y": 0.0,
+          "o_z": 1.0,
+          "theta": 0.0
+        },
+        "pose_in_world": {
+          "x": 1350.0,
+          "y": 600.0,
+          "z": 100.0,
+          "o_x": 0.0,
+          "o_y": 0.0,
+          "o_z": 1.0,
+          "theta": 0.0
+        },
+        "approach_offset_in_pallet": {
+          "x": 29.4744,
+          "y": 0.0,
+          "z": 110.0
+        }
+      },
+      {
+        "seq": 3,
+        "col": 0,
+        "row": 1,
+        "layer": 0,
+        "x_mm": 150,
+        "y_mm": 250,
+        "z_mm": 100,
+        "label": "",
+        "length_mm": 150.0,
+        "width_mm": 200.0,
+        "height_mm": 100.0,
+        "pose_in_pallet": {
+          "x": 150,
+          "y": 250,
+          "z": 100,
+          "o_x": 0.0,
+          "o_y": 0.0,
+          "o_z": 1.0,
+          "theta": 0.0
+        },
+        "pose_in_world": {
+          "x": 1150.0,
+          "y": 750.0,
+          "z": 100.0,
+          "o_x": 0.0,
+          "o_y": 0.0,
+          "o_z": 1.0,
+          "theta": 0.0
+        },
+        "approach_offset_in_pallet": {
+          "x": 29.4744,
+          "y": 0.0,
+          "z": 110.0
+        }
+      },
+      {
+        "seq": 4,
+        "col": 1,
+        "row": 1,
+        "layer": 0,
+        "x_mm": 350,
+        "y_mm": 250,
+        "z_mm": 100,
+        "label": "",
+        "length_mm": 150.0,
+        "width_mm": 200.0,
+        "height_mm": 100.0,
+        "pose_in_pallet": {
+          "x": 350,
+          "y": 250,
+          "z": 100,
+          "o_x": 0.0,
+          "o_y": 0.0,
+          "o_z": 1.0,
+          "theta": 0.0
+        },
+        "pose_in_world": {
+          "x": 1350.0,
+          "y": 750.0,
+          "z": 100.0,
+          "o_x": 0.0,
+          "o_y": 0.0,
+          "o_z": 1.0,
+          "theta": 0.0
+        },
+        "approach_offset_in_pallet": {
+          "x": 29.4744,
+          "y": 0.0,
+          "z": 110.0
+        }
+      },
+      {
+        "seq": 5,
+        "col": 0,
+        "row": 0,
+        "layer": 1,
+        "x_mm": 150,
+        "y_mm": 100,
+        "z_mm": 200,
+        "label": "",
+        "length_mm": 150.0,
+        "width_mm": 200.0,
+        "height_mm": 100.0,
+        "pose_in_pallet": {
+          "x": 150,
+          "y": 100,
+          "z": 200,
+          "o_x": 0.0,
+          "o_y": 0.0,
+          "o_z": 1.0,
+          "theta": 0.0
+        },
+        "pose_in_world": {
+          "x": 1150.0,
+          "y": 600.0,
+          "z": 200.0,
+          "o_x": 0.0,
+          "o_y": 0.0,
+          "o_z": 1.0,
+          "theta": 0.0
+        },
+        "approach_offset_in_pallet": {
+          "x": 29.4744,
+          "y": 0.0,
+          "z": 110.0
+        }
+      },
+      {
+        "seq": 6,
+        "col": 1,
+        "row": 0,
+        "layer": 1,
+        "x_mm": 350,
+        "y_mm": 100,
+        "z_mm": 200,
+        "label": "",
+        "length_mm": 150.0,
+        "width_mm": 200.0,
+        "height_mm": 100.0,
+        "pose_in_pallet": {
+          "x": 350,
+          "y": 100,
+          "z": 200,
+          "o_x": 0.0,
+          "o_y": 0.0,
+          "o_z": 1.0,
+          "theta": 0.0
+        },
+        "pose_in_world": {
+          "x": 1350.0,
+          "y": 600.0,
+          "z": 200.0,
+          "o_x": 0.0,
+          "o_y": 0.0,
+          "o_z": 1.0,
+          "theta": 0.0
+        },
+        "approach_offset_in_pallet": {
+          "x": 29.4744,
+          "y": 0.0,
+          "z": 110.0
+        }
+      },
+      {
+        "seq": 7,
+        "col": 0,
+        "row": 1,
+        "layer": 1,
+        "x_mm": 150,
+        "y_mm": 250,
+        "z_mm": 200,
+        "label": "",
+        "length_mm": 150.0,
+        "width_mm": 200.0,
+        "height_mm": 100.0,
+        "pose_in_pallet": {
+          "x": 150,
+          "y": 250,
+          "z": 200,
+          "o_x": 0.0,
+          "o_y": 0.0,
+          "o_z": 1.0,
+          "theta": 0.0
+        },
+        "pose_in_world": {
+          "x": 1150.0,
+          "y": 750.0,
+          "z": 200.0,
+          "o_x": 0.0,
+          "o_y": 0.0,
+          "o_z": 1.0,
+          "theta": 0.0
+        },
+        "approach_offset_in_pallet": {
+          "x": 29.4744,
+          "y": 0.0,
+          "z": 110.0
+        }
+      },
+      {
+        "seq": 8,
+        "col": 1,
+        "row": 1,
+        "layer": 1,
+        "x_mm": 350,
+        "y_mm": 250,
+        "z_mm": 200,
+        "label": "",
+        "length_mm": 150.0,
+        "width_mm": 200.0,
+        "height_mm": 100.0,
+        "pose_in_pallet": {
+          "x": 350,
+          "y": 250,
+          "z": 200,
+          "o_x": 0.0,
+          "o_y": 0.0,
+          "o_z": 1.0,
+          "theta": 0.0
+        },
+        "pose_in_world": {
+          "x": 1350.0,
+          "y": 750.0,
+          "z": 200.0,
+          "o_x": 0.0,
+          "o_y": 0.0,
+          "o_z": 1.0,
+          "theta": 0.0
+        },
+        "approach_offset_in_pallet": {
+          "x": 29.4744,
+          "y": 0.0,
+          "z": 110.0
+        }
+      }
+    ],
+    "cols": 2,
+    "rows": 2,
+    "layers": 2,
+    "capacity": 8,
+    "quantity": 8,
+    "overflow": 0,
+    "mode": "column",
+    "warnings": [],
+    "pallet_thickness_mm": 20.0,
+    "pallet_width_mm": 500.0,
+    "pallet_length_mm": 350.0,
+    "pallet_pose": {
+      "x": 1000.0,
+      "y": 500.0,
+      "z": 0.0,
+      "o_x": 0.0,
+      "o_y": 0.0,
+      "o_z": 1.0,
+      "theta": 0.0
+    }
+  },
+  "report_placement_success": {
+    "acknowledged": true,
+    "next_seq": 2,
+    "placed": 1,
+    "failed": 0,
+    "skipped": 0,
+    "remaining": 7,
+    "complete": false,
+    "last_error": ""
+  },
+  "report_placement_failure": {
+    "acknowledged": true,
+    "next_seq": 1,
+    "placed": 0,
+    "failed": 1,
+    "skipped": 0,
+    "remaining": 8,
+    "complete": false,
+    "last_error": "gripper reported no vacuum seal"
+  },
+  "skip_box": {
+    "skipped": 3,
+    "next_seq": 4,
+    "placed": 2,
+    "remaining": 5
+  },
+  "get_progress": {
+    "next_seq": 4,
+    "done_seqs": [
+      1,
+      2
+    ],
+    "skipped_seqs": [
+      3
+    ],
+    "failed_seqs": [],
+    "placed_count": 2,
+    "failed_count": 0,
+    "skipped_count": 1,
+    "total": 8,
+    "complete": false
+  },
+  "set_box_transform": {
+    "acknowledged": true,
+    "seq": 1,
+    "uuid": "box-1-v1",
+    "parent": "world"
+  }
+}

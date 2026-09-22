@@ -27,21 +27,154 @@
         },
         "props": [
           {
-            "_comment": "xy is the pick-station frame (400, -650 mm) plus its box_origin_offset_mm (200, 900 mm), giving (600, 250) mm. z assumes the conveyor surface sits at lowest_point_height_mm (200 mm) with the box centred half a box height above it. The vendored package settles neither the surface height nor pick_home_z_offset_mm's role for a resting box, so z is a GPU-time question, not a sourced number the way xy is.",
-            "name": "infeed_box",
+            "_comment": "Mass is 2.0 kg, not a round 5.0. The box is 0.2 x 0.15 x 0.1 m, so 0.003 cubic metres, and 5 kg of it is 1667 kg per cubic metre, denser than packed sand. 2 kg is 667, a heavily packed carton, and it leaves headroom under the UR5e's 5 kg rating for a 196 mm tool that hangs the box its full height below the flange. The GPU run of 2026-09-16 carried 5 kg and the wrist visibly swung, stalling j3 6 to 10 degrees short of every place waypoint. Measured, not derived. pick-station reports `corner at (200, -1200, 220)` in its own get_attributes summary, and its box_origin_offset_mm is (200, 900), so the infeed origin is (400, -300). Its frame-declared collider spans x 200..600 and y -1200..-100, which contains that point. z is the station top at 220 plus half a 100 mm box. Phase 2 read the offset against the station's FRAME instead of its corner and got (600, 250), which is 350 mm past the near edge, so the box fell to the floor. The other seven boxes are parked clear of the cell at x -2000, an invented spot that only has to be out of the way, and the palletizer re-poses each onto wherever box_props[0] actually rests.",
+            "name": "infeed_box_1",
             "type": "cube",
             "size": 0.05,
             "scale": [
-              3.0,
               4.0,
+              3.0,
               2.0
             ],
             "position": [
-              0.6,
-              0.25,
-              0.25
+              0.4,
+              -0.3,
+              0.27
             ],
-            "mass": 5.0,
+            "mass": 2.0,
+            "friction": 0.7,
+            "restitution": 0,
+            "contact_offset": 0.005
+          },
+          {
+            "name": "infeed_box_2",
+            "type": "cube",
+            "size": 0.05,
+            "scale": [
+              4.0,
+              3.0,
+              2.0
+            ],
+            "position": [
+              -2.0,
+              -0.9,
+              0.05
+            ],
+            "mass": 2.0,
+            "friction": 0.7,
+            "restitution": 0,
+            "contact_offset": 0.005
+          },
+          {
+            "name": "infeed_box_3",
+            "type": "cube",
+            "size": 0.05,
+            "scale": [
+              4.0,
+              3.0,
+              2.0
+            ],
+            "position": [
+              -2.0,
+              -0.6,
+              0.05
+            ],
+            "mass": 2.0,
+            "friction": 0.7,
+            "restitution": 0,
+            "contact_offset": 0.005
+          },
+          {
+            "name": "infeed_box_4",
+            "type": "cube",
+            "size": 0.05,
+            "scale": [
+              4.0,
+              3.0,
+              2.0
+            ],
+            "position": [
+              -2.0,
+              -0.3,
+              0.05
+            ],
+            "mass": 2.0,
+            "friction": 0.7,
+            "restitution": 0,
+            "contact_offset": 0.005
+          },
+          {
+            "name": "infeed_box_5",
+            "type": "cube",
+            "size": 0.05,
+            "scale": [
+              4.0,
+              3.0,
+              2.0
+            ],
+            "position": [
+              -2.0,
+              0.0,
+              0.05
+            ],
+            "mass": 2.0,
+            "friction": 0.7,
+            "restitution": 0,
+            "contact_offset": 0.005
+          },
+          {
+            "name": "infeed_box_6",
+            "type": "cube",
+            "size": 0.05,
+            "scale": [
+              4.0,
+              3.0,
+              2.0
+            ],
+            "position": [
+              -2.0,
+              0.3,
+              0.05
+            ],
+            "mass": 2.0,
+            "friction": 0.7,
+            "restitution": 0,
+            "contact_offset": 0.005
+          },
+          {
+            "name": "infeed_box_7",
+            "type": "cube",
+            "size": 0.05,
+            "scale": [
+              4.0,
+              3.0,
+              2.0
+            ],
+            "position": [
+              -2.0,
+              0.6,
+              0.05
+            ],
+            "mass": 2.0,
+            "friction": 0.7,
+            "restitution": 0,
+            "contact_offset": 0.005
+          },
+          {
+            "name": "infeed_box_8",
+            "type": "cube",
+            "size": 0.05,
+            "scale": [
+              4.0,
+              3.0,
+              2.0
+            ],
+            "position": [
+              -2.0,
+              0.9,
+              0.05
+            ],
+            "mass": 2.0,
             "friction": 0.7,
             "restitution": 0,
             "contact_offset": 0.005
@@ -200,17 +333,23 @@
       "name": "box-palletizer",
       "api": "rdk:service:generic",
       "model": "viam:isaac-sim-devin:palletizer",
+      "_comment": "obstacle_source is left unset so the default, world_state_store, applies. Proving that default path is the GPU run this overlay exists to drive.",
       "attributes": {
         "world": "isaac-world",
         "arm": "arm-1",
         "gripper": "gripper-1",
         "motion": "builtin",
-        "box_prop": "infeed_box",
-        "place_pose_mm": {
-          "x": 200,
-          "y": 500,
-          "z": 355
-        }
+        "sequencer": "pack-sequencer",
+        "box_props": [
+          "infeed_box_1",
+          "infeed_box_2",
+          "infeed_box_3",
+          "infeed_box_4",
+          "infeed_box_5",
+          "infeed_box_6",
+          "infeed_box_7",
+          "infeed_box_8"
+        ]
       }
     }
   ]

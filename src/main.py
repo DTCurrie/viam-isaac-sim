@@ -20,7 +20,7 @@ from viam.module.module import Module
 from viam.resource.registry import Registry
 
 import isaac_module.models  # noqa: F401 - registers all models
-from isaac_module import sdk_patches
+from isaac_module import frame_system, sdk_patches
 from isaac_module.sim_manager import SimManager
 
 sdk_patches.apply()
@@ -69,6 +69,11 @@ def _run_module(sim: SimManager, state: _ModuleThreadState) -> None:
         state.module = module
         for key in Registry.REGISTERED_RESOURCE_CREATORS().keys():
             module.add_model_from_registry(*key.split("/"))  # type: ignore[arg-type]  # SDK: key is "api/model", matching run_from_registry's own (unchecked) body
+        # scene-finalizer reads the frame system through this, which is a
+        # machine-level fact no resource is otherwise handed. The SDK dials
+        # the client lazily while resolving the first dependency, so the
+        # module is published here and its parent read at call time.
+        frame_system.set_module(module)
         loop.run_until_complete(module.start())
     except Exception:
         LOGGER.exception("module server exited with error")

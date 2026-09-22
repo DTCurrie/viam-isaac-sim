@@ -140,35 +140,77 @@ async def test_a_component_that_fails_past_the_schema_check_is_skipped_not_raise
     assert scenery is None
 
 
-def test_component_pose_is_resolved_into_frame_position_and_orientation():
+def _group_frame(name: str, pose: dict[str, float]) -> dict[str, Any]:
+    """The anchor primitive every workcell component puts first in its
+    get_visuals reply, as visuals_group.go's groupUnderFrame emits it."""
+    return {"type": "frame", "label": f"{name}/group", "parent_frame": "world", "pose": pose}
+
+
+def test_the_group_frame_primitive_is_the_components_frame_position_and_orientation():
     resource = _FakeWorkcellComponent(
-        model="viam:workcell-components:pallet",
-        pose={
-            "x": 200.0,
-            "y": 500.0,
-            "z": 200.0,
-            "o_x": 0.0,
-            "o_y": 0.0,
-            "o_z": 1.0,
-            "theta": 90.0,
+        model="viam:workcell-components:safety-fence",
+        visuals={
+            "visuals": [
+                _group_frame(
+                    "fence-left",
+                    {"x": -1150.0, "y": -350.0, "z": 0.0, "o_z": 1.0, "theta": 90.0},
+                ),
+                {"type": "box", "label": "fence-left/screen", "dims_mm": {"x": 1, "y": 1, "z": 1}},
+            ]
         },
     )
 
-    scenery = materialise_workcell({"pallet": resource}, logger=LOGGER)
+    scenery = materialise_workcell({"fence-left": resource}, logger=LOGGER)
 
-    assert scenery["pallet"].frame_position_m == pytest.approx((0.2, 0.5, 0.2))
-    orientation = scenery["pallet"].frame_orientation_wxyz
+    assert scenery["fence-left"].frame_position_m == pytest.approx((-1.15, -0.35, 0.0))
+    orientation = scenery["fence-left"].frame_orientation_wxyz
     assert orientation[1] == pytest.approx(0.0, abs=1e-9)
     assert orientation[2] == pytest.approx(0.0, abs=1e-9)
     assert orientation[0] == pytest.approx(orientation[3])
 
 
-def test_component_pose_defaults_to_identity_orientation_when_absent():
-    resource = _FakeWorkcellComponent(model="viam:workcell-components:pallet")
+def test_get_attributes_pose_is_not_the_anchor():
+    # pick-station reports its bottom-left-top CORNER as get_attributes.pose,
+    # centre plus (-200, -550, +20) for the vendored fragment's station, while
+    # its primitives hang off the centre. Anchoring on the corner drew the
+    # whole station 585 mm from its own collider.
+    resource = _FakeWorkcellComponent(
+        model="viam:workcell-components:pick-station",
+        pose={"x": 200.0, "y": -1200.0, "z": 220.0, "o_z": 1.0},
+        visuals={
+            "visuals": [
+                _group_frame("pick-station", {"x": 400.0, "y": -650.0, "z": 200.0, "o_z": 1.0})
+            ]
+        },
+    )
+
+    scenery = materialise_workcell({"pick-station": resource}, logger=LOGGER)
+
+    assert scenery["pick-station"].frame_position_m == pytest.approx((0.4, -0.65, 0.2))
+    assert scenery["pick-station"].frame_orientation_wxyz == (1.0, 0.0, 0.0, 0.0)
+
+
+def test_a_reply_with_no_group_frame_is_already_in_the_world_frame():
+    resource = _FakeWorkcellComponent(
+        model="viam:workcell-components:pallet",
+        pose={"x": 200.0, "y": 500.0, "z": 200.0},
+    )
 
     scenery = materialise_workcell({"pallet": resource}, logger=LOGGER)
 
     assert scenery["pallet"].frame_position_m == (0.0, 0.0, 0.0)
+    assert scenery["pallet"].frame_orientation_wxyz == (1.0, 0.0, 0.0, 0.0)
+
+
+def test_a_group_frame_with_no_orientation_is_unrotated():
+    resource = _FakeWorkcellComponent(
+        model="viam:workcell-components:pallet",
+        visuals={"visuals": [_group_frame("pallet", {"x": 200.0, "y": 500.0, "z": 200.0})]},
+    )
+
+    scenery = materialise_workcell({"pallet": resource}, logger=LOGGER)
+
+    assert scenery["pallet"].frame_position_m == pytest.approx((0.2, 0.5, 0.2))
     assert scenery["pallet"].frame_orientation_wxyz == (1.0, 0.0, 0.0, 0.0)
 
 
