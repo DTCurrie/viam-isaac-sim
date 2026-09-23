@@ -716,6 +716,13 @@ def test_do_command_unknown_name_raises(world):
         asyncio.run(world.do_command({"command": "joint_state", "name": "does-not-exist"}))
 
 
+def test_surface_gripper_smoke_refuses_the_mock_world(world):
+    # the smoke rig authors PhysX joints; the mock world has no stage to put
+    # them on, so it says so instead of pretending
+    with pytest.raises(ValueError, match="needs Isaac Sim"):
+        asyncio.run(world.do_command({"command": "surface_gripper_smoke", "step": "status"}))
+
+
 def test_do_command_wrong_kind_name_raises(world):
     arm = IsaacArm.new(
         _config("world-wrong-kind-arm", {"world": "isaac-world", "asset": "ur5e", "mock_dof": 6}),

@@ -17,3 +17,17 @@ curl -sSfO "$UR/ur5e.json"
 curl -sSfO "$UR/ur7e.json"
 curl -sSfO "$UR/ur20.json"
 ```
+
+## The Robotiq EPick
+
+`epick_model.json` is the real driver's own kinematics document, copied byte for byte from
+`viam-labs/robotiq-epick` (`epick/epick_model.json`, commit `81aa5c75`, read 2026-09-22). The
+`viam:isaac-sim-devin:vacuum` model serves it verbatim from `GetKinematics`, so the motion service
+plans against exactly the collision boxes it sees on the real machine: six boxes in the gripper
+frame (z = 0 at the TCP, the flange at z = -196 mm), with no collider in the last 26 mm before the
+TCP so a grab approach is never refused. The same repo's `epick/geometry.go` carries the measured
+constants those boxes come from, vendored into `asset_catalog.py` as `EPICK`. To refresh:
+
+```sh
+curl -sSfO https://raw.githubusercontent.com/viam-labs/robotiq-epick/main/epick/epick_model.json
+```

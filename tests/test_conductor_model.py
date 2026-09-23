@@ -286,7 +286,7 @@ async def test_status_snapshot_is_isolated_from_the_next_call():
 
 
 # ----------------------------------------------------------------------
-# multi-pass sorting (phase-4e): re-census when a pass makes progress but
+# multi-pass sorting: re-census when a pass makes progress but
 # still has failures, stop when it doesn't, never retry oversize
 # ----------------------------------------------------------------------
 
@@ -822,7 +822,7 @@ async def test_scan_work_list_unions_a_block_detected_only_from_one_pose():
 
 
 # ----------------------------------------------------------------------
-# phase 5: loop controller, failure policy, telemetry
+# loop controller, failure policy, telemetry
 # ----------------------------------------------------------------------
 
 

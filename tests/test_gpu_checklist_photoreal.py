@@ -240,29 +240,34 @@ def test_geometry_diff_ignores_a_sub_tolerance_jitter():
     assert checklist.geometry_diff(baseline, current) == []
 
 
-def test_parse_args_default_phase_is_three():
+def test_parse_args_default_suite_is_materials():
     args = checklist._parse_args(["--mock"])
-    assert args.phase == 3
+    assert args.suite == "materials"
 
 
-def test_parse_args_accepts_phase_one():
-    args = checklist._parse_args(["--mock", "--phase", "1"])
-    assert args.phase == 1
+def test_parse_args_accepts_suite_hdri():
+    args = checklist._parse_args(["--mock", "--suite", "hdri"])
+    assert args.suite == "hdri"
 
 
-def test_parse_args_accepts_phase_three():
-    args = checklist._parse_args(["--mock", "--phase", "3"])
-    assert args.phase == 3
+def test_parse_args_accepts_suite_materials():
+    args = checklist._parse_args(["--mock", "--suite", "materials"])
+    assert args.suite == "materials"
 
 
-def test_phase_3_items_has_seven_entries_numbered_zero_to_six():
-    assert len(checklist.PHASE_3_ITEMS) == 7
-    for index, item in enumerate(checklist.PHASE_3_ITEMS):
+def test_parse_args_rejects_an_old_numeric_suite_value():
+    with pytest.raises(SystemExit):
+        checklist._parse_args(["--mock", "--suite", "3"])
+
+
+def test_materials_items_has_seven_entries_numbered_zero_to_six():
+    assert len(checklist.MATERIALS_ITEMS) == 7
+    for index, item in enumerate(checklist.MATERIALS_ITEMS):
         assert item.startswith(f"{index}.")
 
 
-def test_main_runs_phase_3_against_the_mock_and_exits_zero(capsys):
-    exit_code = checklist.main(["--mock", "--phase", "3"])
+def test_main_runs_materials_suite_against_the_mock_and_exits_zero(capsys):
+    exit_code = checklist.main(["--mock", "--suite", "materials"])
     assert exit_code == 0
     out = capsys.readouterr().out
     assert "list_nvidia_materials.py" in out

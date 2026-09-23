@@ -119,21 +119,82 @@ KNOWN_ASSETS: dict[str, dict[str, Any]] = {
     },
 }
 
-# The vacuum end effector, deliberately not a KNOWN_ASSETS row: it references
-# no USD on the content server, because a suction plate is a box the module
-# authors itself. That keeps it off the nucleus round trip and off the
-# reference-repair path the Robotiq asset needs, and it keeps simulates.json
-# free of a real-hardware row nobody has verified.
+# ---------------------------------------------------------------------------
+# The Robotiq EPick, the vacuum gripper the palletizing demo runs.
 #
-#   box_mm        the tool body, flange face to cup face, along tool +Z
-#   tcp_offset_m  flange -> cup face, the frame the planner drives
-#   cup_side_mm   the square suction face, the contact patch a payload has to
-#                 overlap for the cup to take hold
-VACUUM_TOOL: dict[str, Any] = {
+# Source: viam-labs/robotiq-epick, epick/geometry.go and epick/epick_model.json
+# at commit 81aa5c75, read 2026-09-22. That repo measured every number off the
+# full-resolution CAD exports under epick/meshes with its own fit script, and
+# epick_model.json (vendored under kinematics_files/) is what its driver serves
+# from GetKinematics. Ratings are from the EPick instruction manual, e-Series
+# edition of 2021-07-09, section 6.2 (mass, payload, gripping and release
+# times) and section 7 (the automatic mode's retry window).
+#
+# Every length is in the GRIPPER FRAME the driver's kinematics use: millimetres,
+# z = 0 at the TCP, the suction plane a machine config's frame
+# `translation.z: 196` puts there, and -z back toward the arm flange at
+# z = -196. The rendered cups stop 10 mm short of the TCP and their colliders
+# 26 mm short, so a grab approach that drives the TCP onto a box is never
+# refused by the planner. Each round part is drawn as a cylinder and collided
+# as the box epick_model.json carries: Viam's wire has no cylinder geometry, so
+# those boxes are what the planner on a real machine sees.
+EPICK: dict[str, Any] = {
     "kind": "gripper",
-    "box_mm": (80.0, 80.0, 196.0),
     "tcp_offset_m": 0.196,
-    "cup_side_mm": 70.0,
+    # gripper mass including the coupling, manual section 6.2
+    "mass_kg": 0.706,
+    "kinematics_path": _KINEMATICS_FILES_DIR / "epick_model.json",
+    "body": {
+        "radius_mm": 35.5,
+        # drawn 129 mm long: its rear boss reaches 3 mm past the flange, into
+        # the arm's own end-effector space. Collision stops at the flange plane
+        "visual_length_mm": 129.0,
+        "visual_center_z_mm": -134.5,
+        "collision_mm": (71.0, 71.0, 126.0),
+        "collision_center_z_mm": -133.0,
+    },
+    "plate": {
+        "size_mm": (204.5, 126.3, 3.2),
+        "center_z_mm": -68.4,
+    },
+    "cups": {
+        "radius_mm": 24.5,
+        # a 159.5 x 81.3 mm rectangular pattern, one cup per quadrant, named
+        # as epick_model.json names its links
+        "names": ("cup-xp-yp", "cup-xp-yn", "cup-xn-yp", "cup-xn-yn"),
+        "offsets_mm": ((79.75, 40.65), (79.75, -40.65), (-79.75, 40.65), (-79.75, -40.65)),
+        "visual_length_mm": 60.0,
+        "visual_center_z_mm": -40.0,
+        "tip_z_mm": -10.0,
+        "collision_mm": (49.0, 49.0, 44.0),
+        "collision_center_z_mm": -48.0,
+        "tcp_clearance_z_mm": -26.0,
+    },
+    # "exceeding 4.5 kg per air node could induce damage", manual section 6.2.
+    # The number Robotiq stands behind, used instead of the area formula since
+    # the CAD's 49 mm cup matches neither the 40 nor the 55 mm cup it rates
+    "payload_per_cup_kg": 4.5,
+    # the holding force is the cup's inside area times the vacuum, manual
+    # section 6.2.1, with 1 % of vacuum worth 1.013 kPa and 80 % the maximum
+    # the gripper regulates to (section 6.2). At 80 % a 49 mm cup develops
+    # 153 N, and that is the load that breaks an attachment in the sim
+    "max_vacuum_pct": 80.0,
+    "kpa_per_vacuum_pct": 1.013,
+    # gripping and release times for one 40 mm cup, manual section 6.2
+    "grip_time_ms": 150,
+    "release_time_ms": 180,
 }
-# the prim name the vacuum tool is authored at, under the arm it rides
-VACUUM_TOOL_PRIM = "VacuumTool"
+# the prim name the EPick's body is authored at, under the arm link it rides
+EPICK_PRIM = "EPick"
+
+# The cup stops this far above a payload's top face rather than on it, and the
+# attachment points' clearance offset equals it, so Isaac's surface gripper
+# starts its raycast at the box's top face and draws the box up to the cups.
+# Driving a rigid tool onto a rigid box makes contact the arm cannot push
+# through, so it stalls short of its commanded pose; and the plugin displaces a
+# gripped object by twice the distance its ray travels past the clearance
+# before it hits, so the gap and the clearance have to be the same number. A
+# vacuum mechanism constant, not packing geometry: it holds regardless of which
+# box or which cell this runs in. Measured on the GPU machine 2026-09-22: with
+# both at 5 mm a box is pulled 5.0 mm to the cups on close.
+CUP_APPROACH_GAP_MM = 5.0

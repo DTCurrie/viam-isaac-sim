@@ -40,7 +40,7 @@ def pre_grasp_pose(block_pose: Pose, standoff_mm: float = PRE_GRASP_STANDOFF_MM)
     return _pointing_down(block_pose.x, block_pose.y, block_pose.z + standoff_mm)
 
 
-# Measured on the GPU (phase 3, item 4): the 2F-85 pads reach 153 mm along the
+# Measured on the GPU: the 2F-85 pads reach 153 mm along the
 # tool axis with the TCP at their centre, 134 mm, so the fingertips extend 19 mm
 # past the TCP. A grasp lower than support + overhang drives them into the table.
 FINGERTIP_OVERHANG_MM = 19.0
@@ -127,7 +127,7 @@ def tallest_sweep_attempts(
     TALLEST_SWEEP_CORNER_INSET_MM from each corner, theta 0) FIRST, then
     SCAN_ATTEMPTS. Corners lead because a region-centre vantage hangs the
     camera's own gripper inside the region footprint, where it reads as a
-    ~274 mm object (GPU phase-4 run 1: all four centre vantages discarded);
+    ~274 mm object (a GPU run discarded all four centre vantages);
     a corner vantage keeps the arm outside the footprint."""
     (x0, y0, _z0), (x1, y1, _z1) = region_mm
     lo_x, hi_x = min(x0, x1), max(x0, x1)

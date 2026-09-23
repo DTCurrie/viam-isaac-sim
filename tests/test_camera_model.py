@@ -283,7 +283,7 @@ def test_validate_config_rejects_frequency():
 
 def test_frame_derived_orientation_is_marked_ros_axes(world):
     """A quat folded in from the Viam frame is ROS-optical (+Z forward); the
-    spawn must not read it as world axes (+X forward). GPU phase-4 run 1:
+    spawn must not read it as world axes (+X forward). A GPU run found
     that mismatch aimed the side camera at the backdrop (7994 mm read)."""
     config = _config("cam-frame-ov", {"world": "isaac-world", "depth": True})
     config.frame.parent = "world"

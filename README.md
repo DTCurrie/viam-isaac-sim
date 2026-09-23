@@ -23,7 +23,7 @@ an empty stage to a sorting cell that runs itself.
 | `viam:isaac-sim-devin:camera` | `rdk:component:camera` | Creates (or attaches to) a camera prim and serves RGB, depth (`image/vnd.viam.dep`) and point clouds (`pointcloud/pcd`). |
 | `viam:isaac-sim-devin:base` | `rdk:component:base` | Spawns a differential-drive robot (e.g. jetbot) and drives it. |
 | `viam:isaac-sim-devin:gripper` | `rdk:component:gripper` | Bolts a parallel-jaw gripper (e.g. Robotiq 2F-85) onto an arm's link and drives it open/closed. |
-| `viam:isaac-sim-devin:vacuum` | `rdk:component:gripper` | Bolts a suction tool onto an arm's link and takes hold by welding whatever is under the cup to it. |
+| `viam:isaac-sim-devin:vacuum` | `rdk:component:gripper` | Bolts the Robotiq EPick onto an arm's link and holds through Isaac's surface gripper, a contact-gated grip that breaks on its own past its rated load. |
 | `viam:isaac-sim-devin:conductor` | `rdk:service:generic` | Sorts a scattered pool of colored blocks onto per-color pads end to end via DoCommand (`start`/`stop`/`status`), single-shot, N loops, or continuous. |
 | `viam:isaac-sim-devin:sorter-sensor` | `rdk:component:sensor` | Proxies a conductor's `status` for data management, emitting each new loop record at most once. |
 | `viam:isaac-sim-devin:palletizer` | `rdk:service:generic` | Packs a pallet end to end via DoCommand (`start`/`stop`/`status`), taking every place target from a `viam:pack-sequencer:sequencer` service and reporting each box's settled pose back to it. |
@@ -473,6 +473,17 @@ The world also supports `DoCommand`:
 * `{"command": "jaw_deg", "name": "<gripper component>"}` -> `{"jaw_deg",
   "open_deg", "closed_deg"}`, the named gripper's current, open, and closed
   jaw angles
+* `{"command": "surface_gripper_smoke", "step": "author", "name": "<vacuum
+  gripper component>", "points_m": [[x, y, z], ...], "clearance_offset_m"?,
+  "max_grip_distance_m"?, "coaxial_force_limit_n"?, "shear_force_limit_n"?,
+  "retry_interval_s"?}` then `"step": "wire" | "restart" | "close" | "open" |
+  "status" | "cleanup"` -> an Isaac surface gripper authored over the
+  vacuum's mount link on the live stage, one attachment joint per point
+  (offsets in the link's frame, metres), driven a step at a time and
+  reporting the gripper's status and gripped objects. `restart` resets the
+  world, because Isaac only looks for grippers on the first frame after
+  play. Diagnostic tooling for adopting the surface gripper; sim only, and
+  `cleanup` removes everything it made
 
 The `randomize_props`, `scatter_cell` and `clear_cell` verbs are worked
 through with examples in [`docs/BLOCK_SORTING.md`](docs/BLOCK_SORTING.md).
@@ -660,19 +671,35 @@ asset on the content server, so there is no `asset` attribute.
 | `parent_prim` | `<arm prim>/wrist_3_link` | link it is bolted to |
 | `local_position` | _unset (identity)_ | `[x,y,z]` meters, mount pose of the tool on `parent_prim` |
 | `local_orientation_rpy_deg` | _unset (identity)_ | the tool sits flush on the flange |
-| `tcp_offset_m` | `0.196` | flange -> cup face along tool +Z, the Robotiq EPick's own reach |
-| `grab_delay_ms` | `1000` | how long `grab()` waits after engaging before it reports a hold, standing in for the pump cycle a real cup needs. `is_moving()` is true for that window |
-| `max_payload_gap_m` | `0.01` | how far a candidate's top face may sit from the cup face and still count as contact, in either direction, since a descending cup often presses slightly into its payload |
+| `tcp_offset_m` | `0.196` | flange -> cup plane along tool +Z, the EPick manual's own reach |
+| `grab_delay_ms` | `150` | how long `grab()` waits after engaging before it reports a hold, the manual's gripping time. `is_moving()` is true for that window |
+| `coaxial_force_limit_n` | `152.8` (N) | load along the cup axis that breaks the hold: the module reads how far the held box's face has dropped below each cup every physics step, converts that stretch to a load and opens the gripper once the most loaded cup's mean over a short window exceeds this limit. 0 turns the check off. The default is the cup's holding force at the EPick's 80 % maximum vacuum, its inside area times the pressure, from the manual's section 6.2.1 |
+| `shear_force_limit_n` | `305.6` (N) | sideways load that breaks the hold: half the cups' holding force in friction, summed over the four cups, since one attachment joint carries all of it |
+| `max_grip_distance_mm` | `15` | how far past its clearance the cup's raycast looks for a payload, must exceed the 5 mm approach gap the clearance is set to |
+| `retry_interval_s` | `2.0` | how long the automatic mode retries for vacuum before giving up, the manual's own window |
+| `cup_stiffness` | `5000` (N/m) | the bellows' spring rate along the cup axis |
+| `cup_damping` | `20` (N s/m) | the bellows' damping along the cup axis, kept low because the gripper reads the damper's force at every motion onset as load on the cup |
 | `mock_attach_prop` | _unset_ | mock only: name of the prop the cup finds under it (unset = nothing to grab, so `grab()` returns `false`) |
 
-**Frame**: like the parallel-jaw gripper, the vacuum's frame is its TCP, which is the cup
-face, so the motion service plans the cup onto the payload rather than the flange. Set
-`frame.parent` to the arm.
+**Frame**: like the parallel-jaw gripper, the vacuum's frame is its TCP, the plane the four
+cups share, so the motion service plans that plane onto the payload rather than the flange.
+Set `frame.parent` to the arm.
 
-**Holding versus engaged**: a cup commanded to take hold with nothing under it is engaged and
-holding nothing, which a jaw cannot be. `get_current_inputs` reports the command, matching the
-parallel-jaw model, where a jaw closed on nothing still reads at its commanded position.
-`is_holding_something` reports the catch, and its `meta` carries both.
+**Holding versus engaged**: the hold is contact-gated, not commanded. Closing the gripper
+raycasts from each cup for whatever the approach put under it, and the hold breaks two ways with
+no command from here. The plugin's own one-step coaxial check is authored off, so the module's
+own monitor watches the coaxial load instead: it reads the held box's face under each cup every physics
+step, takes the most loaded cup, and opens the gripper once that load's mean over a short window
+exceeds `coaxial_force_limit_n`. Shear stays with the plugin, which still opens the gripper the
+instant a sideways load exceeds `shear_force_limit_n`. A cup commanded to take hold with nothing
+under it is engaged and holding nothing, which a jaw cannot be. `get_current_inputs` reports the
+command, matching the parallel-jaw model, where a jaw closed on nothing still reads at its
+commanded position. `is_holding_something` reports the gripper's own status and gripped object
+paths in its `meta`, alongside whether it is holding, whether it was last commanded engaged, and
+the coaxial monitor's own reading: `coaxial_load_n` (the current windowed mean),
+`peak_coaxial_load_n` (the highest single-step load since the last grab) and
+`released_load_n` (the windowed mean that opened the gripper, unset while nothing has released)
+and `coaxial_monitor` (`off`, `idle`, `armed` or `stopped`, the monitor's own state).
 
 ### camera attributes
 

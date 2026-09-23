@@ -1,6 +1,5 @@
-"""Lists NVIDIA-hosted material trees against the Isaac assets root, for phase
-3's item 0 (`.claude/plans/photoreal-workcell/phase-3-pbr-materials.md`): is
-there a hosted wood or rubber PBR set that beats the bundled ambientCG ones.
+"""Lists NVIDIA-hosted material trees against the Isaac assets root, to check
+whether there is a hosted wood or rubber PBR set that beats the bundled ambientCG ones.
 
 Runs INSIDE Isaac Sim's python (it boots a headless ``SimulationApp`` to get
 the asset resolver and ``omni.client``), e.g. on the GPU machine::

@@ -1,4 +1,4 @@
-"""Conductor mock e2e (phase-4 mock gate): a real mock-backend world (built
+"""Conductor mock e2e (mock gate): a real mock-backend world (built
 the way tests/test_scatter_cell.py builds one - MockWorldHandle, no Isaac Sim,
 no thread) behind ``start``'s real ``scatter_cell`` seed plumbing, with fake
 vision/arm/gripper/motion supplying fabricated multi-color detections across

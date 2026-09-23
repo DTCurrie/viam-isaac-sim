@@ -166,3 +166,12 @@ def apply_prop_physics(isaac: Any, world: Any, prim_path: str, prop: dict[str, A
             set_mass(mass)
         else:
             LOGGER.warning("prop %s: object has no set_mass (e.g. a FixedCuboid)", prop.get("name"))
+        # While the sim plays, set_mass writes the physics view and not the
+        # stage, and the world reset that follows a spawn rebuilds every body
+        # from the stage: a prop spawned mid-run came back at its default
+        # mass, which is how a 78 kg stand-in weighed nothing on the GPU
+        # machine on 2026-09-23. The stage carries the mass too, so it survives
+        prim = getattr(obj, "prim", None)
+        usd_physics = getattr(isaac, "UsdPhysics", None)
+        if prim is not None and usd_physics is not None:
+            usd_physics.MassAPI.Apply(prim).CreateMassAttr(float(mass))

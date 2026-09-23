@@ -208,8 +208,63 @@ def test_parse_args_defaults():
     assert args.box_prop == "infeed_box"
     assert (args.pick_x_mm, args.pick_y_mm, args.pick_z_mm) == (0.0, 0.0, 0.0)
     assert (args.place_x_mm, args.place_y_mm) == (700.0, 0.0)
-    assert args.phase == 1
+    assert args.suite == "first-box"
     assert args.run_label == "cold"
+    assert args.grab_delay_ms == 250.0
+    assert args.retry_interval_s == 2.0
+    assert args.coaxial_limit_n == checklist.DEFAULT_COAXIAL_FORCE_LIMIT_N
+    assert args.items is None
+
+
+def test_parse_args_accepts_an_items_list():
+    args = checklist._parse_args(
+        [
+            "--address",
+            "10.0.0.1",
+            "--box-prop",
+            "infeed_box",
+            "--run-label",
+            "cold",
+            "--items",
+            "4,7",
+            *_REQUIRED_POSE_ARGS,
+        ]
+    )
+    assert args.items == frozenset({4, 7})
+
+
+def test_parse_args_rejects_a_non_integer_items_value():
+    with pytest.raises(SystemExit):
+        checklist._parse_args(
+            [
+                "--address",
+                "10.0.0.1",
+                "--box-prop",
+                "infeed_box",
+                "--run-label",
+                "cold",
+                "--items",
+                "x",
+                *_REQUIRED_POSE_ARGS,
+            ]
+        )
+
+
+def test_parse_args_accepts_a_coaxial_limit_override():
+    args = checklist._parse_args(
+        [
+            "--address",
+            "10.0.0.1",
+            "--box-prop",
+            "infeed_box",
+            "--run-label",
+            "cold",
+            "--coaxial-limit-n",
+            "20.0",
+            *_REQUIRED_POSE_ARGS,
+        ]
+    )
+    assert args.coaxial_limit_n == 20.0
 
 
 def test_parse_args_accepts_a_warm_label():
@@ -389,7 +444,7 @@ def test_fragment_component_frames_mm_against_the_real_vendored_fragment():
     assert "tray-dock" not in frames
 
 
-def test_parse_args_accepts_phase_2():
+def test_parse_args_accepts_workcell():
     args = checklist._parse_args(
         [
             "--address",
@@ -398,15 +453,15 @@ def test_parse_args_accepts_phase_2():
             "infeed_box",
             "--run-label",
             "cold",
-            "--phase",
-            "2",
+            "--suite",
+            "workcell",
             *_REQUIRED_POSE_ARGS,
         ]
     )
-    assert args.phase == 2
+    assert args.suite == "workcell"
 
 
-def test_parse_args_accepts_phase_3():
+def test_parse_args_accepts_epick():
     args = checklist._parse_args(
         [
             "--address",
@@ -415,40 +470,62 @@ def test_parse_args_accepts_phase_3():
             "infeed_box",
             "--run-label",
             "cold",
-            "--phase",
-            "3",
+            "--suite",
+            "epick",
             *_REQUIRED_POSE_ARGS,
         ]
     )
-    assert args.phase == 3
+    assert args.suite == "epick"
+
+
+def test_parse_args_accepts_pack():
+    args = checklist._parse_args(
+        [
+            "--address",
+            "10.0.0.1",
+            "--box-prop",
+            "infeed_box",
+            "--run-label",
+            "cold",
+            "--suite",
+            "pack",
+            *_REQUIRED_POSE_ARGS,
+        ]
+    )
+    assert args.suite == "pack"
     assert args.sequencer == "pack-sequencer"
     assert args.obstacle_source_label == "world_state_store"
 
 
-def test_parse_args_phase_3_needs_no_box_prop_or_poses():
-    # Phase 3 reads the infeed pose and every place target off the service's
-    # own status records. Requiring them here would mean typing numbers the
-    # run ignores, which is how an invented value comes to look measured.
-    args = checklist._parse_args(["--address", "10.0.0.1", "--run-label", "cold", "--phase", "3"])
-    assert args.phase == 3
+def test_parse_args_pack_needs_no_box_prop_or_poses():
+    # The pack suite reads the infeed pose and every place target off the
+    # service's own status records. Requiring them here would mean typing
+    # numbers the run ignores, which is how an invented value comes to look
+    # measured.
+    args = checklist._parse_args(
+        ["--address", "10.0.0.1", "--run-label", "cold", "--suite", "pack"]
+    )
+    assert args.suite == "pack"
     assert args.box_prop is None
     assert (args.pick_x_mm, args.pick_y_mm, args.pick_z_mm) == (None, None, None)
     assert (args.place_x_mm, args.place_y_mm) == (None, None)
 
 
-@pytest.mark.parametrize("phase", ["1", "2"])
-def test_parse_args_phases_1_and_2_still_require_the_box_prop_and_poses(phase: str):
+@pytest.mark.parametrize("suite", ["first-box", "workcell", "epick"])
+def test_parse_args_single_box_suites_still_require_the_box_prop_and_poses(suite: str):
     with pytest.raises(SystemExit):
-        checklist._parse_args(["--address", "10.0.0.1", "--run-label", "cold", "--phase", phase])
+        checklist._parse_args(["--address", "10.0.0.1", "--run-label", "cold", "--suite", suite])
 
 
-def test_single_box_args_rejects_a_phase_3_shaped_args():
-    args = checklist._parse_args(["--address", "10.0.0.1", "--run-label", "cold", "--phase", "3"])
+def test_single_box_args_rejects_a_pack_shaped_args():
+    args = checklist._parse_args(
+        ["--address", "10.0.0.1", "--run-label", "cold", "--suite", "pack"]
+    )
     with pytest.raises(ValueError, match="pick and place poses"):
         checklist._single_box_args(args)
 
 
-def test_parse_args_rejects_a_phase_outside_1_2_and_3():
+def test_parse_args_rejects_a_suite_outside_the_known_four():
     with pytest.raises(SystemExit):
         checklist._parse_args(
             [
@@ -458,11 +535,29 @@ def test_parse_args_rejects_a_phase_outside_1_2_and_3():
                 "infeed_box",
                 "--run-label",
                 "cold",
-                "--phase",
-                "4",
+                "--suite",
+                "cooking",
                 *_REQUIRED_POSE_ARGS,
             ]
         )
+
+
+def test_parse_args_rejects_legacy_numbered_suite_spellings():
+    for suite in ("2", "2.1"):
+        with pytest.raises(SystemExit):
+            checklist._parse_args(
+                [
+                    "--address",
+                    "10.0.0.1",
+                    "--box-prop",
+                    "infeed_box",
+                    "--run-label",
+                    "cold",
+                    "--suite",
+                    suite,
+                    *_REQUIRED_POSE_ARGS,
+                ]
+            )
 
 
 def test_parse_args_accepts_an_obstacle_source_label():
@@ -1190,6 +1285,30 @@ async def test_guarded_passes_a_working_items_result_straight_through():
     )
 
 
+async def test_guarded_if_listed_skips_an_item_not_in_the_requested_set():
+    async def not_reached() -> tuple[str, bool]:
+        raise AssertionError("skipped items must not run their check")
+
+    result = await checklist._guarded_if_listed(4, "4. tear-off", frozenset({7}), not_reached)
+    assert result is None
+
+
+async def test_guarded_if_listed_runs_an_item_in_the_requested_set():
+    async def works() -> tuple[str, bool]:
+        return "[PASS] 4. tear-off: fine", True
+
+    result = await checklist._guarded_if_listed(4, "4. tear-off", frozenset({4, 7}), works)
+    assert result == ("[PASS] 4. tear-off: fine", True)
+
+
+async def test_guarded_if_listed_runs_every_item_when_items_is_none():
+    async def works() -> tuple[str, bool]:
+        return "[PASS] 4. tear-off: fine", True
+
+    result = await checklist._guarded_if_listed(4, "4. tear-off", None, works)
+    assert result == ("[PASS] 4. tear-off: fine", True)
+
+
 class _FallingWorld:
     """A world where a teleported prop drops straight down by whatever
     clearance it was given, which is what a support directly below it does.
@@ -1374,3 +1493,290 @@ def test_empty_spot_mm_is_none_when_every_offset_has_something_under_it():
         for index, y in enumerate((-700.0, 100.0, -1000.0, 400.0))
     ]
     assert checklist.empty_spot_mm(geometries, (400.0, -300.0, 320.0)) is None
+
+
+# the epick suite: the Robotiq EPick
+
+
+def test_collision_reach_z_mm_on_the_vendored_file_is_26mm():
+    import json
+
+    model_path = (
+        _EXAMPLES_DIR.parent / "src" / "isaac_module" / "kinematics_files" / "epick_model.json"
+    )
+    model = json.loads(model_path.read_text())
+    assert checklist.collision_reach_z_mm(model) == pytest.approx(-26.0, abs=1e-9)
+
+
+def test_offset_along_tool_mm_reads_a_prim_above_a_downward_tcp():
+    tcp_pose = {"x": 0.0, "y": 0.0, "z": 500.0, "o_x": 0.0, "o_y": 0.0, "o_z": -1.0, "theta": 0.0}
+    prim_pose = {"x": 0.0, "y": 0.0, "z": 634.5}
+    assert checklist.offset_along_tool_mm(tcp_pose, prim_pose) == pytest.approx(134.5, abs=1e-6)
+
+
+def test_offset_along_tool_mm_is_zero_at_the_tcp_itself():
+    tcp_pose = {"x": 100.0, "y": 200.0, "z": 300.0, "o_z": -1.0, "theta": 0.0}
+    assert checklist.offset_along_tool_mm(tcp_pose, dict(tcp_pose)) == pytest.approx(0.0, abs=1e-9)
+
+
+def test_refusal_within_passes_exactly_on_the_bound():
+    bound_s = 250.0 / 1000.0 + 2.0 + 1.0
+    assert checklist.refusal_within(bound_s, 250.0, 2.0, 1.0) is True
+
+
+def test_refusal_within_fails_just_past_the_bound():
+    bound_s = 250.0 / 1000.0 + 2.0 + 1.0
+    assert checklist.refusal_within(bound_s + 0.001, 250.0, 2.0, 1.0) is False
+
+
+def test_tilt_deg_is_zero_for_a_box_hanging_flat_under_the_cups():
+    # a 180 degree rotation about X: the tool points straight down
+    tool_pointing_down = (0.0, 1.0, 0.0, 0.0)
+    upright_box = (1.0, 0.0, 0.0, 0.0)
+    assert checklist.tilt_deg(tool_pointing_down, upright_box) == pytest.approx(0.0, abs=1e-9)
+
+
+def test_tilt_deg_reads_a_known_rotation_between_tool_and_box():
+    from isaac_module.spatial import quat_from_axis_angle
+
+    tool_pointing_down = (0.0, 1.0, 0.0, 0.0)
+    rolled_box = quat_from_axis_angle((1.0, 0.0, 0.0), math.radians(10.0))
+    assert checklist.tilt_deg(tool_pointing_down, rolled_box) == pytest.approx(10.0, abs=1e-6)
+
+
+def test_tilt_deg_reads_180_between_a_downward_tool_axis_and_an_upright_one():
+    identity_tool = (1.0, 0.0, 0.0, 0.0)
+    upright_box = (1.0, 0.0, 0.0, 0.0)
+    assert checklist.tilt_deg(identity_tool, upright_box) == pytest.approx(180.0, abs=1e-9)
+
+
+def test_swing_verdict_fails_at_exactly_zero_tilt():
+    ok, _detail = checklist.swing_verdict(0.0, 0.0, True)
+    assert ok is False
+
+
+def test_swing_verdict_passes_at_the_floor():
+    ok, _detail = checklist.swing_verdict(0.05, 0.0, True)
+    assert ok is True
+
+
+def test_swing_verdict_passes_just_under_the_ceiling():
+    ok, _detail = checklist.swing_verdict(14.9, 0.0, True)
+    assert ok is True
+
+
+def test_swing_verdict_fails_at_the_ceiling():
+    ok, _detail = checklist.swing_verdict(15.0, 0.0, True)
+    assert ok is False
+
+
+def test_swing_verdict_fails_when_the_residual_never_settled():
+    ok, _detail = checklist.swing_verdict(
+        5.0, checklist.SWING_RESIDUAL_TILT_TOLERANCE_DEG + 0.1, True
+    )
+    assert ok is False
+
+
+def test_swing_verdict_fails_when_the_grip_let_go_partway():
+    ok, _detail = checklist.swing_verdict(5.0, 0.0, False)
+    assert ok is False
+
+
+def test_tear_off_mass_kg_outweighs_all_four_cups_at_the_break_force():
+    """The box must outweigh what four cups hold at their own rated coaxial
+    break force, with 25% margin."""
+    cups = ("cup-xn-yn", "cup-xn-yp", "cup-xp-yn", "cup-xp-yp")
+    coaxial_limit_n = 44.1
+
+    mass_kg = checklist.tear_off_mass_kg(cups, coaxial_limit_n)
+
+    lower_bound_kg = len(cups) * coaxial_limit_n / checklist.STANDARD_GRAVITY_M_S2
+    upper_bound_kg = 2 * lower_bound_kg
+    assert mass_kg > lower_bound_kg
+    assert mass_kg < upper_bound_kg
+
+
+def test_under_limit_mass_kg_sits_below_the_four_cup_hold_with_margin():
+    cups = ("cup-xn-yn", "cup-xn-yp", "cup-xp-yn", "cup-xp-yp")
+    coaxial_limit_n = 44.1
+
+    mass_kg = checklist.under_limit_mass_kg(cups, coaxial_limit_n)
+
+    full_hold_kg = len(cups) * coaxial_limit_n / checklist.STANDARD_GRAVITY_M_S2
+    half_hold_kg = 0.5 * full_hold_kg
+    assert mass_kg < full_hold_kg
+    assert mass_kg > half_hold_kg
+
+
+def test_tear_off_verdict_passes_when_over_drops_under_holds_and_light_holds():
+    over = checklist.TearOffReading(
+        held=False,
+        rise_mm=checklist.TEAR_OFF_RISE_TOLERANCE_MM - 1.0,
+        peak_load_n=31.2,
+        released_load_n=24.9,
+    )
+    under = checklist.TearOffReading(held=True, rise_mm=checklist.LIFT_DISTANCE_MM, peak_load_n=9.1)
+    light = checklist.TearOffReading(held=True, rise_mm=checklist.LIFT_DISTANCE_MM, peak_load_n=6.4)
+
+    ok, detail = checklist.tear_off_verdict(over, under, light)
+
+    assert ok is True
+    assert "over-limit released at the grab or on lift" in detail
+    assert "peak 31.2 N per cup" in detail
+    assert "released at 24.9 N" in detail
+    assert "peak 9.1 N per cup" in detail
+    assert "peak 6.4 N per cup" in detail
+
+
+def test_tear_off_verdict_fails_when_the_over_limit_stand_in_is_lifted_and_held():
+    over = checklist.TearOffReading(
+        held=True, rise_mm=checklist.TEAR_OFF_RISE_TOLERANCE_MM + 1.0, sag_mm=3.2
+    )
+    under = checklist.TearOffReading(held=True, rise_mm=checklist.LIFT_DISTANCE_MM)
+    light = checklist.TearOffReading(held=True, rise_mm=checklist.LIFT_DISTANCE_MM)
+
+    ok, detail = checklist.tear_off_verdict(over, under, light)
+
+    assert ok is False
+    assert "the module's monitor did not release it" in detail
+    assert "3.2" in detail
+
+
+def test_tear_off_verdict_fails_when_the_under_limit_stand_in_dropped():
+    over = checklist.TearOffReading(held=False, rise_mm=checklist.TEAR_OFF_RISE_TOLERANCE_MM - 1.0)
+    under = checklist.TearOffReading(held=False, rise_mm=0.0)
+    light = checklist.TearOffReading(held=True, rise_mm=checklist.LIFT_DISTANCE_MM)
+
+    ok, _detail = checklist.tear_off_verdict(over, under, light)
+
+    assert ok is False
+
+
+def test_tear_off_verdict_fails_when_the_light_box_dropped():
+    over = checklist.TearOffReading(held=False, rise_mm=checklist.TEAR_OFF_RISE_TOLERANCE_MM - 1.0)
+    under = checklist.TearOffReading(held=True, rise_mm=checklist.LIFT_DISTANCE_MM)
+    light = checklist.TearOffReading(held=False, rise_mm=0.0)
+
+    ok, _detail = checklist.tear_off_verdict(over, under, light)
+
+    assert ok is False
+
+
+def test_tear_off_and_under_limit_masses_follow_the_configured_coaxial_limit():
+    cups = ("cup-xn-yn", "cup-xn-yp", "cup-xp-yn", "cup-xp-yp")
+    coaxial_limit_n = 20.0
+
+    over_mass_kg = checklist.tear_off_mass_kg(cups, coaxial_limit_n)
+    under_mass_kg = checklist.under_limit_mass_kg(cups, coaxial_limit_n)
+
+    assert over_mass_kg == round(
+        len(cups) * coaxial_limit_n * 1.25 / checklist.STANDARD_GRAVITY_M_S2
+    )
+    assert under_mass_kg == round(
+        checklist.TEAR_OFF_UNDER_LIMIT_MARGIN
+        * len(cups)
+        * coaxial_limit_n
+        / checklist.STANDARD_GRAVITY_M_S2
+    )
+
+
+def test_lift_stall_detail_keys_off_the_stuck_joints_clause():
+    message = (
+        "tear-off over-limit lift (linear) to (0, 0, 0) failed: RuntimeError: arm arm-1 "
+        "stalled at waypoint 9/12 (5 consecutive, stuck joints: j1: at -83.7 want -91.0)"
+    )
+    detail = checklist.lift_stall_detail("epick_tearoff_box", message)
+    assert detail == (
+        "epick_tearoff_box: the arm could not lift it (stuck joints: j1: at -83.7 want -91.0))"
+    )
+
+
+def test_lift_stall_detail_falls_back_to_the_message_head_when_no_stuck_joints_clause():
+    message = "x" * (checklist.LIFT_STALL_MESSAGE_HEAD_CHARS + 40)
+    detail = checklist.lift_stall_detail("epick_tearoff_box", message)
+    assert detail == (
+        f"epick_tearoff_box: the arm could not lift it "
+        f"({message[: checklist.LIFT_STALL_MESSAGE_HEAD_CHARS]})"
+    )
+
+
+def test_tear_off_verdict_fails_with_the_lower_the_limit_wording_when_the_arm_could_not_lift():
+    over = checklist.TearOffReading(held=False, rise_mm=0.0, could_not_lift=True, mass_kg=78.0)
+    under = checklist.TearOffReading(held=True, rise_mm=checklist.LIFT_DISTANCE_MM)
+    light = checklist.TearOffReading(held=True, rise_mm=checklist.LIFT_DISTANCE_MM)
+
+    ok, detail = checklist.tear_off_verdict(over, under, light)
+
+    assert ok is False
+    assert "the arm cannot lift 78 kg" in detail
+    assert "lower the configured coaxial limit" in detail
+
+
+def test_hold_load_detail_reports_mean_and_peak():
+    detail = checklist.hold_load_detail({"coaxial_load_n": 12.34, "peak_coaxial_load_n": 15.6})
+    assert detail == "load 12.3 N mean, peak 15.6 N per cup"
+
+
+def test_hold_load_detail_appends_the_release_load_when_present():
+    detail = checklist.hold_load_detail(
+        {"coaxial_load_n": 12.34, "peak_coaxial_load_n": 31.2, "released_load_n": 24.9}
+    )
+    assert detail == "load 12.3 N mean, peak 31.2 N per cup, released at 24.9 N"
+
+
+def test_hold_load_detail_is_na_when_the_module_carries_no_load_meta():
+    assert checklist.hold_load_detail({}) == "load n/a"
+
+
+def test_hold_load_detail_names_the_monitor_state_when_the_module_reports_one():
+    detail = checklist.hold_load_detail(
+        {"coaxial_load_n": 0.0, "peak_coaxial_load_n": 0.0, "coaxial_monitor": "idle"}
+    )
+    assert detail == "load 0.0 N mean, peak 0.0 N per cup, monitor idle"
+
+
+def test_hold_lost_detail_names_the_leg_and_the_boxs_pose():
+    detail = checklist.hold_lost_detail("swing lift", {"x": 1.0, "y": 2.0, "z": 3.0})
+    assert "hold lost after swing lift" in detail
+    assert "1.0" in detail and "2.0" in detail and "3.0" in detail
+
+
+def test_hold_lost_detail_says_no_known_pose_when_the_box_never_registered():
+    detail = checklist.hold_lost_detail("release lift", None)
+    assert "hold lost after release lift" in detail
+    assert "no known pose" in detail
+
+
+def test_branch_of_reads_wrist_2s_sign():
+    seed_a = checklist.PLACE_DESCENT_SEED_JOINTS_DEG["A"]
+    seed_b = checklist.PLACE_DESCENT_SEED_JOINTS_DEG["B"]
+    assert checklist.branch_of(seed_a) == "A"
+    assert checklist.branch_of(seed_b) == "B"
+
+
+def test_branch_report_names_a_seed_that_held():
+    detail = checklist.branch_report("A", "A", "A")
+    assert "held the seed" in detail
+    assert "did not hold the seed" not in detail
+
+
+def test_branch_report_names_a_seed_that_did_not_hold():
+    detail = checklist.branch_report("A", "B", "B")
+    assert "did not hold the seed" in detail
+    assert "branch changed" not in detail
+
+
+def test_branch_report_names_a_branch_that_changed_mid_pick():
+    detail = checklist.branch_report("A", "A", "B")
+    assert "did not hold the seed" in detail
+    assert "branch changed between standoff and descent start" in detail
+
+
+def test_wrist_fold_deg_is_zero_on_a_monotone_descent():
+    samples = [[0.0, 0.0, 0.0, joint, 0.0, 0.0] for joint in (90.0, 92.0, 95.0, 100.0)]
+    assert checklist.wrist_fold_deg(samples) == pytest.approx(0.0, abs=1e-9)
+
+
+def test_wrist_fold_deg_reads_a_78_degree_reversal():
+    samples = [[0.0, 0.0, 0.0, joint, 0.0, 0.0] for joint in (90.0, 95.0, 87.2, 95.0)]
+    assert checklist.wrist_fold_deg(samples) == pytest.approx(7.8, abs=1e-9)

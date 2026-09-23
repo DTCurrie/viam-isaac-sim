@@ -376,7 +376,7 @@ def build_material(
 
     The caller passes the object as ``visual_material=`` to the cuboid, or
     ``apply_visual_material`` on the ground plane object. Isaac Sim 5.0.0
-    API, pinned in the phase notes once the GPU checklist confirms it:
+    API, pinned once the GPU checklist confirms it:
     ``isaacsim.core.api.materials.OmniPBR(prim_path, name, shader=None,
     texture_path=None, texture_scale=None, texture_translate=None,
     color=None)`` with ``.shaders_list -> list[UsdShade.Shader]``."""

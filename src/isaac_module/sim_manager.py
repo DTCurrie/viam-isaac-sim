@@ -27,10 +27,16 @@ from typing import Any, cast
 from viam.logging import getLogger
 
 from . import FAMILY, NAMESPACE
-from .asset_catalog import KNOWN_ASSETS, VACUUM_TOOL, VACUUM_TOOL_PRIM
+from .asset_catalog import CUP_APPROACH_GAP_MM, EPICK, EPICK_PRIM, KNOWN_ASSETS
 from .asset_catalog import UR_JOINT_NAMES as UR_JOINT_NAMES
 from .assets import REMOTE_ASSET_SCHEMES
-from .compat import IsaacAPI, caps, import_isaac, isaac_version
+from .compat import IsaacAPI, caps, import_isaac, import_surface_gripper, isaac_version
+from .epick import (
+    attachment_points_tool_m,
+    author_epick_body,
+    epick_body_prim_paths,
+    tool_pose_in_link,
+)
 from .errors import (
     CameraInitError,
     PrimNotFoundError,
@@ -71,9 +77,10 @@ from .handles.gripper import (
 )
 from .handles.vacuum import (
     DEFAULT_GRAB_DELAY_MS,
-    DEFAULT_MAX_PAYLOAD_GAP_M,
+    DEFAULT_RELEASE_DELAY_MS,
     IsaacVacuumHandle,
     MockVacuumHandle,
+    StagePoseReader,
     VacuumGripperHandle,
 )
 from .handles.world import IsaacWorldHandle, MockWorldHandle, WorldHandle
@@ -151,6 +158,18 @@ from .spatial import (
 )
 from .spatial import (
     viam_base_frame as viam_base_frame,
+)
+from .surface_gripper import (
+    COAXIAL_LOAD_WINDOW_S,
+    DEFAULT_COAXIAL_FORCE_LIMIT_N,
+    DEFAULT_CUP_DAMPING_N_S_PER_M,
+    DEFAULT_CUP_STIFFNESS_N_PER_M,
+    DEFAULT_MAX_GRIP_DISTANCE_MM,
+    DEFAULT_RETRY_INTERVAL_S,
+    DEFAULT_SHEAR_FORCE_LIMIT_N,
+    CupCompliance,
+    GripperLimits,
+    author_attachment_rig,
 )
 from .usd_assets import (
     ASSET_CACHE_DIRNAME as ASSET_CACHE_DIRNAME,
@@ -488,6 +507,26 @@ class ComponentScenery:
     frame_orientation_wxyz: Quat = (1.0, 0.0, 0.0, 0.0)
 
 
+def _vacuum_gripper_limits(attrs: dict[str, Any]) -> tuple[GripperLimits, CupCompliance]:
+    """The surface gripper's limits and the cups' bellows, from a vacuum
+    gripper's attributes in the units the config uses (millimetres for the
+    grip distance), converted to the metres the prim takes."""
+    limits = GripperLimits(
+        max_grip_distance_m=float(attrs.get("max_grip_distance_mm", DEFAULT_MAX_GRIP_DISTANCE_MM))
+        / 1000.0,
+        coaxial_force_limit_n=float(
+            attrs.get("coaxial_force_limit_n", DEFAULT_COAXIAL_FORCE_LIMIT_N)
+        ),
+        shear_force_limit_n=float(attrs.get("shear_force_limit_n", DEFAULT_SHEAR_FORCE_LIMIT_N)),
+        retry_interval_s=float(attrs.get("retry_interval_s", DEFAULT_RETRY_INTERVAL_S)),
+    )
+    compliance = CupCompliance(
+        stiffness_n_per_m=float(attrs.get("cup_stiffness", DEFAULT_CUP_STIFFNESS_N_PER_M)),
+        damping_n_s_per_m=float(attrs.get("cup_damping", DEFAULT_CUP_DAMPING_N_S_PER_M)),
+    )
+    return limits, compliance
+
+
 class SimManager:
     """Owns the sim thread. Get the process-wide instance via SimManager.get()."""
 
@@ -530,6 +569,8 @@ class SimManager:
 
         self.cfg: SimConfig | None = None
         self.mock = False
+        # the surface gripper smoke rig, built on first use
+        self._surface_gripper_smoke_rig: Any = None
         # Isaac objects are created at boot. Typed Any because the isaacsim
         # modules are not importable (or type-checkable) outside Isaac Sim.
         self._sim_app: Any = None
@@ -1426,6 +1467,15 @@ class SimManager:
         self._handles[name] = (dict(attrs), handle)
         return handle
 
+    def surface_gripper_smoke_rig(self) -> Any:
+        """The one surface gripper smoke rig per sim, for the world's
+        ``surface_gripper_smoke`` verb."""
+        if self._surface_gripper_smoke_rig is None:
+            from .surface_gripper import SurfaceGripperSmokeRig
+
+            self._surface_gripper_smoke_rig = SurfaceGripperSmokeRig(self)
+        return self._surface_gripper_smoke_rig
+
     def handle_entry(self, name: str) -> tuple[dict[str, Any], Any]:
         """The (spawn attrs, handle) pair registered under a component name.
 
@@ -2250,7 +2300,12 @@ class SimManager:
         (default the arm's ee_prim, <arm prim>/wrist_3_link for a known UR
         asset), local_position / local_orientation_rpy_deg (mount pose of
         the tool on parent_prim, default identity), tcp_offset_m (default
-        VACUUM_TOOL's), max_payload_gap_m (default DEFAULT_MAX_PAYLOAD_GAP_M),
+        EPICK's), grab_delay_ms (default DEFAULT_GRAB_DELAY_MS),
+        coaxial_force_limit_n / shear_force_limit_n (default the EPick's
+        rated payload per cup), max_grip_distance_mm (default
+        DEFAULT_MAX_GRIP_DISTANCE_MM), retry_interval_s (default
+        DEFAULT_RETRY_INTERVAL_S), cup_stiffness / cup_damping (default
+        DEFAULT_CUP_STIFFNESS_N_PER_M / DEFAULT_CUP_DAMPING_N_S_PER_M),
         mock_attach_prop (mock only - the prop name grab() finds under the
         cup)."""
         self._require_booted()
@@ -2285,24 +2340,38 @@ class SimManager:
 
         return self._cached_handle(name, attrs, factory)
 
+    def prop_box_half_dims(self) -> dict[str, Vec3]:
+        """Sim thread: every registered prop with box dimensions, keyed by prim
+        path, as half edge lengths in metres along the prop's own axes, for
+        the vacuum handle's coaxial monitor. Props without dimensions (a usd
+        prop with no ``box_dims``) are left out and the monitor says so once
+        if it ends up holding one."""
+        out: dict[str, Vec3] = {}
+        for name, spec in self._prop_specs.items():
+            dims = prop_box_dims(spec)
+            if all(dim > 0.0 for dim in dims):
+                out[f"/World/{name}"] = (dims[0] / 2.0, dims[1] / 2.0, dims[2] / 2.0)
+        return out
+
     def _create_vacuum_gripper_isaac(
         self, name: str, attrs: dict[str, Any], arm: "ArmHandle"
     ) -> "IsaacVacuumHandle":
-        """Sim thread. Author the tool as plain USD geometry parented under
-        parent_prim, with no physics of its own.
+        """Sim thread. Author the EPick as plain USD geometry under
+        parent_prim (colliders and mass, no rigid body of its own) and a
+        world-level attachment rig that Isaac's surface gripper plugin
+        drives. The hold is the plugin's: on close it raycasts from each
+        cup and re-points that cup's joint at whatever it hits, so nothing
+        here decides what to weld.
 
-        The tool needs no rigid body and no collider. It is not what holds a
-        payload: grab() welds the payload straight to the arm LINK, and it
-        decides what to weld from prim poses rather than from contact. Giving
-        the tool physics instead costs twice. A collider sitting exactly where
-        the cup meets a box makes PhysX push the two apart while the weld holds
-        them together, which tilts the payload and drags the arm. And a rigid
-        body bolted on with its own fixed joint puts two maximal-coordinate
-        joints in series off the end of an articulation, which PhysX resolves
-        with an impulse big enough to throw the arm across the cell. As a plain
-        USD child of the link it simply inherits the link's transform, which is
-        all a tool has to do."""
-        from pxr import Gf, UsdGeom
+        The rig sits at world level, never nested under the arm link,
+        because a rigid body inside an articulation's subtree is an error
+        and its joints must stay out of the articulation to hang compliant
+        rather than rigid. Its joints hang from the link by name
+        (body0_path) regardless of where the scope lives."""
+        modules = import_surface_gripper()
+        UsdGeom = modules["UsdGeom"]
+        UsdPhysics = modules["UsdPhysics"]
+        Gf = modules["Gf"]
 
         if not isinstance(arm, IsaacArmHandle):
             raise ValueError(
@@ -2312,50 +2381,83 @@ class SimManager:
 
         arm_prim = arm._prim_path
         parent_prim = attrs.get("parent_prim") or f"{arm_prim}/wrist_3_link"
-        tool_prim = f"{parent_prim}/{VACUUM_TOOL_PRIM}"
-        # The cube's prim origin is its CENTRE, so placing it at the flange
-        # would sink half of it into the link and leave the cup face floating
-        # half a tool-length past its own body. Hanging it by half its length
-        # puts the face exactly at tcp_offset_m, which is what the frame and
-        # the planner are told.
-        tool_half_length_m = float(VACUUM_TOOL["box_mm"][2]) / 2000.0
-        local_position = to_vec3(
-            attrs.get("local_position"), default=(0.0, 0.0, tool_half_length_m)
-        )
+        mount_position = to_vec3(attrs.get("local_position"), default=(0.0, 0.0, 0.0))
         roll, pitch, yaw = to_vec3(attrs.get("local_orientation_rpy_deg"), default=(0.0, 0.0, 0.0))
-        local_quat = quat_from_euler_deg(roll, pitch, yaw)
+        mount_quat = quat_from_euler_deg(roll, pitch, yaw)
+        tcp_offset_m = float(attrs.get("tcp_offset_m", EPICK["tcp_offset_m"]))
+        tool_pose = tool_pose_in_link(mount_position, mount_quat, tcp_offset_m)
 
+        body_path = f"{parent_prim}/{EPICK_PRIM}"
         stage = self._isaac.get_prim_at_path(parent_prim).GetStage()
-        cube = UsdGeom.Cube.Define(stage, tool_prim)
-        cube.CreateSizeAttr(1.0)
-        xform = UsdGeom.Xformable(cube)
-        xform.ClearXformOpOrder()
-        px, py, pz = (float(v) for v in local_position)
-        xform.AddTranslateOp().Set(Gf.Vec3d(px, py, pz))
-        quat_w, quat_x, quat_y, quat_z = (float(v) for v in local_quat)
-        xform.AddOrientOp().Set(Gf.Quatf(quat_w, Gf.Vec3f(quat_x, quat_y, quat_z)))
-        size_m = [float(v) / 1000.0 for v in VACUUM_TOOL["box_mm"]]
-        xform.AddScaleOp().Set(Gf.Vec3f(*size_m))
+        # the last prim, not the first: an authoring that raised part way left
+        # the Xform behind, and Define is idempotent, so authoring again
+        # completes it rather than duplicating it
+        if not self._isaac.get_prim_at_path(epick_body_prim_paths(body_path)[-1]).IsValid():
+            author_epick_body(UsdGeom, UsdPhysics, Gf, stage, body_path, tool_pose)
+
+        scope_path = f"/World/{prim_name(name)}_gripper"
+        gripper_path = f"{scope_path}/SurfaceGripper"
+        did_reset = False
+        limits, compliance = _vacuum_gripper_limits(attrs)
+        if not self._isaac.get_prim_at_path(scope_path).IsValid():
+            body0_position, body0_orientation = self._isaac.SingleXFormPrim(
+                parent_prim
+            ).get_world_pose()
+            body0_x, body0_y, body0_z = (float(v) for v in body0_position)
+            body0_qw, body0_qx, body0_qy, body0_qz = (float(v) for v in body0_orientation)
+            body0_world_pose = (
+                (body0_x, body0_y, body0_z),
+                (body0_qw, body0_qx, body0_qy, body0_qz),
+            )
+            author_attachment_rig(
+                modules,
+                stage,
+                scope_path=scope_path,
+                body0_path=parent_prim,
+                body0_world_pose=body0_world_pose,
+                tool_pose_in_body0=tool_pose,
+                points_tool_m=attachment_points_tool_m(),
+                clearance_offset_m=CUP_APPROACH_GAP_MM / 1000.0,
+                limits=limits,
+                compliance=compliance,
+            )
+            self._reset_world()
+            did_reset = True
+
         LOGGER.info(
-            "authored vacuum tool geometry %s under %s at local %s",
-            tool_prim,
-            parent_prim,
-            (px, py, pz),
+            "vacuum gripper %r: body %s, attachment rig %s (world reset: %s), "
+            "coaxial limit %.2f N over %.2f s",
+            name,
+            body_path,
+            gripper_path,
+            did_reset,
+            limits.coaxial_force_limit_n,
+            COAXIAL_LOAD_WINDOW_S,
         )
 
-        cup_side_m = float(VACUUM_TOOL["cup_side_mm"]) / 1000.0
-        max_payload_gap_m = float(attrs.get("max_payload_gap_m", DEFAULT_MAX_PAYLOAD_GAP_M))
         grab_delay_ms = float(attrs.get("grab_delay_ms", DEFAULT_GRAB_DELAY_MS))
+        physics_dt = self.cfg.physics_dt if self.cfg is not None else SimConfig().physics_dt
         handle = IsaacVacuumHandle(
             self,
             name,
-            tool_prim,
-            cup_side_m,
-            max_payload_gap_m,
-            tool_half_length_m,
+            gripper_path,
+            body_path,
+            parent_prim,
+            modules["surface_gripper"].acquire_surface_gripper_interface(),
             grab_delay_ms=grab_delay_ms,
+            release_delay_ms=DEFAULT_RELEASE_DELAY_MS,
+            compliance=compliance,
+            coaxial_force_limit_n=limits.coaxial_force_limit_n,
+            physics_dt=physics_dt,
+            cup_points_tool_m=attachment_points_tool_m(),
+            pose_reader=StagePoseReader(UsdGeom, self._isaac.get_prim_at_path),
+            prop_half_dims=self.prop_box_half_dims,
+            max_grip_distance_m=limits.max_grip_distance_m,
+            clearance_offset_m=CUP_APPROACH_GAP_MM / 1000.0,
         )
-        handle.parent_prim_path = parent_prim
+        if self.world.physics_callback_exists(handle.coaxial_callback_name):
+            self.world.remove_physics_callback(handle.coaxial_callback_name)
+        self.world.add_physics_callback(handle.coaxial_callback_name, handle._on_physics_step)
         return handle
 
     def _prepared_asset_layer(

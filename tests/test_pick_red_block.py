@@ -1993,7 +1993,7 @@ def test_keepout_height_mm_stays_within_tallest_plus_150_over_a_grid():
 
 def test_tallest_sweep_attempts_leads_with_four_region_corners_then_scan_attempts():
     """Corners first: a region-centre vantage hangs the gripper inside the
-    footprint where it reads as a ~274 mm object (GPU phase-4 run 1)."""
+    footprint where it reads as a ~274 mm object (a GPU run)."""
     attempts = tallest_sweep_attempts(_TALLEST_REGION_MM)
     scan_attempts = pick_red_block.SCAN_ATTEMPTS
     assert attempts[4:] == scan_attempts
@@ -2162,7 +2162,7 @@ def test_measure_tallest_falls_back_to_size_range_max_when_everything_is_untrust
 
 
 def test_measure_tallest_runs_the_wrist_sweep_without_a_side_scanner(monkeypatch):
-    """GPU phase-4 run 3: --tallest-camera "" must still sweep the wrist
+    """A GPU run: --tallest-camera "" must still sweep the wrist
     camera, not jump straight to the size-range ceiling."""
     monkeypatch.setattr(
         pick_red_block,

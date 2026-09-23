@@ -114,8 +114,7 @@ def test_both_fragments_pin_the_same_released_module_version() -> None:
     """config_resolver._with_module_entry copies the world fragment's module
     entry into every resolved config, so the world and block-sorting
     fragments must pin the same released version, not a channel name like
-    "latest-with-prerelease" - the pin moves when the module is republished
-    after this phase."""
+    "latest-with-prerelease" - the pin moves when the module is republished."""
     world_version = _module_version(_fragment())
     sorting_version = _module_version(_block_sorting_fragment())
     assert VERSION_PATTERN.match(world_version), world_version

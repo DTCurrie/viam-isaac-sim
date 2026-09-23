@@ -525,7 +525,7 @@ def test_isaac_handle_randomize_props_size_range_non_cube_prop_raises_value_erro
 
 
 def test_isaac_handle_sized_randomize_stops_scales_then_resets_in_order(isaac_handle):
-    """GPU failures (phase-3 checklist): a scale written mid-play invalidates
+    """GPU checklist failures: a scale written mid-play invalidates
     PhysX's tensor view ('Failed to get rigid body transforms from backend'),
     and a scale written before the reset is REVERTED by the stop inside it
     (drawn 44.7 mm, block stayed 60 mm). The only working order is stop ->
@@ -578,7 +578,7 @@ def test_sample_prop_positions_restarts_stranded_layouts():
 
 
 def test_six_block_cell_scatter_succeeds_at_the_measured_separation():
-    """Six-block fragment packing envelope (phase-2 seam decision): 60 mm
+    """Six-block fragment packing envelope (seam decision): 60 mm
     cubes in the scatter region at 140 mm separation place all six on every
     seed, matching the measured 100/100 success rate this default relies on."""
     dims = {

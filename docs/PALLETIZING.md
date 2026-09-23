@@ -70,14 +70,23 @@ In the demo a box is a transform the sequencer publishes and the pick station dr
 rigid body that can slide, tilt and fall. Every millimetre of difference between where the plan put
 it and where it ended up is something the demo cannot produce.
 
-The end effector is a `viam:isaac-sim-devin:vacuum` wearing the Robotiq EPick's dimensions, a
-196 mm tool. A suction cup takes hold by welding whatever is under it to its tool prim with a
-`UsdPhysics.FixedJoint`, and lets go by removing that joint. It holds a box by the box's TOP face,
-so the box hangs its full height below the TCP. Every place height in this cell follows from that.
+The end effector is a `viam:isaac-sim-devin:vacuum` wearing the Robotiq EPick's dimensions, four
+49 mm cups on a 159.5 x 81.3 mm pattern, driven through Isaac's surface gripper. A cup takes hold
+by raycasting for whatever is under it and holds it while the ray keeps finding contact, so a cup
+40 mm over a box holds nothing. On close, the plugin draws the payload's top face up to the cup,
+5 mm on the GPU machine measured 2026-09-22, so a held box hangs with its top face at the cup, not
+below it. The hold breaks two ways: the module opens the gripper once the 0.1 s mean pull on any
+one cup passes `coaxial_force_limit_n` (default the cup's own holding force, 152.8 N at the
+EPick's 80 % maximum vacuum), and the plugin releases on a sideways load past
+`shear_force_limit_n`. Each cup is a spring, so
+a carried box can swing and pitch rather than hang rigid. One cup pins the box sideways and
+against turning and the other three are springs only, since four cups pinning the same freedoms
+fight each other in the solver and the gripper reads that fight as load.
 
 `grab()` waits out `grab_delay_ms` before reporting a hold, which stands in for the pump cycle a
-real cup needs, and `is_moving()` is true for that window. The module defaults it to 1000 ms and
-the overlay sets 250 ms to match the demo machine.
+real cup needs, and `is_moving()` is true for that window. The module defaults it to 150 ms, the
+manual's gripping time, and the overlay sets 250 ms to match the demo machine. `open()` bleeds the
+vacuum over `release_delay_ms`, 180 ms by default.
 
 Boxes are cardboard and are not identified by colour, so this cell runs no colour detectors and the
 world's albedo textures are free to make cardboard look like cardboard.
@@ -97,16 +106,14 @@ sequencer's own approach clearance, so the service adds no standoff of its own a
 The pick end keeps its own standoff, since the sequencer knows nothing about the pick station.
 
 The cup does not descend all the way to `place_end_in_world`. That pose is the cup at the box's top
-face with the box on its slot, and the cup never holds a box at its top face: it takes hold
-`CUP_APPROACH_GAP_MM` above it, the gap that keeps a rigid tool from being driven into a rigid box,
-and the weld freezes that gap. A descent to `place_end` itself puts the box that far into the deck,
-and on 2026-09-22 the arm stalled a few tenths of a degree short of it with the box already
-resting on the pallet. So the cup releases at `place_release_pose`: `place_end` raised by the grasp
-gap and by `PLACE_RELEASE_CLEARANCE_MM`, which leaves the box's bottom that clearance above the
-deck. The clearance is sized for the arm's tracking at the end of a descent, not for the geometry:
-in one of its configurations the arm arrives a degree over at the shoulder and four short at the
-wrist, which puts a hanging box's corner 16 mm lower than commanded, and a clearance smaller than
-that lands the corner on the deck's edge before the cup reaches its pose.
+face with the box on its slot, which a held box's top face already rides at, so a descent to
+`place_end` itself sets the box down, and the cup releases there: `place_release_pose` is `place_end`
+raised by `PLACE_RELEASE_CLEARANCE_MM`, which is zero. The arm stops when the deck stops the box,
+the service reads that stop as the touchdown it is, and lets go. Measured on 2026-09-22 with the
+EPick held through the surface gripper: the box's bottom was 0.00 mm over the deck when the arm
+stopped and the released box settled 0.10 to 0.16 mm from its slot, in both arm configurations,
+with no wrist fold. The 25 mm drop this replaces landed 0.35 to 0.64 mm out and covered a wrist
+fold the compliant cups no longer cause.
 
 A straight-line leg that the planner refuses falls back to a free move. A straight-line leg that
 planned and then stalled on the arm does not: the arm is blocked by contact, and the failure is
@@ -118,7 +125,7 @@ millimetres wide catches the deck's edge before the cup reaches its target.
 
 From the lift to the place descent the box is on the cup, and the planner is told so twice. Each
 of those legs carries a `Transform` parented to the gripper frame with the box's own dimensions,
-hanging the grasp gap plus half a box height along the gripper's z, which is the tool axis and
+hanging half a box height along the gripper's z, which is the tool axis and
 points down at a grasp. And each of them is level: a free path keeps the tool's orientation within
 `CARRY_ORIENTATION_TOLERANCE_DEG` of where it started. The transform alone was not enough. On
 2026-09-22 the planner, box attached, still joined two pointing-down poses whose wrist 2 solutions

@@ -201,9 +201,9 @@ class _ForwardingModule(type(sys.modules[__name__])):  # type: ignore[misc] # ba
 sys.modules[__name__].__class__ = _ForwardingModule
 
 # ----------------------------------------------------------------------
-# cell-default constants - the phase-1 seam cross-check asserts these against
+# cell-default constants - the seam cross-check asserts these against
 # cell_layout (test_client_defaults_match_the_cell_layout_seam); they live
-# here, not in pickcell, so the library stays cell-agnostic (phase 4's
+# here, not in pickcell, so the library stays cell-agnostic (the
 # conductor passes zones straight from cell_layout instead)
 # ----------------------------------------------------------------------
 
@@ -850,7 +850,7 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     parser.add_argument(
         "--tallest-camera",
         default="side-cam",
-        help="fixed side camera measuring the tallest scattered object (phase 4), primary "
+        help="fixed side camera measuring the tallest scattered object, primary "
         "source for the dynamic keep-out/carry heights; empty string disables it, falling "
         "back to the wrist sweep then the --randomize-size-mm range max",
     )

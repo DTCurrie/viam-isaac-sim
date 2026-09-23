@@ -31,7 +31,7 @@ UPSTREAM_FIXTURE_PATH = (
     Path(__file__).resolve().parent / "fixtures" / "upstream-workcell-fragment.json"
 )
 
-# The changes this phase deliberately makes to the vendored fragment, keyed
+# The changes deliberately made to the vendored fragment, keyed
 # by the JSON path a diff against the upstream fixture surfaces. Re-pinning
 # viam:pack-sequencer to 0.3.0 lands it on the same version the upstream
 # fixture itself pins, so that module no longer diverges.
@@ -200,7 +200,7 @@ def test_the_overlay_arm_sits_on_the_150_mm_pedestal_the_machine_config_used():
     assert arm["attributes"]["asset"] == "ur5e"
     assert arm["frame"]["parent"] == "world"
     assert arm["frame"]["translation"]["z"] == 150
-    # phase 1 proved this pose. A UR5e at all zeros is fully extended across
+    # This pose was proved out on the GPU. A UR5e at all zeros is fully extended across
     # a cell with a pick station in front of it.
     assert arm["attributes"]["home_joints_deg"] == [0, -90, 0, -90, 0, 0]
 
@@ -235,7 +235,7 @@ def test_the_overlay_world_declares_exactly_the_eight_box_props():
 
 
 def test_the_infeed_box_sits_inside_the_pick_stations_declared_footprint():
-    # The check that matters, and the one phase 2 lacked. It read
+    # The check that matters, and the one an earlier version lacked. It read
     # box_origin_offset_mm against the station's FRAME and got (600, 250),
     # which is 350 mm past the near edge of a station spanning y -1200..-100,
     # so the box fell straight through to the floor on the first GPU run.

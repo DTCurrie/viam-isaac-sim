@@ -94,14 +94,14 @@ SDK abstract methods: 8 (`get_current_inputs`, `get_kinematics`, `go_to_inputs`,
 
 | Method | Real driver | Sim | Gap |
 | --- | --- | --- | --- |
-| `open` | Sets `ACT 1`, `GTO 0`, `POS 100`, `GTO 1` in sequence over the URCap socket, releasing vacuum, then polls `OBJ` for up to 5 seconds waiting for "no object", ignoring a poll timeout (`gripper.go:349`). | Removes the suction joint. Returns as soon as the release is commanded (`vacuum.py`). | A real cup bleeds its vacuum over some milliseconds and the driver polls for that to finish. The sim releases instantly, with no bleed-down to wait for. |
-| `grab` | Sends the `ACT`/`GTO`/`MOD`/`POS`/`SPE`/`FOR` register sequence to engage vacuum, then returns `false` immediately unless `extra["blocking"]` is `true`, in which case it waits `timeout_ms + 2000` ms (or 5000 ms with `timeout_ms` unset) for `OBJ` to report a grip and returns whether `OBJ` is 1 or 2 (`gripper.go:365`, `gripper.go:423`). | Authors a `UsdPhysics.FixedJoint` between the tool prim and whatever prop is under the cup, then waits `grab_delay_ms` before reporting whether one was found (`vacuum.py`). | The real driver is non-blocking by default and only waits for the register to settle when the caller opts in. The sim always waits out `grab_delay_ms` before returning. A real cup also builds vacuum over a pump cycle and can lose grip under load. A weld cannot slip, so the sim never reports a grip that fails after it is made. Phase 5's payload limit is where that gets a bound. |
-| `is_holding_something` | Reads the `OBJ` register (holding iff 1 or 2) and separately reads `POS`, treating a register below 90 as holding even if `OBJ` disagrees, with `meta` carrying `object_status`, `object_status_raw`, `pressure_register` and `pressure_kpa` (`gripper.go:439`). | Reports whether the suction joint exists, with `meta` carrying `engaged` and `holding` separately (`vacuum.py`). | The real driver reads two registers and can report holding on either signal. The sim's predicate is exact: a joint exists or it does not. Neither side's `meta` keys match the other's. |
-| `is_moving` | Returns whether the SDK operation manager has an operation running for this resource, not a physical-motion read (`gripper.go:484`). | Returns `true` while a commanded `grab()` is still inside its `grab_delay_ms` window, `false` outside it (`vacuum.py`). | The real driver's signal is "a client-issued operation is in flight". The sim's is a synthetic timer standing in for suction build time, since a weld has no travel to report. |
-| `get_current_inputs` | Not implemented. Always returns an empty slice (`gripper.go:492`). | `[1.0]` when the cup was last commanded to take hold, `[0.0]` after a release (`vacuum.py`). | Real driver never reports a current input. Sim always does, matching the parallel-jaw model where a jaw closed on nothing still reads at its commanded position. |
+| `open` | Sets `ACT 1`, `GTO 0`, `POS 100`, `GTO 1` in sequence over the URCap socket, releasing vacuum, then polls `OBJ` for up to 5 seconds waiting for "no object", ignoring a poll timeout (`gripper.go:349`). | Opens the surface gripper, then waits out the 180 ms release the EPick's own manual gives for one cup to bleed down (`vacuum.py`). | The real driver polls a register for up to 5 seconds for the release to finish. The sim waits a fixed 180 ms instead of polling, since the surface gripper's open call is itself synchronous. |
+| `grab` | Sends the `ACT`/`GTO`/`MOD`/`POS`/`SPE`/`FOR` register sequence to engage vacuum, then returns `false` immediately unless `extra["blocking"]` is `true`, in which case it waits `timeout_ms + 2000` ms (or 5000 ms with `timeout_ms` unset) for `OBJ` to report a grip and returns whether `OBJ` is 1 or 2 (`gripper.go:365`, `gripper.go:423`). | Closes the surface gripper, which raycasts from each cup for whatever the approach put under it, waits `grab_delay_ms` (the manual's 150 ms gripping time), then reports the gripper's own status (`vacuum.py`). | The real driver is non-blocking by default and only waits for the register to settle when the caller opts in. The sim always waits out `grab_delay_ms` before returning. Both sides can lose a grip under load after grab() returns: the real cup on a pressure drop or a payload past its holding force, the sim once a sideways load exceeds `shear_force_limit_n` or the box is pushed into the cups past `coaxial_force_limit_n`. The sim drops a hanging load two ways: the plugin's own one-step coaxial check is authored off, and the module's own monitor reads how far the held box's face has dropped below each cup every physics step and opens the gripper once the most loaded cup's mean over a short window passes `coaxial_force_limit_n`, while the plugin still opens the gripper the instant a sideways load passes `shear_force_limit_n` (see Documented deviations). |
+| `is_holding_something` | Reads the `OBJ` register (holding iff 1 or 2) and separately reads `POS`, treating a register below 90 as holding even if `OBJ` disagrees, with `meta` carrying `object_status`, `object_status_raw`, `pressure_register` and `pressure_kpa` (`gripper.go:439`). | Holding iff the gripper's own status is Closed with at least one gripped object, with `meta` carrying `status`, `gripped_objects`, `holding` and `engaged` (`vacuum.py`). | The real driver reads two registers and can report holding on either signal. The sim's predicate is exact: Closed with a gripped object, or not. Neither side's `meta` keys match the other's. |
+| `is_moving` | Returns whether the SDK operation manager has an operation running for this resource, not a physical-motion read (`gripper.go:484`). | Returns `true` while a commanded `grab()` is still inside its `grab_delay_ms` window, `false` outside it (`vacuum.py`). | The real driver's signal is "a client-issued operation is in flight". The sim's is a synthetic timer standing in for suction build time, since the surface gripper's own close is instantaneous. |
+| `get_current_inputs` | Not implemented. Always returns an empty slice (`gripper.go:492`). | `[1.0]` when the cups were last commanded to take hold, `[0.0]` after a release (`vacuum.py`). | Real driver never reports a current input. Sim always does, matching the parallel-jaw model where a jaw closed on nothing still reads at its commanded position. |
 | `go_to_inputs` | Not implemented. Returns the error `"GoToInputs not supported"` (`gripper.go:497`). | Validates exactly one value in `[0, 1]`, raising `INVALID_ARGUMENT` otherwise, then engages at or above 0.5 and releases below (`vacuum.py`). | The real driver does not support `GoToInputs` at all. The sim fully implements it, quantising the continuous range to the two points a binary actuator has. |
-| `get_kinematics` | Returns an embedded SVA model describing the cup's collision geometry and TCP offset (`gripper.go:490`). | A one-link, zero-joint SVA describing the tool's bounding box, centred on the tool axis relative to the TCP (`vacuum.py`). | Both sides synthesise a kinematics document, unlike the parallel-jaw real driver, which returns an error here. The two documents describe different, independently measured geometry. |
-| `stop` | Sets `GTO 0`, halting vacuum regulation (`gripper.go:483`). | Holds whatever state the cup is in. There is no travel to halt (`vacuum.py`). | No gap found in this pass. |
+| `get_kinematics` | Returns an embedded SVA model describing the cup's collision geometry and TCP offset (`gripper.go:490`). | Serves the EPick's own `epick_model.json` verbatim, the same file the real driver serves from GetKinematics (`vacuum.py`). | Both sides now serve the same vendored document, so a plan built against the sim is a plan built against the file the real gripper answers with too. |
+| `stop` | Sets `GTO 0`, halting vacuum regulation (`gripper.go:483`). | Opens the surface gripper, like `GTO 0` halting regulation, with no release delay (`vacuum.py`). | No gap found in this pass. |
 | `DoCommand: get_status` | Returns `object_status_raw`, `pressure_register`, `pressure_kpa`, `fault_code` and `activation_status` read live from the URCap registers (`gripper.go:517`, `gripper.go:582`). | Not implemented. | real-only |
 | `DoCommand: get` | Reads a named register over the socket and returns its raw response string (`gripper.go:522`). | Not implemented. | real-only |
 | `DoCommand: set` | Writes one or more named registers over the socket (`gripper.go:533`). | Not implemented. | real-only |
@@ -116,6 +116,13 @@ has no sim counterpart: it is a real-driver visualization flag with nothing in `
 as an empty `carry` map rather than a mapping that does not exist. The sibling fake model's
 `grab_delay_ms` (`simulated.go:41`) has no equivalent on the real driver either, and is not a row
 here since it is not what `simulates.json`'s `real_model` names.
+
+`tcp_offset_m`, `grab_delay_ms`, `coaxial_force_limit_n`, `shear_force_limit_n`,
+`max_grip_distance_mm`, `retry_interval_s`, `cup_stiffness` and `cup_damping` are this module's
+own attributes over the EPick's surface gripper, sourced from the manual (section 6.2's gripping
+time and maximum vacuum, section 6.2.1's holding-force formula, section 7's retry window) rather than from the real driver,
+which has no attribute for any of them. `max_payload_gap_m` is gone: the surface gripper's contact
+gate replaced the gap check it configured.
 
 The tool is geometry this module authors rather than an asset on the content server, so it has no
 `asset` attribute. `simulates.json` carries `arm` from `$frame.parent` instead.
@@ -170,6 +177,31 @@ Neither side implements any `DoCommand` verb for the base, so this section has n
 
 Where the sim departs from a real driver on purpose, and why.
 
+- The vacuum gripper's pull-off threshold was a one-step peak, not a weight, because Isaac 5.0's
+  surface gripper plugin releases the attachment when the reported force along the cup axis
+  passes `coaxial_force_limit_n` on any single physics step, with no window, and the arm follows
+  a linear move as waypoints about 2 mm apart, each step onto the next putting at least 15 N per
+  cup onto the bellows for a step or two (measured on the GPU machine 2026-09-23 with the limit
+  set to 20 N per cup: a 10 kg stand-in was released as its lift began, and so were a 7 kg one and
+  the 2 kg box whose static load is 4.9 N per cup). A real arm's smooth trajectory has no such
+  onset. The plugin's per-step check is now authored off (its limit is 0), and the module reads
+  each cup's stretch itself every physics step, as the drop of the held box's face below the cup
+  (the plugin attaches its joints inside PhysX and leaves the stage's joints untouched, so the face
+  is what moves with the stretch), converts it through the same soft limit's
+  spring, takes the most loaded cup and opens the gripper once that load's mean over a
+  0.1 s window exceeds `coaxial_force_limit_n`, at the same default, the cup's holding force,
+  152.8 N. Shear stays with the plugin, whose locked-axis reading measurably works. Measured on
+  the GPU machine 2026-09-23 with the limit set to 20 N per cup (8.2 kg on four cups, a load this
+  arm can lift, where the datasheet's 62 kg is not): a 10 kg stand-in was released, a 5 kg one
+  and the 2 kg box were lifted and held, the monitor reading 16.5 and 12.6 N mean on their most
+  loaded cup. Two deviations remain. The release of an over-limit box comes at the grab rather
+  than on the lift, because the plugin draws the box up onto the cups the moment it attaches, so
+  the box hangs at its full weight before the arm moves; a real cup on a box resting on a conveyor
+  carries nothing until the lift. And the datasheet holding force cannot be reached by lifting on
+  this arm at all, whose pull at the pick reach tops out near 500 N (about 51 kg), so at the
+  default limit the hold is never lost to weight. Research:
+  `.claude/plans/palletizer-cell/research/2026-09-23-tear-off-in-isaac.md` and
+  `2026-09-23-surface-gripper-attach-mechanics.md` beside it.
 - Sim-only `DoCommand` verbs live on the world's `DoCommand`, keyed by component name, never on
   the component that stands in for hardware. For the arm: `joint_state`, `dof_names` with an
   optional `all`, and `prim_pose`. For the gripper: `dof_names`, `jaw_deg` and `tcp_pose`. The

@@ -18,6 +18,7 @@ from ..sim_manager import (
     WorldHandle,
 )
 from ..spatial import Quat, quat_from_euler_deg, quat_to_ov, to_vec3
+from ..surface_gripper import parse_smoke_spec
 from .world_config_validation import (
     _require_name,
     _validate_size_range_mm,
@@ -357,6 +358,37 @@ def _cmd_jaw_deg(
     return cast("Any", component_diagnostics.jaw_deg(attrs, entry_handle))
 
 
+def _cmd_surface_gripper_smoke(
+    world: "IsaacWorld", handle: WorldHandle, command: Mapping[str, ValueTypes]
+) -> dict[str, ValueTypes]:
+    """The surface gripper smoke rig: an Isaac surface gripper authored over the
+    named vacuum's mount link on the live stage, driven a step at a time.
+    ``author`` takes the gripper name and the attachment points, ``wire``
+    adds the gripper prim once PhysX has built the joints, then ``close``,
+    ``open``, ``status`` and ``cleanup``. Sim only: there is no PhysX in the
+    mock world to author into."""
+    sim = SimManager.get()
+    if sim.mock:
+        raise ValueError(
+            "surface_gripper_smoke needs Isaac Sim: the mock world has no PhysX to author "
+            "a surface gripper into"
+        )
+    rig = sim.surface_gripper_smoke_rig()
+    step = str(command.get("step", "author"))
+    if step == "author":
+        spec = parse_smoke_spec(command)
+        _attrs, entry_handle = sim.handle_entry(spec.gripper)
+        mount_link = getattr(entry_handle, "parent_prim_path", None)
+        if not mount_link:
+            raise ValueError(
+                f"{spec.gripper!r} is a {type(entry_handle).__name__}, not a vacuum gripper "
+                "with a mount link to hang a surface gripper from"
+            )
+        tool_prim = getattr(entry_handle, "tool_prim_path", None)
+        return cast("Any", sim.run(lambda: rig.author(spec, mount_link, tool_prim)))
+    return cast("Any", sim.run(rig.step(step)))
+
+
 COMMAND_HANDLERS: dict[
     str, Callable[["IsaacWorld", WorldHandle, Mapping[str, ValueTypes]], dict[str, ValueTypes]]
 ] = {
@@ -378,4 +410,5 @@ COMMAND_HANDLERS: dict[
     "prim_pose": _cmd_prim_pose,
     "tcp_pose": _cmd_tcp_pose,
     "jaw_deg": _cmd_jaw_deg,
+    "surface_gripper_smoke": _cmd_surface_gripper_smoke,
 }

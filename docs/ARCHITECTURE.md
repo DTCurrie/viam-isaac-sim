@@ -16,40 +16,43 @@ into. Read it before you add a model or move a file.
 
 | path | lines | what it owns |
 | --- | --- | --- |
-| `src/main.py` | 114 | The process layout. Isaac Sim gets the main thread, the Viam module gRPC server gets a daemon thread with a fixed 8-worker executor. Signals stop the module before the sim. |
-| `src/isaac_module/sim_manager.py` | 2192 | `SimConfig` and `SimManager`: the Kit lifecycle, the boot sequence, the sim thread and its task queue, the component factories and the handle cache. |
-| `src/isaac_module/handles/world.py` | 677 | `WorldHandle`, its Isaac backend and its mock: scene verbs, prop poses, geometries. |
-| `src/isaac_module/handles/arm.py` | 751 | `ArmHandle`, Isaac and mock: joint drive, settle detection, the velocity cap, prim poses. |
+| `src/main.py` | 119 | The process layout. Isaac Sim gets the main thread, the Viam module gRPC server gets a daemon thread with a fixed 8-worker executor. Signals stop the module before the sim. |
+| `src/isaac_module/sim_manager.py` | 2602 | `SimConfig` and `SimManager`: the Kit lifecycle, the boot sequence, the sim thread and its task queue, the component factories and the handle cache. |
+| `src/isaac_module/handles/world.py` | 679 | `WorldHandle`, its Isaac backend and its mock: scene verbs, prop poses, geometries. |
+| `src/isaac_module/handles/arm.py` | 824 | `ArmHandle`, Isaac and mock: joint drive, settle detection, the velocity cap, prim poses. |
 | `src/isaac_module/handles/gripper.py` | 561 | `GripperHandle`, the mechanism-neutral core every gripper serves, and `JawGripperHandle` over it: jaw drive, stall and hold detection, the attach sequence. |
-| `src/isaac_module/handles/vacuum.py` | 337 | `VacuumGripperHandle`, Isaac and mock: the suction joint it welds a payload with, and the pure decision about which payload is under the cup. |
+| `src/isaac_module/handles/vacuum.py` | 580 | `VacuumGripperHandle`, Isaac and mock: drives Isaac's `IsaacSurfaceGripper` prim through its interface, reads back its status and gripped objects, and the mock's synthetic counterpart. The Isaac handle's `_on_physics_step` (registered under `<name>_coaxial_load`) is the module's own coaxial monitor: it reads the held box's face under each cup off the stage through `StagePoseReader`, reads the gap to that face before each grab to know where the plugin leaves it at rest, and `hold_load()` reads its `HoldLoad` back for any thread. |
 | `src/isaac_module/handles/camera.py` | 475 | `CameraHandle`, Isaac and mock: frames, intrinsics, the warm-up retry, the deterministic mock scene. |
 | `src/isaac_module/handles/base.py` | 151 | `BaseHandle`, Isaac and mock: wheel velocities and the base's root pose. |
 | `src/isaac_module/models/world.py` | 341 | The `isaac-world` generic component: boot config, `close()`, `do_command` dispatch through `asyncio.to_thread`. |
-| `src/isaac_module/models/world_commands.py` | 363 | One function per world verb behind `COMMAND_HANDLERS`, including the payload-driven `scatter_cell` and `clear_cell`. |
-| `src/isaac_module/models/world_config_validation.py` | 424 | The world's attribute validators, including `kit_log_level` and the identity-frame rule. |
-| `src/isaac_module/models/scene_finalizer.py` | 53 | The `scene-finalizer` generic component: validates `depends_on` names at least one component, and calls `finalize_scene()` on build and reconfigure. |
-| `src/isaac_module/models/arm.py` | 650 | The `arm` component: joint moves, IK against the served kinematics, `max_vel_degs_per_sec`, typed gRPC errors, hold-on-cancel. |
+| `src/isaac_module/models/world_commands.py` | 414 | One function per world verb behind `COMMAND_HANDLERS`, including the payload-driven `scatter_cell` and `clear_cell`. |
+| `src/isaac_module/models/world_config_validation.py` | 454 | The world's attribute validators, including `kit_log_level` and the identity-frame rule. |
+| `src/isaac_module/models/scene_finalizer.py` | 119 | The `scene-finalizer` generic component: validates `depends_on` names at least one component, and calls `finalize_scene()` on build and reconfigure. |
+| `src/isaac_module/models/arm.py` | 708 | The `arm` component: joint moves, IK against the served kinematics, `max_vel_degs_per_sec`, typed gRPC errors, hold-on-cancel. |
 | `src/isaac_module/models/camera.py` | 339 | The `camera` component: images, point clouds, encoding. |
 | `src/isaac_module/models/gripper.py` | 378 | The `gripper` component: open, grab, jaw state, deadlines. |
-| `src/isaac_module/models/vacuum.py` | 278 | The `vacuum` component: engage, release, engaged versus holding, the tool's single box geometry. |
+| `src/isaac_module/models/vacuum.py` | 331 | The `vacuum` component: engage, release, engaged versus holding, the tool's single box geometry. |
 | `src/isaac_module/models/base.py` | 242 | The `base` component: differential drive, `width_mm` and `wheel_circumference_mm`. |
 | `src/isaac_module/models/component_frame_pose.py` | 81 | Frame-to-spawn-pose conversion. |
 | `src/isaac_module/models/sim_component_validation.py` | 100 | The shared spawned-component validation, including the `<arm>:<link>` frame-parent rule. |
-| `src/isaac_module/models/conductor.py` | 1098 | The block-sorting service. Not a driver, a client of the sim models. |
+| `src/isaac_module/models/conductor.py` | 1166 | The block-sorting service. Not a driver, a client of the sim models. |
 | `src/isaac_module/models/sorter_sensor.py` | 112 | A sensor that proxies the conductor's loop records. |
-| `src/isaac_module/models/palletizer.py` | 521 | The palletizing service. Like the conductor, a client of the sim models rather than a driver. It asks `sequencer_client.py` for the next slot, moves the arm, reports the outcome and publishes the box's settled pose. |
-| `src/isaac_module/sequencer_client.py` | 470 | Typed `SequencerClient` methods over `viam:pack-sequencer:sequencer`'s DoCommand verbs, and the dataclasses that carry its wire shapes. Holds no state of its own: the pack order, the cursor and the placed-set all live in the sequencer. |
+| `src/isaac_module/models/palletizer.py` | 1014 | The palletizing service. Like the conductor, a client of the sim models rather than a driver. It asks `sequencer_client.py` for the next slot, moves the arm, reports the outcome and publishes the box's settled pose. |
+| `src/isaac_module/sequencer_client.py` | 483 | Typed `SequencerClient` methods over `viam:pack-sequencer:sequencer`'s DoCommand verbs, and the dataclasses that carry its wire shapes. Holds no state of its own: the pack order, the cursor and the placed-set all live in the sequencer. |
 | `src/isaac_module/config_resolver.py` | 478 | Reads a real machine config and writes the sim machine's config, reporting swaps, placeholders, pruned modules and unresolved variables. |
-| `src/isaac_module/asset_catalog.py` | 120 | `KNOWN_ASSETS`: USD candidates, joint names, `ee_prim`, packaged kinematics paths. |
-| `src/isaac_module/kinematics_files/` | | The UR3e, UR5e, UR7e and UR20 SVA files shipped with the module. |
+| `src/isaac_module/asset_catalog.py` | 194 | `KNOWN_ASSETS`: USD candidates, joint names, `ee_prim`, packaged kinematics paths. |
+| `src/isaac_module/kinematics_files/` | | The UR3e, UR5e, UR7e and UR20 SVA files and the EPick's own `epick_model.json`, shipped with the module. |
 | `src/isaac_module/usd_assets.py` | 270 | The USD asset repair helpers for the unresolvable Robotiq references. |
 | `src/isaac_module/prop_scatter.py` | 306 | The prop scatter engine and its result records. |
 | `src/isaac_module/prim_paths.py` | 37 | Prim naming and the default end-effector and base prim paths. |
-| `src/isaac_module/assets.py` | 59 | `module://` and `data://` asset path schemes for textures, HDRIs and USD files named in world config. |
-| `src/isaac_module/visual_props.py` | 151 | Visual-only props: the `visual` kind's constants, the fit-scale arithmetic and the record shape `status.visual_props` lists. |
+| `src/isaac_module/assets.py` | 61 | `module://` and `data://` asset path schemes for textures, HDRIs and USD files named in world config. |
+| `src/isaac_module/visual_props.py` | 154 | Visual-only props: the `visual` kind's constants, the fit-scale arithmetic and the record shape `status.visual_props` lists. |
 | `src/isaac_module/materials.py` | 411 | PBR materials for cube props and the ground plane: the manifest loader, the config-to-OmniPBR input mapping and the one Isaac binder. |
-| `src/isaac_module/component_diagnostics.py` | 144 | The bodies of the world's per-component introspection verbs. |
-| `src/isaac_module/compat.py` | 241 | The one place Isaac Sim is imported, the `IsaacAPI` protocol and the 5.0 capability row. |
+| `src/isaac_module/component_diagnostics.py` | 150 | The bodies of the world's per-component introspection verbs. |
+| `src/isaac_module/compat.py` | 303 | The one place Isaac Sim is imported, the `IsaacAPI` protocol and the 5.0 capability row. |
+| `src/isaac_module/epick.py` | 217 | The Robotiq EPick's six render and six collision solids, its four attachment points and its collider masses, derived from `asset_catalog.EPICK`, and the USD authoring of that body under an arm link. |
+| `src/isaac_module/cup_contact.py` | 87 | Where a suction cup meets the box under it, from stage poses and the box's own dimensions: the face point under a cup (`cup_contact`), every cup's gap before a grab (`cup_gaps_before_grab`) and where Isaac's surface gripper leaves the face at rest for that gap (`rest_offsets_m`), since the plugin attaches its joints inside PhysX and leaves nothing about them on the stage. |
+| `src/isaac_module/surface_gripper.py` | 708 | Isaac's surface gripper: the attachment joints with their bellows compliance, the ghost anchor, the gripper prim and its limits (authored with the plugin's own coaxial check off), the one-pass rig authoring, the `cup_pull_load_n`/`LoadWindow`/`HoldLoad` load helpers the handle's coaxial monitor uses, and the smoke rig the world's diagnostic verb drives. |
 | `src/isaac_module/spatial.py` | 237 | Quaternion, orientation-vector and pose composition math. |
 | `src/isaac_module/length_units.py` | 11 | The one millimeter-to-meter conversion. |
 | `src/isaac_module/encoding.py` | 203 | Image and point cloud encoding. |
@@ -57,9 +60,9 @@ into. Read it before you add a model or move a file.
 | `src/isaac_module/physics.py` | 168 | Solver iteration counts and prop physics defaults. |
 | `src/isaac_module/errors.py` | 79 | The `SimError` hierarchy, each class carrying its gRPC status. |
 | `src/isaac_module/sdk_patches.py` | 58 | One monkeypatch that adds the `MoveThroughJointPositions` handler the Python SDK 0.80 does not serve. |
-| `src/isaac_module/cell_layout.py` | 156 | The sorting cell's geometry. |
+| `src/isaac_module/cell_layout.py` | 157 | The sorting cell's geometry. |
 | `src/isaac_module/sort_plan.py` | 133 | The sorting order. |
-| `src/isaac_module/workcell_scenery.py` | 300 | Viam's workcell components as Isaac props: render primitives from `get_visuals`, a derived collider for `robot-pedestal`. Colliders otherwise come from the frame system (`frame_system.py`). |
+| `src/isaac_module/workcell_scenery.py` | 294 | Viam's workcell components as Isaac props: render primitives from `get_visuals`, a derived collider for `robot-pedestal`. Colliders otherwise come from the frame system (`frame_system.py`). |
 | `src/isaac_module/run_log.py` | 171 | Sorting loop records. |
 | `src/pickcell/` | 1944 | The pick pipeline, a pure Viam-client library with no `isaac_module` import. |
 

@@ -72,6 +72,7 @@ def test_single_reset_chokepoint_and_call_sites():
         "_boot",
         "_create_arm_isaac",
         "_create_base_isaac",
+        "_create_vacuum_gripper_isaac",
         "reset",
     ):
         method = getattr(SimManager, method_name)

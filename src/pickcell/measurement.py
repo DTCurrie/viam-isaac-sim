@@ -36,8 +36,7 @@ def centre_depth_mm(
 # than this is not the block (GPU run 10: a gripper-shadowed cube read z 115)
 DETECT_Z_TOLERANCE_MM = 15.0
 
-# tallest-estimator trust thresholds (seam: phase-4-tallest-carry.md, "Client
-# measurement API")
+# tallest-estimator trust thresholds for the client measurement API
 # the fragment segmenter's segment_size_px: 100, the cell's smallest-credible-
 # object constant - fewer in-region above-support points is not a block
 MIN_TALLEST_REGION_POINTS = 100
@@ -138,11 +137,10 @@ def tallest_in_region_mm(
     )
 
 
-# keep-out/carry derivation (seam): tallest + held-cube hang + margin. The
+# keep-out/carry derivation: tallest + held-cube hang + margin. The
 # hang fraction reproduces today's GPU-validated 60 mm-block numbers
 # (keepout_height_mm(60, 60) == 130, carry_clear_above_support_mm(60, 60) ==
-# 200); a held cube of a different size re-validates on GPU (phase 4
-# checklist item 2).
+# 200); a held cube of a different size re-validates on the GPU.
 KEEPOUT_HELD_HANG_FRACTION = 1.0 / 3.0
 # the held padded cube's bottom clears the keep-out ceiling by this much once
 # carried (GPU run 12: "~20 mm to spare" for the 60 mm case)
@@ -234,7 +232,7 @@ FOOTPRINT_TRIM_PCT_LO = 2.0
 FOOTPRINT_TRIM_PCT_HI = 98.0
 # a cube's three independent size readings (footprint x, footprint y,
 # height) should agree; a bigger spread means a shadowed or edge-on view,
-# not a block to grasp on (seam decision, phase 3)
+# not a block to grasp on
 MEASURED_SIZE_DEGENERATE_FRACTION = 0.25
 
 
@@ -246,7 +244,7 @@ def footprint_extents_mm(
     box), so measure the nearest-depth band - the same points
     top_face_centre_m trusts - each axis trimmed to the 2nd-98th percentile
     so a stray point cannot blow out the extent. Never select by redness:
-    the lit top face washes out past any red test (GPU run 21; the phase-3
+    the lit top face washes out past any red test (GPU run 21; a
     checklist run saw red: 0 on every top-down scan). None when no point
     clears MIN_BLOCK_DEPTH_M."""
     far_enough = xyz[:, 2] >= MIN_BLOCK_DEPTH_M

@@ -132,7 +132,10 @@ CONDUCTOR_CODE_KEYS = _keys_from_whole_file(CONDUCTOR_MODEL_FILE) | {
 
 VACUUM_CODE_KEYS = (
     _keys_from_whole_file(VACUUM_MODEL_FILE)
-    | _keys_from_defs(SIM_MANAGER_FILE, ["create_vacuum_gripper", "_create_vacuum_gripper_isaac"])
+    | _keys_from_defs(
+        SIM_MANAGER_FILE,
+        ["create_vacuum_gripper", "_create_vacuum_gripper_isaac", "_vacuum_gripper_limits"],
+    )
     | _keys_from_defs(VACUUM_HANDLE_FILE, ["MockVacuumHandle"])
 )
 

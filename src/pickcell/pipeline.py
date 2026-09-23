@@ -230,7 +230,7 @@ class PickPipeline:
     # explicit, else the measured size - every downstream consumer reads
     # this, never block_size_mm directly
     resolved_block_size_mm: float | None = None
-    # phase 4: primary/fallback tallest-object scanners, run only when
+    # primary/fallback tallest-object scanners, run only when
     # randomize_size_range_mm is set (dynamic keep-out/carry heights)
     side_scanner: TallestScanner | None = None
     wrist_scanner: TallestScanner | None = None
@@ -318,7 +318,7 @@ class PickPipeline:
         return obstacles_from_prop_geometries(geometries, exclude)
 
     async def _measure_tallest(self, move_world_state: WorldState) -> None:
-        """Tallest-object measurement (phase 4): side scan first (occlusion-
+        """Tallest-object measurement: side scan first (occlusion-
         proof except for a nearer silhouette hiding a farther block), then
         the wrist-sweep ladder when the side scan is untrusted, then the
         size-range max as a conservative last resort. ``verify_detection_height``
@@ -545,7 +545,7 @@ class PickPipeline:
     ) -> None:
         """A move that approaches the detected block's airspace. The block is
         excluded from the obstacles, so a free plan may swing the arm through
-        it (GPU phase-1 runs 2-3: the ur20 batted the block away on two
+        it (a GPU run: the ur20 batted the block away on two
         different free segments). With the pick-area keep-out available the
         move plans FREELY boxed out of that airspace (fast joint motion, the
         GPU run 12 carry pattern - constrained linear moves crawl); without
@@ -602,9 +602,9 @@ class PickPipeline:
         block_size_mm is None, a degenerate size measurement (footprint and
         height disagreeing) tries one focused look above the detected pose -
         the pose estimate is usable even when the size is not (checklist item
-        3) - before walking the same ladder on a still-bad number (phase 3
-        seam decision). Each attempt focuses at most once. Returns the block's
-        pose and the look/focus pose the pipeline ended detection at, so a
+        3) - before walking the same ladder on a still-bad number. Each attempt
+        focuses at most once. Returns the block's pose and the look/focus pose
+        the pipeline ended detection at, so a
         caller can tell whether the arm is already above the block."""
         for offset_x, offset_y, wrist_theta_deg in SCAN_ATTEMPTS:
             look_pose = self.look_pose

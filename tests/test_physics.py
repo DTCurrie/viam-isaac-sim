@@ -109,10 +109,31 @@ class _FakePhysxSchema:
         self.PhysxMaterialAPI = _FakePhysxSchemaAPI()
 
 
+class _FakeMassAPI:
+    def __init__(self, prim: Any) -> None:
+        self.prim = prim
+
+    def CreateMassAttr(self, value: float) -> None:
+        self.prim.authored_mass = value
+
+
+class _FakeUsdPhysics:
+    class MassAPI:
+        @staticmethod
+        def Apply(prim: Any) -> _FakeMassAPI:
+            return _FakeMassAPI(prim)
+
+
+class _FakePrim:
+    def __init__(self) -> None:
+        self.authored_mass: float | None = None
+
+
 class _FakeIsaac:
     def __init__(self):
         self.physx_schema = _FakePhysxSchema()
         self.PhysxSchema = self.physx_schema
+        self.UsdPhysics = _FakeUsdPhysics
         self.materials: list[_FakeMaterial] = []
 
     def PhysicsMaterial(self, **kwargs):
@@ -127,6 +148,7 @@ class _FakeSceneObject:
         self.contact_offset: float | None = None
         self.rest_offset: float | None = None
         self.mass: float | None = None
+        self.prim = _FakePrim()
         if has_set_mass:
             self.set_mass = self._set_mass  # type: ignore[assignment]
 
@@ -200,3 +222,17 @@ def test_apply_prop_physics_skips_mass_when_object_has_no_set_mass():
     apply_prop_physics(isaac, world, "/World/wall", {"name": "wall", "mass": 1.0})
 
     assert obj.mass is None
+
+
+def test_apply_prop_physics_authors_the_mass_on_the_stage_too():
+    """set_mass alone is a physics-view write while the sim plays, and the
+    reset that follows a spawn rebuilds the body from the stage, so the mass
+    has to be on the stage as well or a spawned prop comes back weightless."""
+    isaac = _FakeIsaac()
+    obj = _FakeSceneObject()
+    world = _FakeWorld({"heavy": obj})
+
+    apply_prop_physics(isaac, world, "/World/heavy", {"name": "heavy", "mass": 78.0})
+
+    assert obj.mass == 78.0
+    assert obj.prim.authored_mass == 78.0

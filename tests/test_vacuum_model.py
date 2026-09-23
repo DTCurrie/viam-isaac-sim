@@ -1,5 +1,4 @@
 import asyncio
-import json
 
 import pytest
 from grpclib import Status
@@ -9,7 +8,8 @@ from viam.proto.app.robot import ComponentConfig
 from viam.proto.common import KinematicsFileFormat
 from viam.utils import dict_to_struct
 
-from isaac_module.models.vacuum import IsaacVacuum
+from isaac_module.asset_catalog import CUP_APPROACH_GAP_MM, EPICK
+from isaac_module.models.vacuum import _NUMERIC_ATTR_DEFAULTS, IsaacVacuum
 from isaac_module.sim_manager import SimManager
 
 _ABSTRACT_METHODS = {
@@ -206,28 +206,48 @@ def test_do_command_raises_method_not_implemented(world):
     asyncio.run(scenario())
 
 
-def test_get_kinematics_and_get_geometries_describe_the_same_box(world):
+def test_get_kinematics_serves_the_vendored_epick_file_verbatim(world):
     _make_arm(world, "kinematics-arm")
     vacuum = _make_vacuum(world, "kinematics-arm", "kinematics-vacuum")
 
     async def scenario():
         fmt, data = await vacuum.get_kinematics()
         assert fmt == KinematicsFileFormat.KINEMATICS_FILE_FORMAT_SVA
-        sva = json.loads(data)
-        assert len(sva["links"]) == 1
-        assert sva["joints"] == []
-        link = sva["links"][0]
-        assert link["parent"] == "world"
-        geometry = link["geometry"]
-        assert (geometry["x"], geometry["y"], geometry["z"]) == (80, 80, 196)
-        assert geometry["translation"]["z"] == pytest.approx(-98.0)
+        assert data == EPICK["kinematics_path"].read_bytes()
 
+    asyncio.run(scenario())
+
+
+def test_get_geometries_returns_the_six_epick_render_solids(world):
+    _make_arm(world, "geometries-arm")
+    vacuum = _make_vacuum(world, "geometries-arm", "geometries-vacuum")
+
+    async def scenario():
         geometries = await vacuum.get_geometries()
-        assert len(geometries) == 1
-        box = geometries[0].box
-        assert (box.dims_mm.x, box.dims_mm.y, box.dims_mm.z) == (80, 80, 196)
-        assert geometries[0].center.z == pytest.approx(-98.0)
-        assert geometries[0].center.o_z == 1
+        names = [g.label.split(":", 1)[1] for g in geometries]
+        assert names == [
+            "body",
+            "plate",
+            "cup-xp-yp",
+            "cup-xp-yn",
+            "cup-xn-yp",
+            "cup-xn-yn",
+        ]
+
+        body = geometries[0]
+        assert (body.box.dims_mm.x, body.box.dims_mm.y, body.box.dims_mm.z) == (71, 71, 129)
+        assert body.center.z == pytest.approx(-134.5)
+        assert body.center.o_z == 1
+
+        cup = geometries[2]
+        assert (cup.box.dims_mm.x, cup.box.dims_mm.y, cup.box.dims_mm.z) == (49, 49, 60)
+        assert (cup.center.x, cup.center.y, cup.center.z) == pytest.approx((79.75, 40.65, -40.0))
+
+        plate = geometries[1]
+        assert (plate.box.dims_mm.x, plate.box.dims_mm.y, plate.box.dims_mm.z) == pytest.approx(
+            (204.5, 126.3, 3.2)
+        )
+        assert plate.center.z == pytest.approx(-68.4)
 
     asyncio.run(scenario())
 
@@ -266,13 +286,106 @@ def test_an_engaged_cup_that_caught_nothing_reports_its_command_not_its_catch(wo
     asyncio.run(scenario())
 
 
-def test_the_tool_body_reaches_exactly_as_far_as_the_declared_tcp():
-    """The tool is authored as a cuboid hung from the flange by half its own
-    length, so its cup face lands at its full length below the flange. That
-    has to be the same number the frame and the planner are given as
-    tcp_offset_m, or the arm drives a face that is not where the geometry
+def test_the_collision_body_reaches_exactly_as_far_as_the_declared_tcp():
+    """The body collider's rear face is where the arm's flange plane sits.
+    That has to be the same number the frame and the planner are given as
+    tcp_offset_m, or the arm drives a plane that is not where the geometry
     ends and stalls against whatever it meets first."""
-    from isaac_module.asset_catalog import VACUUM_TOOL
+    body = EPICK["body"]
+    rear_face_z_mm = body["collision_center_z_mm"] - body["collision_mm"][2] / 2
+    assert rear_face_z_mm == pytest.approx(-float(EPICK["tcp_offset_m"]) * 1000.0, abs=1e-9)
 
-    tool_length_mm = float(VACUUM_TOOL["box_mm"][2])
-    assert tool_length_mm == float(VACUUM_TOOL["tcp_offset_m"]) * 1000.0
+
+@pytest.mark.parametrize("attr_name", sorted(_NUMERIC_ATTR_DEFAULTS))
+def test_validate_config_rejects_a_negative_numeric_attribute(attr_name):
+    with pytest.raises(ValueError, match=attr_name):
+        IsaacVacuum.validate_config(
+            _config(
+                f"vacuum-bad-{attr_name}",
+                {"world": "isaac-world", "arm": "my-arm", attr_name: -1},
+            )
+        )
+
+
+@pytest.mark.parametrize("attr_name", sorted(_NUMERIC_ATTR_DEFAULTS))
+def test_validate_config_rejects_a_boolean_numeric_attribute(attr_name):
+    with pytest.raises(ValueError, match=attr_name):
+        IsaacVacuum.validate_config(
+            _config(
+                f"vacuum-bool-{attr_name}",
+                {"world": "isaac-world", "arm": "my-arm", attr_name: True},
+            )
+        )
+
+
+@pytest.mark.parametrize("attr_name,default", sorted(_NUMERIC_ATTR_DEFAULTS.items()))
+def test_validate_config_accepts_each_attribute_at_its_default(attr_name, default):
+    deps, implicit = IsaacVacuum.validate_config(
+        _config(
+            f"vacuum-default-{attr_name}",
+            {"world": "isaac-world", "arm": "my-arm", attr_name: default},
+        )
+    )
+    assert deps == ["isaac-world", "my-arm"]
+    assert implicit == []
+
+
+def test_validate_config_rejects_max_grip_distance_equal_to_the_approach_gap():
+    with pytest.raises(ValueError, match="max_grip_distance_mm"):
+        IsaacVacuum.validate_config(
+            _config(
+                "vacuum-grip-equal-gap",
+                {
+                    "world": "isaac-world",
+                    "arm": "my-arm",
+                    "max_grip_distance_mm": CUP_APPROACH_GAP_MM,
+                },
+            )
+        )
+
+
+def test_validate_config_accepts_max_grip_distance_just_past_the_approach_gap():
+    deps, implicit = IsaacVacuum.validate_config(
+        _config(
+            "vacuum-grip-past-gap",
+            {
+                "world": "isaac-world",
+                "arm": "my-arm",
+                "max_grip_distance_mm": CUP_APPROACH_GAP_MM + 0.1,
+            },
+        )
+    )
+    assert deps == ["isaac-world", "my-arm"]
+    assert implicit == []
+
+
+def test_is_holding_something_meta_carries_the_gripper_status(world):
+    _make_arm(world, "meta-arm")
+    vacuum = _make_vacuum(world, "meta-arm", "meta-vacuum", {"mock_attach_prop": "box-1"})
+
+    async def scenario():
+        await vacuum.grab()
+        status = await vacuum.is_holding_something()
+        assert status.is_holding_something is True
+        assert status.meta["status"] == "Closed"
+        assert status.meta["gripped_objects"] == ["/World/box-1"]
+        assert status.meta["holding"] is True
+        assert status.meta["engaged"] is True
+        assert status.meta["coaxial_load_n"] == 0.0
+        assert status.meta["coaxial_monitor"] == "off"
+        assert status.meta["peak_coaxial_load_n"] == 0.0
+        assert status.meta["released_load_n"] is None
+
+        await vacuum.open()
+        status = await vacuum.is_holding_something()
+        assert status.is_holding_something is False
+        assert status.meta["status"] == "Open"
+        assert status.meta["gripped_objects"] == []
+        assert status.meta["holding"] is False
+        assert status.meta["engaged"] is False
+        assert status.meta["coaxial_load_n"] == 0.0
+        assert status.meta["coaxial_monitor"] == "off"
+        assert status.meta["peak_coaxial_load_n"] == 0.0
+        assert status.meta["released_load_n"] is None
+
+    asyncio.run(scenario())

@@ -1,0 +1,179 @@
+{
+  "name": "epick",
+  "links": [
+    {
+      "id": "body",
+      "parent": "world",
+      "translation": {
+        "x": 0,
+        "y": 0,
+        "z": 0
+      },
+      "orientation": {
+        "type": "ov_degrees",
+        "value": {
+          "x": 0,
+          "y": 0,
+          "z": 1,
+          "th": 0
+        }
+      },
+      "geometry": {
+        "type": "box",
+        "x": 71.0,
+        "y": 71.0,
+        "z": 126,
+        "translation": {
+          "x": 0,
+          "y": 0,
+          "z": -133
+        }
+      }
+    },
+    {
+      "id": "plate",
+      "parent": "body",
+      "translation": {
+        "x": 0,
+        "y": 0,
+        "z": 0
+      },
+      "orientation": {
+        "type": "ov_degrees",
+        "value": {
+          "x": 0,
+          "y": 0,
+          "z": 1,
+          "th": 0
+        }
+      },
+      "geometry": {
+        "type": "box",
+        "x": 204.5,
+        "y": 126.3,
+        "z": 3.2,
+        "translation": {
+          "x": 0,
+          "y": 0,
+          "z": -68.4
+        }
+      }
+    },
+    {
+      "id": "cup-xp-yp",
+      "parent": "plate",
+      "translation": {
+        "x": 0,
+        "y": 0,
+        "z": 0
+      },
+      "orientation": {
+        "type": "ov_degrees",
+        "value": {
+          "x": 0,
+          "y": 0,
+          "z": 1,
+          "th": 0
+        }
+      },
+      "geometry": {
+        "type": "box",
+        "x": 49.0,
+        "y": 49.0,
+        "z": 44,
+        "translation": {
+          "x": 79.75,
+          "y": 40.65,
+          "z": -48
+        }
+      }
+    },
+    {
+      "id": "cup-xp-yn",
+      "parent": "cup-xp-yp",
+      "translation": {
+        "x": 0,
+        "y": 0,
+        "z": 0
+      },
+      "orientation": {
+        "type": "ov_degrees",
+        "value": {
+          "x": 0,
+          "y": 0,
+          "z": 1,
+          "th": 0
+        }
+      },
+      "geometry": {
+        "type": "box",
+        "x": 49.0,
+        "y": 49.0,
+        "z": 44,
+        "translation": {
+          "x": 79.75,
+          "y": -40.65,
+          "z": -48
+        }
+      }
+    },
+    {
+      "id": "cup-xn-yp",
+      "parent": "cup-xp-yn",
+      "translation": {
+        "x": 0,
+        "y": 0,
+        "z": 0
+      },
+      "orientation": {
+        "type": "ov_degrees",
+        "value": {
+          "x": 0,
+          "y": 0,
+          "z": 1,
+          "th": 0
+        }
+      },
+      "geometry": {
+        "type": "box",
+        "x": 49.0,
+        "y": 49.0,
+        "z": 44,
+        "translation": {
+          "x": -79.75,
+          "y": 40.65,
+          "z": -48
+        }
+      }
+    },
+    {
+      "id": "cup-xn-yn",
+      "parent": "cup-xn-yp",
+      "translation": {
+        "x": 0,
+        "y": 0,
+        "z": 0
+      },
+      "orientation": {
+        "type": "ov_degrees",
+        "value": {
+          "x": 0,
+          "y": 0,
+          "z": 1,
+          "th": 0
+        }
+      },
+      "geometry": {
+        "type": "box",
+        "x": 49.0,
+        "y": 49.0,
+        "z": 44,
+        "translation": {
+          "x": -79.75,
+          "y": -40.65,
+          "z": -48
+        }
+      }
+    }
+  ]
+}

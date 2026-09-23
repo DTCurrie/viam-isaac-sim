@@ -285,16 +285,16 @@ def _all_box_geometries() -> list[dict[str, Any]]:
 
 def test_pick_grasp_pose_stops_just_short_of_the_box_top_face():
     """A cup driven onto a box makes contact the arm cannot push through, and
-    it stalls short of its commanded pose. The gap has to be positive and no
-    wider than the vacuum's own payload window, or the cup stops somewhere it
-    can no longer see the payload."""
-    from isaac_module.handles.vacuum import DEFAULT_MAX_PAYLOAD_GAP_M
+    it stalls short of its commanded pose. The gap has to be positive and
+    shorter than the cups' own raycast, or the ray from the cups never
+    reaches past it to find the payload."""
+    from isaac_module.surface_gripper import DEFAULT_MAX_GRIP_DISTANCE_MM
 
     pose = pick_grasp_pose(BOX_TOP_FACE_XYZ_MM)
     x, y, top_face_z = BOX_TOP_FACE_XYZ_MM
     assert (pose.x, pose.y) == (x, y)
     assert pose.z == top_face_z + CUP_APPROACH_GAP_MM
-    assert 0.0 < CUP_APPROACH_GAP_MM <= DEFAULT_MAX_PAYLOAD_GAP_M * 1000.0
+    assert 0.0 < CUP_APPROACH_GAP_MM < DEFAULT_MAX_GRIP_DISTANCE_MM
     assert pose.o_z == -1.0
 
 
@@ -571,9 +571,10 @@ async def test_place_motions_use_the_sequencers_poses_with_no_added_standoff():
     assert (place_start, False) in place_start_calls
     assert (place_start, True) in place_start_calls
     # the descent lands at the release pose, linear: place_end_in_world's x, y
-    # and orientation, raised by the grasp gap and the release clearance
+    # and orientation, raised by the release clearance, which is zero for a
+    # release at contact, so the descent ends on place_end itself
     assert (release, True) in release_calls
-    assert not any(_poses_equal(pose, place_end) for pose, _linear in mover.calls)
+    assert release.z == place_end.z + PLACE_RELEASE_CLEARANCE_MM
 
 
 async def test_the_box_rides_the_gripper_between_the_grab_and_the_release():
@@ -601,15 +602,15 @@ async def test_the_box_rides_the_gripper_between_the_grab_and_the_release():
     assert (dims.x, dims.y, dims.z) == (400.0, 300.0, 200.0)
 
 
-def test_held_box_transform_hangs_the_box_below_the_cup_by_the_grasp_gap():
+def test_held_box_transform_hangs_the_box_below_the_cup_by_half_its_height():
     held = held_box_transform("infeed_box_1", (150.0, 200.0, 100.0), "gripper-1")
     assert held.reference_frame == "infeed_box_1"
     assert held.pose_in_observer_frame.reference_frame == "gripper-1"
     centre = held.pose_in_observer_frame.pose
     # the gripper's z is the tool axis, pointing down at a grasp, so below
-    # the cup is +z: the grasp gap, then half the box's height
+    # the cup is +z: half the box's height, its top face at the cup
     assert (centre.x, centre.y) == (0.0, 0.0)
-    assert centre.z == pytest.approx(CUP_APPROACH_GAP_MM + 50.0)
+    assert centre.z == pytest.approx(50.0)
     dims = held.physical_object.box.dims_mm
     assert (dims.x, dims.y, dims.z) == (150.0, 200.0, 100.0)
     assert held.physical_object.label == "infeed_box_1"
@@ -734,21 +735,20 @@ def test_touched_down_is_a_distance_to_the_release_pose():
     assert touched_down(far, release) is False
 
 
-def test_place_release_pose_lifts_place_end_by_the_grasp_gap_and_the_clearance():
+def test_place_release_pose_lifts_place_end_by_the_release_clearance():
     """place_end_in_world is the cup at the box's top face with the box on
-    its slot. The cup holds the box CUP_APPROACH_GAP_MM above that face, so a
-    descent to place_end drives the box that far into the deck. Measured on
-    2026-09-22: the arm stalled with the box on the deck and the cup 5 mm
-    above place_end."""
+    its slot, so a descent all the way there sets the box down. The release
+    pose adds only the arm's own tracking allowance at the end of a descent,
+    PLACE_RELEASE_CLEARANCE_MM."""
     place_end = Pose(x=59.3, y=374.5, z=350.0, o_x=0.0, o_y=0.0, o_z=1.0, theta=-109.5)
     release = place_release_pose(place_end)
     assert (release.x, release.y) == (59.3, 374.5)
-    assert release.z == pytest.approx(350.0 + CUP_APPROACH_GAP_MM + PLACE_RELEASE_CLEARANCE_MM)
+    assert release.z == pytest.approx(350.0 + PLACE_RELEASE_CLEARANCE_MM)
     assert (release.o_x, release.o_y, release.o_z, release.theta) == (0.0, 0.0, 1.0, -109.5)
 
 
 async def test_a_run_begins_by_letting_go_of_whatever_the_cup_holds():
-    """A run that failed between grab and release leaves its box welded to
+    """A run that failed between grab and release leaves its box held to
     the cup, and a held prop ignores the restage that starts the next run."""
     world = FakeWorld(geometries=[_box_geometry(BOX_PROPS[0])])
     gripper = FakeGripper(grab_result=True, world=world)

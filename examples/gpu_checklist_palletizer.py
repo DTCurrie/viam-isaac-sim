@@ -1,33 +1,36 @@
-"""GPU acceptance checklist for the palletizing cell (phase 1: vacuum gripper,
-one box picked and placed by the box-palletizer service; phase 2: the
+"""GPU acceptance checklist for the palletizing cell. Four suites, each
+testing one stage this cell was built up in: first-box (vacuum gripper,
+one box picked and placed by the box-palletizer service), workcell (the
 vendored `viam:workcell-components` workcell adopted under the same
-mechanism; phase 3: the full eight-box pack, planned by
-`viam:pack-sequencer:sequencer` and executed by `box-palletizer`). Pass
-`--phase 1` (default), `--phase 2` or `--phase 3`.
+mechanism), epick (the Robotiq EPick adopted as the cell's gripper, driven
+directly rather than through box-palletizer), and pack (the full
+eight-box pack, planned by `viam:pack-sequencer:sequencer` and executed
+by `box-palletizer`). Pass `--suite first-box` (default), `--suite
+workcell`, `--suite epick` or `--suite pack`.
 
 Connects to a running Viam machine (the module running on the Isaac GPU box):
 `arm-1`, `gripper-1`, `builtin` motion, the `box-palletizer` service, and
-(phase 3 only) the `pack-sequencer` service. Item 3 is phase 1's own
-done-when, so it drives the actual pick and place through
-`box-palletizer`'s DoCommand rather than re-driving the arm and gripper
-itself. Items 1, 2 and 4 drive the arm and gripper directly to test the
-underlying grab mechanism, reading the box's pose from the world at run
+(the pack suite only) the `pack-sequencer` service. Item 3 is the
+first-box suite's own done-when, so it drives the actual pick and place
+through `box-palletizer`'s DoCommand rather than re-driving the arm and
+gripper itself. Items 1, 2 and 4 drive the arm and gripper directly to test
+the underlying grab mechanism, reading the box's pose from the world at run
 time rather than the service's own arithmetic, so a green result there
-can't just be agreement with the code under test. Phase 3 drives the whole
-pack through `box-palletizer`'s own `start`/`status` surface throughout,
-since the sequencer, not this script, owns every target pose.
+can't just be agreement with the code under test. The pack suite drives
+the whole pack through `box-palletizer`'s own `start`/`status` surface
+throughout, since the sequencer, not this script, owns every target pose.
 
-For phases 1 and 2, the box's known resting pose before a run and the
-target place position are facts about the deployed cell, so they come in
-as CLI arguments (`--pick-*-mm`, `--place-*-mm`) rather than an invented
-constant in this file. Phase 3 needs neither: `box-palletizer` sources the
-infeed pose from the sim itself and the sequencer owns every place target,
-so its checklist items read poses off the service's own status records
-instead.
+For the first-box and workcell suites, the box's known resting pose
+before a run and the target place position are facts about the deployed
+cell, so they come in as CLI arguments (`--pick-*-mm`, `--place-*-mm`)
+rather than an invented constant in this file. The pack suite needs
+neither: `box-palletizer` sources the infeed pose from the sim itself and
+the sequencer owns every place target, so its checklist items read poses
+off the service's own status records instead.
 
 Prints PASS/FAIL and the raw numbers for each item.
 
-Phase-1 checklist items:
+First-box suite checklist items:
 
 1. the vacuum tool renders on the wrist and the arm reaches the box
 2. `grab` attaches, the box rides the tool through a carry, and release drops it
@@ -36,7 +39,7 @@ Phase-1 checklist items:
    than hanging
 5. cost: cold and warm `ready` and the 10 s step rate
 
-Phase-2 checklist items, the cell having been adopted from Viam's own
+Workcell suite checklist items, the cell having been adopted from Viam's own
 palletizer workcell:
 
 1. every component in the fragment renders at the pose its frame declares,
@@ -45,12 +48,39 @@ palletizer workcell:
    geometry implies, and the pedestal's collider matches what it declares
 3. the arm cannot plan through the fences or the scan tunnel, shown by a
    plan that detours rather than intersecting
-4. phase 1's pick and place runs end to end in the new cell
+4. the single-box pick and place runs end to end in the workcell
 5. whether `scan-tunnel` needs a derived collider the way `robot-pedestal`
    does, answered by driving the arm at it
-6. cost: cold and warm `ready` and the 10 s step rate against phase 1's cell
+6. cost against the first-box suite's recorded run: cold and warm `ready`
+   and the 10 s step rate, since this cell has far more geometry
 7. implementation risk, not a plan requirement: render-only scenery has no
    collider proven on hardware
+
+EPick suite checklist items, the cell's tool having been adopted from the
+Robotiq EPick vacuum gripper. Items 2 through 6 drive the arm and gripper
+directly, the same reasoning as the first-box suite's items 1, 2 and 4:
+reading the box's pose from the world at run time rather than a service's
+own arithmetic. `--grab-delay-ms` and `--retry-interval-s` bound item 2's
+refusal timing; both default to the deployed overlay's own values.
+
+0. smoke: one attachment point on the tool body grips a box prop, then four
+   on the cup pattern
+1. the EPick renders on the wrist at the module's dimensions and
+   get_kinematics returns the module's own epick_model.json, with the 26 mm
+   approach gap free of colliders
+2. gating: a grab with the cups 5 mm over the box holds, one 40 mm over it
+   does not, and the refusal arrives within grab_delay_ms plus the retry
+   interval
+3. swing: during the level cross-cell carry the box's tilt relative to the
+   tool is nonzero and bounded, the grip holds, max and residual tilt printed
+4. tear-off: a load past the cups' holding force drops on lift, one under it
+   holds, and the 2 kg box holds
+5. the place descent in both arm configurations by the deterministic
+   reproduction, place error per configuration
+6. release at contact: descend until the box stops the arm on the deck,
+   open, landing error against the 25 mm drop
+7. cost against the workcell suite's recorded run: cold and warm ready and
+   the 10 s step rate
 
 Depends only on the stdlib and viam-sdk: it runs on a laptop against a remote
 machine, not inside the module process.
@@ -74,6 +104,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import math
 import sys
 import time
@@ -92,7 +123,20 @@ except ImportError:
 
 from gpu_checklist_world import WorldApi, prop_pose_mm, run_step_rate_measurement
 
-from isaac_module.models.palletizer import CUP_APPROACH_GAP_MM, approach_and_descend
+from isaac_module.asset_catalog import EPICK, EPICK_PRIM
+from isaac_module.models.palletizer import (
+    CUP_APPROACH_GAP_MM,
+    PLACE_RELEASE_CLEARANCE_MM,
+    PLACE_STALL_TOLERANCE_MM,
+    approach_and_descend,
+    held_box_transform,
+    is_execution_failure,
+    move_linear_or_free,
+    pick_grasp_pose,
+    pick_grasp_standoff_pose,
+    place_release_pose,
+    touched_down,
+)
 from isaac_module.prim_paths import prim_name
 from isaac_module.sequencer_client import SequencerClient
 from isaac_module.sort_plan import OUTCOME_PLACED
@@ -103,13 +147,19 @@ from isaac_module.spatial import (
     ov_to_quat,
     quat_conj,
     quat_mul,
+    quat_rotate,
     quat_to_ov,
+)
+from isaac_module.surface_gripper import (
+    COAXIAL_LOAD_WINDOW_S,
+    DEFAULT_COAXIAL_FORCE_LIMIT_N,
+    STANDARD_GRAVITY_M_S2,
 )
 from isaac_module.workcell_scenery import parse_visuals
 
 MM_PER_M = 1000.0
 
-PHASE_1_ITEMS: tuple[str, ...] = (
+FIRST_BOX_ITEMS: tuple[str, ...] = (
     "1. the vacuum tool renders on the wrist and the arm reaches the box",
     "2. `grab` attaches, the box rides the tool through a carry, and release drops it",
     "3. the box lands within tolerance of the place position and is still there after 5 s",
@@ -117,12 +167,12 @@ PHASE_1_ITEMS: tuple[str, ...] = (
     "5. cost: cold and warm `ready` and the 10 s step rate",
 )
 
-# phase 2's checklist items. Item 7 is not one of them: it verifies an
+# the workcell suite's checklist items. Item 7 is not one of them: it verifies an
 # implementation risk
 # (the collision:False strip sim_manager.py applies to a render-only prop is proven in mock only,
 # never on hardware, because omni and pxr are not importable in this environment), not a plan
 # requirement, and is labelled as such in its own text.
-PHASE_2_ITEMS: tuple[str, ...] = (
+WORKCELL_ITEMS: tuple[str, ...] = (
     "1. every component in the fragment renders at the pose its frame declares: its own group "
     "frame primitive against the fragment, and every box and capsule it draws against the prim "
     "the sim spawned for it",
@@ -131,16 +181,16 @@ PHASE_2_ITEMS: tuple[str, ...] = (
     "orientation and size it declares",
     "3. the arm cannot plan through the fences or the scan tunnel, shown by a plan that "
     "detours rather than intersecting",
-    "4. phase 1's pick and place runs end to end in the new cell",
+    "4. the single-box pick and place runs end to end in the workcell",
     "5. whether `scan-tunnel` needs a derived collider the way `robot-pedestal` does, "
     "answered by driving the arm at it",
-    "6. cost: cold and warm `ready` and the 10 s step rate against phase 1's cell, since "
-    "this one has far more geometry",
+    "6. cost against the first-box suite's recorded run: cold and warm `ready` and the 10 s "
+    "step rate, since this cell has far more geometry",
     "7. [implementation risk, not a plan requirement] render-only scenery has no collider "
     "proven on hardware: drop a box onto `caution-tape` and show it passes through to the floor",
 )
 
-PHASE_3_ITEMS: tuple[str, ...] = (
+PACK_ITEMS: tuple[str, ...] = (
     "1. eight boxes placed, the sequencer's target and the measured pose per box, as a table",
     "2. the order placed matches `get_pack_order`",
     "3. obstacles come from the world state store rather than this service's own hand-built "
@@ -149,7 +199,30 @@ PHASE_3_ITEMS: tuple[str, ...] = (
     "4. `set_box_transform` moves the box in the viewer to where physics put it, with the "
     "largest plan-versus-actual difference recorded across the eight",
     "5. a box the arm fails to place is `skip_box`ed and the run continues",
-    "6. cost against phase 2: cold and warm `ready` and the 10 s step rate",
+    "6. cost against the workcell suite's recorded run: cold and warm `ready` and the 10 s "
+    "step rate",
+)
+
+# the epick suite's checklist items: the Robotiq EPick vacuum gripper adopted as
+# the cell's tool. Item 0 is cited rather than re-run (see its own check),
+# and every other item drives the arm and gripper directly rather than
+# through box-palletizer, the same reasoning the first-box suite's items 1, 2 and 4 use.
+EPICK_ITEMS: tuple[str, ...] = (
+    "0. smoke: one attachment point on the tool body grips a box prop, then four on the cup "
+    "pattern",
+    "1. the EPick renders on the wrist at the module's dimensions and get_kinematics returns "
+    "the module's own epick_model.json, with the 26 mm approach gap free of colliders",
+    "2. gating: a grab with the cups 5 mm over the box holds, one 40 mm over it does not, and "
+    "the refusal arrives within grab_delay_ms plus the retry interval",
+    "3. swing: during the level cross-cell carry the box's tilt relative to the tool is "
+    "nonzero and bounded, the grip holds, max and residual tilt printed",
+    "4. tear-off: a load past the cups' holding force drops on lift, one under it holds, "
+    "and the 2 kg box holds",
+    "5. the place descent in both arm configurations by the deterministic reproduction, place "
+    "error per configuration",
+    "6. release at contact: descend until the box stops the arm on the deck, open, landing "
+    "error against the 25 mm drop",
+    "7. cost against the workcell suite's recorded run: cold and warm ready and the 10 s step rate",
 )
 
 # item 1's tolerance between a fragment component's declared world-frame position and its
@@ -169,8 +242,8 @@ FRAME_ANGLE_TOLERANCE_DEG = 0.5
 RESTING_HEIGHT_TOLERANCE_MM = 5.0
 
 # item 2's and item 7's clearance above a support's derived top face before the box free-falls,
-# and how long to wait for it to settle. Shorter than item 3 (phase 1)'s SETTLE_WINDOW_S since a
-# freshly dropped box has nowhere to drift once it has landed
+# and how long to wait for it to settle. Shorter than item 3 (first-box suite)'s SETTLE_WINDOW_S
+# since a freshly dropped box has nowhere to drift once it has landed
 # item 4's grab-with-nothing-under-the-tool needs a spot with, in fact,
 # nothing under the tool. How far from every prop that spot has to be, and the
 # offsets along the pick station it tries in order.
@@ -192,14 +265,15 @@ DROP_SETTLE_S = 2.0
 # 2's drops, where it was last left is inside the cell's own furniture.
 RESET_SETTLE_S = 1.0
 
-# item 6's phase-1 baseline, from that phase's recorded GPU run of
-# 2026-09-15: `sim_time_ratio` 0.563 over a 10 s window,
-# on isaac-sim-devin-2. Cited rather than re-measured, since phase 1's own cell was deleted this
-# phase. Phase 1's ready_time_s reads 0.0 both cold and warm because the checklist connects after
-# the finalizer has already signalled ready, so PLAN.md's "Carried in from phase 1" section names
-# it a measurement gap rather than a result. It is not a baseline: this phase's own ready_time_s
-# is printed as a first reading instead, to become phase 3's baseline
-PHASE_1_BASELINE_SIM_TIME_RATIO = 0.563
+# the workcell suite's item 6 cites this rather than re-measuring, since the first-box
+# suite's own cell was deleted before that run: `sim_time_ratio` 0.563 over a 10 s window,
+# from the first-box suite's own recorded GPU run of 2026-09-15 on isaac-sim-devin-2. The
+# first-box suite's own ready_time_s reads 0.0 both cold and warm, because the checklist
+# connects after the finalizer has already signalled ready, which is a measurement gap
+# rather than a result, so it carries no comparable baseline of its own. The workcell
+# suite's own ready_time_s is printed as a first reading instead, to become the pack
+# suite's baseline
+FIRST_BOX_BASELINE_SIM_TIME_RATIO = 0.563
 
 # item 1's tolerance between the arm's reported end position and the pick grasp pose:
 # same translation budget gpu_checklist_arm.py uses for a prim-pose/viam-pose comparison
@@ -246,9 +320,106 @@ DEFAULT_READY_TIMEOUT_S = 600.0
 STATUS_POLL_S = 0.5
 STATUS_TIMEOUT_S = 120.0
 
-# phase 3's bounded wait on a full eight-box pack: eight picks and places, so eight times
-# phase 1's single-box budget
-PHASE_3_STATUS_TIMEOUT_S = STATUS_TIMEOUT_S * 8
+# the pack suite's bounded wait on a full eight-box pack: eight picks and places, so eight
+# times the first-box suite's single-box budget
+PACK_STATUS_TIMEOUT_S = STATUS_TIMEOUT_S * 8
+
+# item 2's slack on top of the deterministic grab delay and the retry window: the grab
+# loop's own scheduling jitter, not a second retry
+GRAB_REFUSAL_SLACK_S = 1.0
+
+# item 2's miss height: far enough over the top face that no cup reaches it, reproducing
+# a grab over nothing rather than a marginal one. CUP_APPROACH_GAP_MM (5 mm) is the holding
+# case
+GRAB_GATING_MISS_MM = 40.0
+
+# item 3's carry distance and sample rate. 500 mm is far enough to hold the level
+# constraint through a real trajectory rather than one waypoint, short enough to stay
+# inside the cell
+SWING_CARRY_DISTANCE_MM = 500.0
+TRAJECTORY_SAMPLE_HZ = 20.0
+TRAJECTORY_SAMPLE_INTERVAL_S = 1.0 / TRAJECTORY_SAMPLE_HZ
+
+# item 3's tilt bounds: the floor rules out a move so constrained it never actually
+# tipped the box, the ceiling is the cups' own lateral limit
+# (pickcell.movers.CARRY_ORIENTATION_TOLERANCE_DEG, the service's own level-carry bound).
+# Past it the cups let go rather than ride it out.
+MIN_SWING_TILT_DEG = 0.05
+MAX_SWING_TILT_DEG = 15.0
+# item 3's bound on how far the tilt may still be sitting after the move returns plus
+# SWING_SETTLE_S: a carried box that never settles level again rode the carry wrong
+SWING_RESIDUAL_TILT_TOLERANCE_DEG = 1.0
+SWING_SETTLE_S = 1.0
+
+
+def tear_off_mass_kg(cups: Sequence[str], coaxial_limit_n: float) -> float:
+    """The over-limit tear-off box's mass in kg: enough that it outweighs
+    what every cup can hold at its own rated coaxial break force, with 25%
+    margin."""
+    return round(len(cups) * coaxial_limit_n * 1.25 / STANDARD_GRAVITY_M_S2)
+
+
+# item 4's light stand-in headroom: 40% under what four cups hold at their own
+# rated coaxial break force, so a correct plugin holds it well clear of the
+# threshold rather than at its edge. The module's 0.1 s mean carries a few
+# newtons of a lift's onset, so 20% margin sat too close to the threshold.
+TEAR_OFF_UNDER_LIMIT_MARGIN = 0.6
+
+
+def under_limit_mass_kg(cups: Sequence[str], coaxial_limit_n: float) -> float:
+    """The under-limit tear-off stand-in's mass in kg: below every cup's own
+    rated coaxial hold by TEAR_OFF_UNDER_LIMIT_MARGIN, so this item proves
+    the threshold from both sides rather than the over-limit case alone."""
+    return round(TEAR_OFF_UNDER_LIMIT_MARGIN * len(cups) * coaxial_limit_n / STANDARD_GRAVITY_M_S2)
+
+
+# item 4's overload and under-limit stand-in prop names. Their masses are computed at
+# run time from the configured --coaxial-limit-n, not from a module-level constant: the
+# arm's own lift capacity, not this file, decides which limit the item can actually prove.
+TEAR_OFF_BOX_PROP = "epick_tearoff_box"
+TEAR_OFF_UNDER_LIMIT_BOX_PROP = "epick_under_limit_box"
+# item 4's own budget for "did not rise": a box still on the station reads lift noise
+# of this size or less, the same magnitude RESTING_HEIGHT_TOLERANCE_MM allows for a
+# settled read
+TEAR_OFF_RISE_TOLERANCE_MM = 5.0
+# item 4's cap on how much of a stall message's own text gets printed when it carries no
+# "stuck joints" clause to key off of: enough to show which waypoint and how many
+# consecutive stalls, short of dumping the whole exception
+LIFT_STALL_MESSAGE_HEAD_CHARS = 160
+# item 4's clearance for sidestepping the real box, along the station's own travel
+# axis (y, the same axis GRAB_NOTHING_OFFSETS_MM uses), off its resting spot before
+# either stand-in spawns there
+TEAR_OFF_SIDESTEP_MM = -400.0
+# item 4's stow spots for the two stand-ins once the item is done with them: far
+# outside every other item's operating envelope, since this checklist has no remove
+# verb, and 1 m apart along x so neither spawn lands on the other
+TEAR_OFF_STOW_XYZ_MM = (-3000.0, -3000.0, 500.0)
+TEAR_OFF_UNDER_LIMIT_STOW_XYZ_MM = (-2000.0, -3000.0, 500.0)
+
+# item 4's stand-in physics, carried from the cell's own infeed box
+# (examples/configs/sim-palletizer-cell.json's infeed_box_1) rather than left at Isaac's
+# authored defaults. A stand-in spawned with `mass` alone takes the default contact
+# offset of 0.1 m and floats on it: the 2026-09-22 run read it settled 39 mm above a
+# resting box's own height, tilted 19 degrees.
+TEAR_OFF_BOX_FRICTION = 0.7
+TEAR_OFF_BOX_RESTITUTION = 0.0
+TEAR_OFF_BOX_CONTACT_OFFSET_M = 0.005
+
+# items 5 and 6's two arm configurations at the reproduction's waypoint 10 (the place
+# descent target), in degrees, from forward kinematics over the two branches recorded on
+# the GPU machine. Index 4 (wrist 2) is positive in A, negative in B - see branch_of.
+PLACE_DESCENT_SEED_JOINTS_DEG: dict[str, tuple[float, ...]] = {
+    "A": (-232.33, -62.61, 72.77, 79.83, 90.0, -142.33),
+    "B": (243.57, -104.8, 111.8, -97.0, -90.0, 153.57),
+}
+# item 5's raised approach above place_release_pose, before the confirmed-branch descent
+DESCENT_START_RAISE_MM = 80.0
+# items 5 and 6's settle window before the landing pose is read, matching the first-box
+# suite's own item 3 post-release settle reasoning at a shorter, single-box scale
+PLACE_SETTLE_S = 2.0
+# item 6's bound on the landed box's own tilt off upright, read the way the workcell
+# suite's own item 1 orientation_delta_deg reads any other pose disagreement
+RELEASE_TILT_TOLERANCE_DEG = 2.0
 
 
 # pure helpers, unit-tested without a robot in tests/test_gpu_checklist_palletizer.py
@@ -821,11 +992,280 @@ def prim_matches_expected(
     )
 
 
+def collision_reach_z_mm(model: Mapping[str, Any]) -> float:
+    """The closest a kinematics file's own collision geometry comes to the
+    TCP (z=0), in mm: the largest `translation.z + z/2` over every link's box
+    geometry. The cup boxes reach closer than the body or the plate, so this
+    is always a cup's own number, independent of which cup."""
+    return max(
+        float(link["geometry"]["translation"]["z"]) + float(link["geometry"]["z"]) / 2.0
+        for link in model["links"]
+    )
+
+
+def offset_along_tool_mm(tcp_pose: Mapping[str, float], prim_pose: Mapping[str, float]) -> float:
+    """How far `prim_pose` sits behind `tcp_pose` along the tool's own +Z
+    axis, in mm. Positive is behind (opposite the direction the tool
+    points), which is where every EPick render solid is authored."""
+    tool_axis = quat_rotate(pose_quat(tcp_pose), (0.0, 0.0, 1.0))
+    displacement_mm = (
+        prim_pose["x"] - tcp_pose["x"],
+        prim_pose["y"] - tcp_pose["y"],
+        prim_pose["z"] - tcp_pose["z"],
+    )
+    projection_mm = sum(
+        delta * axis for delta, axis in zip(displacement_mm, tool_axis, strict=True)
+    )
+    return -projection_mm
+
+
+def refusal_within(
+    elapsed_s: float, grab_delay_ms: float, retry_interval_s: float, slack_s: float
+) -> bool:
+    """Whether a refused `grab()` returned inside its expected window: the
+    gripper's own deterministic grab delay, the automatic-mode retry
+    interval it waits out before giving up, and `slack_s` of scheduling
+    jitter on top of both."""
+    return elapsed_s <= grab_delay_ms / 1000.0 + retry_interval_s + slack_s
+
+
+def tilt_deg(tool_quat_wxyz: Quat, box_quat_wxyz: Quat) -> float:
+    """The angle, in degrees, between the tool's own +Z axis (the cup axis,
+    pointing down at the box it holds) and the box's own -Z axis (down
+    through the box from its top face): how far a carried box has tipped
+    relative to the cup holding it, independent of either one's yaw about
+    that axis.
+
+    A box hanging flat under the cups reads 0 by this measure. Comparing
+    both axes' -Z, the shape this replaced, reads 180 for that same box: the
+    tool points down at the box's top face, so the two -Z axes point
+    opposite each other by construction, not because anything tipped."""
+    tool_axis = quat_rotate(tool_quat_wxyz, (0.0, 0.0, 1.0))
+    box_axis = quat_rotate(box_quat_wxyz, (0.0, 0.0, -1.0))
+    cosine = max(-1.0, min(1.0, sum(a * b for a, b in zip(tool_axis, box_axis, strict=True))))
+    return math.degrees(math.acos(cosine))
+
+
+def swing_verdict(
+    max_tilt_deg: float, residual_tilt_deg: float, held_throughout: bool
+) -> tuple[bool, str]:
+    """(ok, detail) of item 3's swing: the carry tipped the box some
+    measurable amount without exceeding the cups' own lateral limit, it
+    settled back level once the move stopped, and the grip never let go
+    along the way."""
+    tilt_ok = MIN_SWING_TILT_DEG <= max_tilt_deg < MAX_SWING_TILT_DEG
+    residual_ok = residual_tilt_deg < SWING_RESIDUAL_TILT_TOLERANCE_DEG
+    ok = tilt_ok and residual_ok and held_throughout
+    return ok, (
+        f"max tilt {max_tilt_deg:.3f} deg (bounds [{MIN_SWING_TILT_DEG}, {MAX_SWING_TILT_DEG})), "
+        f"residual {residual_tilt_deg:.3f} deg (< {SWING_RESIDUAL_TILT_TOLERANCE_DEG}), "
+        f"held throughout={held_throughout}"
+    )
+
+
+@dataclass
+class TearOffReading:
+    """One stand-in's lift: whether the plugin still reported it held, how
+    far it rose, and how far its top face sagged below the TCP while held.
+
+    `sag_mm` is None when the grab itself returned False, since the lift
+    never happened and there is nothing to read it after. `could_not_lift`
+    is True when the arm stalled trying to raise this stand-in back to its
+    standoff: `held` and `rise_mm` are still read off the world afterwards,
+    but neither dropped nor held is the right word for a lift the arm never
+    completed. `mass_kg` is the stand-in's own configured mass, carried onto
+    the reading so a failing verdict can name it. `peak_load_n` and
+    `released_load_n` are read off the same `is_holding_something` reply
+    that set `held`, and are None when that reply's meta carries neither
+    key."""
+
+    held: bool
+    rise_mm: float
+    sag_mm: float | None = None
+    could_not_lift: bool = False
+    mass_kg: float = 0.0
+    peak_load_n: float | None = None
+    released_load_n: float | None = None
+
+
+def lift_stall_detail(name: str, error_message: str) -> str:
+    """Item 4's print line when a stand-in's lift stalls the arm rather than
+    completing: `name` plus whichever part of the stall message names the
+    stuck joints, since that is the diagnosis worth reading, or the first
+    LIFT_STALL_MESSAGE_HEAD_CHARS of the raw message when it carries no
+    "stuck joints" clause to key off of."""
+    marker = "stuck joints"
+    marker_index = error_message.find(marker)
+    stall_text = (
+        error_message[marker_index:]
+        if marker_index != -1
+        else error_message[:LIFT_STALL_MESSAGE_HEAD_CHARS]
+    )
+    return f"{name}: the arm could not lift it ({stall_text})"
+
+
+def _peak_release_suffix(peak_load_n: float | None, released_load_n: float | None) -> str:
+    """The `, peak <n> N per cup[, released at <n> N]` clause `tear_off_verdict`
+    appends to each box's detail, or "" when the reading carries no coaxial
+    load meta at all."""
+    if peak_load_n is None:
+        return ""
+    suffix = f", peak {peak_load_n:.1f} N per cup"
+    if released_load_n is not None:
+        suffix += f", released at {released_load_n:.1f} N"
+    return suffix
+
+
+def tear_off_verdict(
+    over: TearOffReading, under: TearOffReading, light: TearOffReading
+) -> tuple[bool, str]:
+    """(ok, detail) of item 4's tear-off: a load past the cups' own rated
+    coaxial hold (`over`) drops on lift, one comfortably under it (`under`)
+    holds and rides LIFT_DISTANCE_MM, and the 2 kg box (`light`) does too.
+
+    This proves the coaxial check as a threshold rather than a cliff: the
+    over-limit reading alone cannot tell a plugin that never sees any cup
+    load from one that correctly refuses only past the rated force. A held
+    reading past TEAR_OFF_RISE_TOLERANCE_MM is a FAIL whose own sag is the
+    diagnosis, since `over.sag_mm` near zero means the mass never took and
+    near the spring's own full deflection means the spring is not
+    reported. A stand-in the arm could not lift at all settles neither
+    reading: the configured coaxial limit is proving a load this arm cannot
+    raise, not a fact about the plugin."""
+    if over.could_not_lift:
+        return False, (
+            f"the arm cannot lift {over.mass_kg:.0f} kg: lower the configured coaxial limit so "
+            "four cups hold less than the arm can raise"
+        )
+    dropped = not over.held and over.rise_mm < TEAR_OFF_RISE_TOLERANCE_MM
+    lifted = over.held and over.rise_mm >= TEAR_OFF_RISE_TOLERANCE_MM
+    under_ok = under.held and abs(under.rise_mm - LIFT_DISTANCE_MM) <= LIFT_VERTICAL_TOLERANCE_MM
+    light_ok = light.held and abs(light.rise_mm - LIFT_DISTANCE_MM) <= LIFT_VERTICAL_TOLERANCE_MM
+
+    if dropped:
+        over_detail = (
+            f"over-limit released at the grab or on lift: held=False rise {over.rise_mm:.1f} mm"
+            f"{_peak_release_suffix(over.peak_load_n, over.released_load_n)}"
+        )
+    elif lifted:
+        sag_str = f"{over.sag_mm:.1f} mm" if over.sag_mm is not None else "n/a"
+        over_detail = (
+            "the over-limit stand-in was lifted and held: the module's monitor did not release "
+            f"it (sag {sag_str})"
+        )
+    else:
+        over_detail = (
+            f"over-limit reading disagreed with itself: held={over.held} rise {over.rise_mm:.1f} mm"
+        )
+    under_detail = (
+        f"under-limit: held={under.held} rise {under.rise_mm:.1f} mm (pass if held and within "
+        f"{LIFT_VERTICAL_TOLERANCE_MM:.0f} mm of {LIFT_DISTANCE_MM:.0f})"
+        f"{_peak_release_suffix(under.peak_load_n, under.released_load_n)}"
+    )
+    light_detail = (
+        f"light (2 kg): held={light.held} rise {light.rise_mm:.1f} mm (pass if held and within "
+        f"{LIFT_VERTICAL_TOLERANCE_MM:.0f} mm of {LIFT_DISTANCE_MM:.0f})"
+        f"{_peak_release_suffix(light.peak_load_n, light.released_load_n)}"
+    )
+    ok = dropped and under_ok and light_ok
+    detail = f"{over_detail}; {under_detail}; {light_detail}"
+    return ok, detail
+
+
+def hold_load_detail(meta: Mapping[str, Any]) -> str:
+    """The coaxial load reading from an `is_holding_something` reply's own
+    `meta`, for the print lines in items 3 to 6: the windowed mean pull on
+    the most loaded cup and the peak single-step pull since the last grab,
+    plus the windowed pull at release once the module has opened the
+    gripper. An older module with none of these keys reads as "load n/a"."""
+    if "coaxial_load_n" not in meta or "peak_coaxial_load_n" not in meta:
+        return "load n/a"
+    detail = (
+        f"load {meta['coaxial_load_n']:.1f} N mean, peak {meta['peak_coaxial_load_n']:.1f} N "
+        "per cup"
+    )
+    released_load_n = meta.get("released_load_n")
+    if released_load_n is not None:
+        detail += f", released at {released_load_n:.1f} N"
+    monitor = meta.get("coaxial_monitor")
+    if monitor is not None:
+        detail += f", monitor {monitor}"
+    return detail
+
+
+def hold_lost_detail(leg: str, box_pose: Mapping[str, float] | None) -> str:
+    """The failure detail for item 3, 5 or 6 when `is_holding_something` reads
+    False right after a leg that moved the arm with the box held: which leg
+    it happened after, and where the box was left when it let go."""
+    location = f"box at {dict(box_pose)}" if box_pose is not None else "box has no known pose"
+    return f"hold lost after {leg}: {location}"
+
+
+def branch_of(joints_deg: Sequence[float]) -> str:
+    """Which of the two wrist-2 solutions a joint configuration sits in:
+    "A" for wrist 2 turned positive, "B" for negative. Index 4 is
+    wrist_2_joint in UR_JOINT_NAMES order."""
+    return "A" if joints_deg[4] > 0 else "B"
+
+
+def branch_report(seed_name: str, at_standoff: str, at_descent_start: str) -> str:
+    """Item 5's per-seed branch trace: which branch the standoff and the
+    descent start actually reached, named against the seed asked for rather
+    than assumed to match it, so the detail line says which configuration
+    was actually measured."""
+    held = at_standoff == at_descent_start
+    matched_seed = at_standoff == seed_name and at_descent_start == seed_name
+    outcome = "held the seed" if matched_seed else "did not hold the seed"
+    changed_note = "" if held else ", branch changed between standoff and descent start"
+    return (
+        f"seed {seed_name}: standoff branch {at_standoff}, descent start branch "
+        f"{at_descent_start} ({outcome}{changed_note})"
+    )
+
+
+def wrist_fold_deg(samples: Sequence[Sequence[float]]) -> float:
+    """The largest reversal of wrist 1 (index 3) against its net direction
+    of travel across a sampled descent, in degrees: how far it backtracked
+    from the furthest point it had already reached in that direction. Zero
+    for a monotone descent, since the running extreme is always the current
+    value."""
+    wrist_1_deg = [float(sample[3]) for sample in samples]
+    if len(wrist_1_deg) < 2:
+        return 0.0
+    direction = 1.0 if wrist_1_deg[-1] >= wrist_1_deg[0] else -1.0
+    running_extreme_deg = wrist_1_deg[0]
+    worst_fold_deg = 0.0
+    for value in wrist_1_deg[1:]:
+        if direction > 0:
+            running_extreme_deg = max(running_extreme_deg, value)
+            fold_deg = running_extreme_deg - value
+        else:
+            running_extreme_deg = min(running_extreme_deg, value)
+            fold_deg = value - running_extreme_deg
+        worst_fold_deg = max(worst_fold_deg, fold_deg)
+    return worst_fold_deg
+
+
 # async drivers, not unit-tested (need a live world/arm/gripper/motion)
 
 
 def _pose_to_mm(pose: Any) -> dict[str, float]:
     return {"x": float(pose.x), "y": float(pose.y), "z": float(pose.z)}
+
+
+def _full_pose_mm(pose: Any) -> dict[str, float]:
+    """A viam Pose's position and orientation vector as the same mapping
+    shape `pose_in_world_mm` uses, so `pose_quat` and `tilt_deg` read a live
+    TCP reading the same way they read a `prop_geometries` entry."""
+    return {
+        "x": float(pose.x),
+        "y": float(pose.y),
+        "z": float(pose.z),
+        "o_x": float(pose.o_x),
+        "o_y": float(pose.o_y),
+        "o_z": float(pose.o_z),
+        "theta": float(pose.theta),
+    }
 
 
 def _mm(reply: Mapping[str, Any], axis: str) -> float:
@@ -859,16 +1299,34 @@ async def _box_top_face_xyz_mm(world: WorldApi, box_prop: str) -> tuple[float, f
     return None
 
 
-async def _cell_world_state(world: WorldApi, exclude: set[str]) -> Any:
+async def _cell_world_state(world: WorldApi, exclude: set[str], held: Any = None) -> Any:
     """The planner's obstacles, built the same way the palletizer service
     builds them. Without these the planner routes the arm straight through the
-    tables it is standing on, and physics stops it where the plan did not."""
+    tables it is standing on, and physics stops it where the plan did not.
+
+    `held` carries a box already on the cup (`held_box_transform`), so a free
+    move plans the tool AND its payload as one rigid body - the level-carry
+    items need this, since the tool alone clears what the box would sweep
+    through."""
     from pickcell.obstacles import obstacles_from_prop_geometries, support_obstacle, world_state
 
     response = await world.do_command({"command": "prop_geometries"})
     geometries = response.get("geometries", [])
     obstacles = obstacles_from_prop_geometries(geometries, exclude)
-    return world_state(None, obstacles, support_obstacle(FLOOR_Z_MM))
+    transforms = (held,) if held is not None else ()
+    return world_state(None, obstacles, support_obstacle(FLOOR_Z_MM), transforms)
+
+
+async def _box_dims_mm(world: WorldApi, box_prop: str) -> tuple[float, float, float]:
+    """`box_prop`'s own x/y/z dimensions read live from the world, for the
+    held-box transform items 3, 5 and 6 attach to the planner."""
+    geometries = (await world.do_command({"command": "prop_geometries"}))["geometries"]
+    for geometry in geometries:
+        if geometry.get("name") == box_prop:
+            return cast(
+                "tuple[float, float, float]", tuple(float(d) for d in geometry["box_dims_mm"])
+            )
+    raise ValueError(f"{box_prop!r} has no known geometry in the world")
 
 
 async def _move(
@@ -877,24 +1335,28 @@ async def _move(
     pose: Any,
     state: Any,
     linear: bool = False,
+    level: bool = False,
     leg: str = "move",
 ) -> None:
     """Drives the GRIPPER's frame through `pickcell.movers.RealMover`, the
     same mover the palletizer service uses.
 
-    Two things that mover already gets right and a hand-rolled motion call
+    Three things that mover already gets right and a hand-rolled motion call
     does not. It plans the gripper's frame, so the cup lands on the target
     instead of the flange landing there and driving the tool a tool-length
-    into whatever is below. And `linear=True` carries a linear constraint, so
+    into whatever is below. `linear=True` carries a linear constraint, so
     a short descent or lift stays in the arm's current configuration instead
     of being replanned into a different inverse-kinematics branch, which turns
-    a 100 mm lift into a full elbow flip through the table."""
+    a 100 mm lift into a full elbow flip through the table. And `level=True`
+    bounds a free move's tool orientation the way a carried box needs, the
+    same CARRY_ORIENTATION_TOLERANCE_DEG constraint box-palletizer applies
+    while the cup holds something."""
     from pickcell.movers import RealMover
 
     # this cell never calls look_from, so the mover's camera frame is unused
     mover = RealMover(motion, gripper.name, gripper.name)
     try:
-        await mover.move_to(pose, state, linear=linear)
+        await mover.move_to(pose, state, linear=linear, level=level)
     except Exception as error:
         # which leg refused matters more than the message. The 2026-09-16 run
         # reported 'motion planner failed to find path' with no leg named, and
@@ -938,7 +1400,9 @@ async def _check_reach(
 
     top_face_xyz_mm = await _box_top_face_xyz_mm(world, box_prop)
     if top_face_xyz_mm is None:
-        line = verdict(PHASE_1_ITEMS[0], False, f"{box_prop!r} has no known geometry in the world")
+        line = verdict(
+            FIRST_BOX_ITEMS[0], False, f"{box_prop!r} has no known geometry in the world"
+        )
         print(line)
         return line, False
 
@@ -989,7 +1453,7 @@ async def _check_reach(
     ok = error_mm <= REACH_TOLERANCE_MM
     print(f"  arrived (mm): {_pose_to_mm(end_position)}")
     line = verdict(
-        PHASE_1_ITEMS[0],
+        FIRST_BOX_ITEMS[0],
         ok,
         f"reach error {error_mm:.3f} mm; human: confirm the vacuum tool renders on the wrist "
         "in the camera image",
@@ -1007,7 +1471,9 @@ async def _check_grab_carry_release(
     back near its pick pose for item 3's service run to pick up for real."""
     top_face_xyz_mm = await _box_top_face_xyz_mm(world, box_prop)
     if top_face_xyz_mm is None:
-        line = verdict(PHASE_1_ITEMS[1], False, f"{box_prop!r} has no known geometry in the world")
+        line = verdict(
+            FIRST_BOX_ITEMS[1], False, f"{box_prop!r} has no known geometry in the world"
+        )
         print(line)
         return line, False
     standoff, _grasp = _pick_grasp_poses(top_face_xyz_mm)
@@ -1048,7 +1514,7 @@ async def _check_grab_carry_release(
         f"grabbed={grabbed} lift delta {vertical_mm:.1f} mm vertical / {horizontal_mm:.1f} mm "
         f"horizontal, holding after release={holding_status.is_holding_something}"
     )
-    line = verdict(PHASE_1_ITEMS[1], ok, detail)
+    line = verdict(FIRST_BOX_ITEMS[1], ok, detail)
     print(line)
     return line, ok
 
@@ -1110,7 +1576,7 @@ async def _check_placement(
     gripper: Any,
     box_prop: str,
 ) -> tuple[str, bool]:
-    """The phase's own done-when: `{"command": "start"}` on the
+    """The first-box suite's own done-when: `{"command": "start"}` on the
     `box-palletizer` service, the first box's record, then the box's resting
     pose measured against the sequencer's own slot, immediately after release
     and again after SETTLE_WINDOW_S.
@@ -1167,7 +1633,7 @@ async def _check_placement(
             await asyncio.sleep(RESET_SETTLE_S)
             print(f"  box after letting go (mm): {await _box_pose_mm(world, box_prop)}")
         line = verdict(
-            PHASE_1_ITEMS[2],
+            FIRST_BOX_ITEMS[2],
             False,
             f"box-palletizer did not place the box: state={status.get('state')!r} {records}",
         )
@@ -1195,7 +1661,7 @@ async def _check_placement(
         f"slot, settle error {settled_error_mm:.3f} mm, drift {drift_mm:.3f} mm over "
         f"{SETTLE_WINDOW_S:.0f}s"
     )
-    line = verdict(PHASE_1_ITEMS[2], ok, detail)
+    line = verdict(FIRST_BOX_ITEMS[2], ok, detail)
     print(line)
     return line, ok
 
@@ -1228,7 +1694,7 @@ async def _check_grab_nothing(
     empty_xyz_mm = empty_spot_mm(geometries, station_top_face_xyz_mm)
     if empty_xyz_mm is None:
         line = verdict(
-            PHASE_1_ITEMS[3],
+            FIRST_BOX_ITEMS[3],
             False,
             "no spot within reach has nothing under it, so a grab here would test the "
             "opposite of what this item claims",
@@ -1246,14 +1712,14 @@ async def _check_grab_nothing(
         )
     except TimeoutError:
         line = verdict(
-            PHASE_1_ITEMS[3], False, f"timed out after {GRAB_NOTHING_TIMEOUT_S:.0f}s (hung)"
+            FIRST_BOX_ITEMS[3], False, f"timed out after {GRAB_NOTHING_TIMEOUT_S:.0f}s (hung)"
         )
         print(line)
         return line, False
 
     ok = not grabbed and not holding_status.is_holding_something
     line = verdict(
-        PHASE_1_ITEMS[3],
+        FIRST_BOX_ITEMS[3],
         ok,
         f"grab()={grabbed} holding={holding_status.is_holding_something}",
     )
@@ -1279,7 +1745,12 @@ async def sample_ready_time(
     return {"ready_time_s": ready_time_s(samples), "sample_count": len(samples)}
 
 
-async def _check_cost(world: WorldApi, run_label: str) -> tuple[str, bool]:
+async def _check_cost(
+    world: WorldApi, run_label: str, item: str = FIRST_BOX_ITEMS[4]
+) -> tuple[str, bool]:
+    """The first-box suite's cost item, and (with `item` overridden) the
+    epick suite's item 7: both read the same cold/warm ready time and step
+    rate, so one reading function serves both labels."""
     import json
 
     ready = await sample_ready_time(world)
@@ -1288,7 +1759,7 @@ async def _check_cost(world: WorldApi, run_label: str) -> tuple[str, bool]:
     print(f"  [{run_label}] step_rate: {json.dumps(step_rate, default=str, sort_keys=True)}")
     sim_time_ratio = step_rate.get("baseline", {}).get("sim_time_ratio")
     line = verdict(
-        PHASE_1_ITEMS[4],
+        item,
         True,
         f"run_label={run_label} ready_time_s={ready['ready_time_s']} "
         f"sim_time_ratio={sim_time_ratio}",
@@ -1495,7 +1966,7 @@ async def _check_component_frames(
         prims_compared += compared
         print(f"    on the stage: {detail} ({'PASS' if prims_ok else 'FAIL'})")
     line = verdict(
-        PHASE_2_ITEMS[0],
+        WORKCELL_ITEMS[0],
         all_ok,
         f"{len(fragment_frames_mm)} fragment components checked, {prims_compared} spawned "
         "prims compared with their frame",
@@ -1566,7 +2037,7 @@ async def _check_support_drops(
         print(f"  {component}: {detail} ({'PASS' if ok else 'FAIL'})")
 
     line = verdict(
-        PHASE_2_ITEMS[1],
+        WORKCELL_ITEMS[1],
         all_ok,
         "drop test against pick-station and pallet, declaration check against every one of the "
         f"{len(declared_colliders_mm)} frame.geometry colliders, orientation included",
@@ -1598,7 +2069,7 @@ async def _check_fence_and_tunnel_obstacles(world: WorldApi) -> tuple[str, bool]
         "human: confirm in the Kit viewport that item 4's pick-to-place plan swings clear of "
         "both rather than clipping through them"
     )
-    line = verdict(PHASE_2_ITEMS[2], ok, detail)
+    line = verdict(WORKCELL_ITEMS[2], ok, detail)
     print(line)
     return line, ok
 
@@ -1613,14 +2084,14 @@ async def _run_pick_and_place_regression(
     box_prop: str,
     pick_pose_mm: Mapping[str, float],
 ) -> tuple[str, bool]:
-    """Item 4: phase 1's own mechanism, reach, grab/carry/release, the
-    service's placement, and a grab with nothing under the tool, run end to
-    end against the new cell."""
+    """Item 4: the first-box suite's own mechanism, reach, grab/carry/release,
+    the service's placement, and a grab with nothing under the tool, run end
+    to end against the workcell."""
     await _park_arm(world, gripper, motion)
     reset_ok, reset_detail = await _reset_pick_box(world, box_prop, pick_pose_mm, "pick-station")
     if not reset_ok:
         line = verdict(
-            PHASE_2_ITEMS[3],
+            WORKCELL_ITEMS[3],
             False,
             f"the box never came to rest on the pick station ({reset_detail}), so every target "
             "below would have been derived from wherever it was left instead",
@@ -1650,7 +2121,9 @@ async def _run_pick_and_place_regression(
     )
 
     ok = reach_ok and carry_ok and place_ok and grab_nothing_ok
-    line = verdict(PHASE_2_ITEMS[3], ok, "phase 1's reach/carry/place/grab-nothing sequence")
+    line = verdict(
+        WORKCELL_ITEMS[3], ok, "the first-box suite's reach/carry/place/grab-nothing sequence"
+    )
     print(line)
     return line, ok
 
@@ -1671,18 +2144,18 @@ async def _check_scan_tunnel_collider(world: WorldApi) -> tuple[str, bool]:
         "arm through the tunnel's span and confirm whether it stops at a real collider (needs "
         "workcell_scenery.DERIVED_COLLIDER_MODELS the way robot-pedestal does) or passes through"
     )
-    line = verdict(PHASE_2_ITEMS[4], True, detail)
+    line = verdict(WORKCELL_ITEMS[4], True, detail)
     print(line)
     return line, True
 
 
-async def _check_cost_against_phase_1(world: WorldApi, run_label: str) -> tuple[str, bool]:
+async def _check_cost_against_first_box(world: WorldApi, run_label: str) -> tuple[str, bool]:
     """Item 6: cost, with `sim_time_ratio` printed alongside the cited
-    phase-1 baseline rather than re-measuring a cell this phase deleted.
-    Phase 1's `ready_time_s` is not comparable (see
-    `PHASE_1_BASELINE_SIM_TIME_RATIO`'s comment), so this phase's own
+    first-box suite baseline rather than re-measuring a cell this suite
+    deleted. The first-box suite's `ready_time_s` is not comparable (see
+    `FIRST_BOX_BASELINE_SIM_TIME_RATIO`'s comment), so this suite's own
     `ready_time_s` is printed as a first reading rather than a delta against
-    that gap, for phase 3 to use as its baseline."""
+    that gap, for the pack suite to use as its baseline."""
     import json
 
     ready = await sample_ready_time(world)
@@ -1691,20 +2164,20 @@ async def _check_cost_against_phase_1(world: WorldApi, run_label: str) -> tuple[
     print(f"  [{run_label}] step_rate: {json.dumps(step_rate, default=str, sort_keys=True)}")
     sim_time_ratio = step_rate.get("baseline", {}).get("sim_time_ratio")
     print(
-        f"  phase 1 baseline: sim_time_ratio={PHASE_1_BASELINE_SIM_TIME_RATIO} "
-        "(ready_time_s is not a baseline: phase 1's reading is a measurement gap, not a result, "
-        'see PLAN.md\'s "Carried in from phase 1")'
+        f"  first-box suite baseline: sim_time_ratio={FIRST_BOX_BASELINE_SIM_TIME_RATIO} "
+        "(ready_time_s is not a baseline: the first-box suite's own reading is a measurement "
+        "gap, not a result)"
     )
     print(
         f"  [{run_label}] ready_time_s={ready['ready_time_s']} is a first reading, to carry "
-        "forward as phase 3's baseline, not a delta against phase 1"
+        "forward as the pack suite's baseline, not a delta against the first-box suite"
     )
     line = verdict(
-        PHASE_2_ITEMS[5],
+        WORKCELL_ITEMS[5],
         True,
         f"run_label={run_label} ready_time_s={ready['ready_time_s']} (first reading) "
-        f"sim_time_ratio={sim_time_ratio}, phase 1 baseline sim_time_ratio="
-        f"{PHASE_1_BASELINE_SIM_TIME_RATIO}",
+        f"sim_time_ratio={sim_time_ratio}, first-box suite baseline sim_time_ratio="
+        f"{FIRST_BOX_BASELINE_SIM_TIME_RATIO}",
     )
     print(line)
     return line, True
@@ -1745,7 +2218,7 @@ async def _check_render_only_has_no_collider(
     expected_floor_rest_z_mm = FLOOR_Z_MM + box_height_mm / 2.0
     ok, error_mm = resting_check(expected_floor_rest_z_mm, rested_mm["z"] if rested_mm else None)
     line = verdict(
-        PHASE_2_ITEMS[6],
+        WORKCELL_ITEMS[6],
         ok,
         f"expected floor rest {expected_floor_rest_z_mm:.1f} mm, measured {rested_mm}, error "
         f"{error_mm:.3f} mm",
@@ -1756,7 +2229,7 @@ async def _check_render_only_has_no_collider(
 
 async def _run_full_pack(palletizer: Any) -> dict[str, Any]:
     """Starts `box-palletizer`'s own run and polls `status` until it leaves
-    `running`, bounded by `PHASE_3_STATUS_TIMEOUT_S`. Every phase 3 item
+    `running`, bounded by `PACK_STATUS_TIMEOUT_S`. Every pack suite item
     reads the same run's final status rather than driving the arm itself,
     since the sequencer owns every target pose here."""
     import json
@@ -1767,10 +2240,9 @@ async def _run_full_pack(palletizer: Any) -> dict[str, Any]:
     started_at = time.monotonic()
     status = await palletizer.do_command({"command": "status"})
     while status.get("state") == "running":
-        if time.monotonic() - started_at > PHASE_3_STATUS_TIMEOUT_S:
+        if time.monotonic() - started_at > PACK_STATUS_TIMEOUT_S:
             raise TimeoutError(
-                f"box-palletizer timed out after {PHASE_3_STATUS_TIMEOUT_S:.0f}s still running "
-                "(hung)"
+                f"box-palletizer timed out after {PACK_STATUS_TIMEOUT_S:.0f}s still running (hung)"
             )
         await asyncio.sleep(STATUS_POLL_S)
         status = await palletizer.do_command({"command": "status"})
@@ -1786,7 +2258,7 @@ def _check_placement_table(
     print(format_placement_table(placement_table_rows(records)))
     placed = placed_seqs_in_order(records)
     ok = len(placed) == expected_count and len(set(placed)) == expected_count
-    line = verdict(PHASE_3_ITEMS[0], ok, f"{len(placed)} of {expected_count} boxes placed")
+    line = verdict(PACK_ITEMS[0], ok, f"{len(placed)} of {expected_count} boxes placed")
     print(line)
     return line, ok
 
@@ -1798,7 +2270,7 @@ def _check_pack_order(
     `get_pack_order`."""
     ok, observed = order_matches_pack_order(records, expected_seqs)
     line = verdict(
-        PHASE_3_ITEMS[1],
+        PACK_ITEMS[1],
         ok,
         f"placed order {observed}, get_pack_order order {list(expected_seqs)}",
     )
@@ -1816,7 +2288,7 @@ def _check_obstacle_source(
     script once per value and compare, the same as `--run-label`."""
     ok = records_all_placed(records)
     line = verdict(
-        PHASE_3_ITEMS[2],
+        PACK_ITEMS[2],
         ok,
         f"obstacle_source={obstacle_source_label}: every box placed with no plan aborting={ok}; "
         "human: confirm in the Kit viewport that no plan clipped through a fence, the scan "
@@ -1837,7 +2309,7 @@ def _check_measured_delta(records: Sequence[Mapping[str, Any]]) -> tuple[str, bo
         if max_delta_mm is not None
         else "no record ever measured a placed pose"
     )
-    line = verdict(PHASE_3_ITEMS[3], ok, detail)
+    line = verdict(PACK_ITEMS[3], ok, detail)
     print(line)
     return line, ok
 
@@ -1850,7 +2322,7 @@ async def _check_skip_handling(sequencer: SequencerClient, final_state: str) -> 
     progress = await sequencer.progress()
     ok, detail = skip_handled_correctly(progress.skipped_seqs, final_state)
     line = verdict(
-        PHASE_3_ITEMS[4],
+        PACK_ITEMS[4],
         ok,
         f"{detail}; human: to exercise this path, drag one box out of the arm's reach in the "
         "Kit viewport partway through a run and confirm it gets skip_box'ed rather than hanging "
@@ -1860,12 +2332,12 @@ async def _check_skip_handling(sequencer: SequencerClient, final_state: str) -> 
     return line, ok
 
 
-async def _check_cost_against_phase_2(world: WorldApi, run_label: str) -> tuple[str, bool]:
-    """Item 6: cost, printed as a first reading against phase 2's. Phase
-    2's own GPU checklist run is recorded as PENDING in its own phase
-    document, so no `sim_time_ratio` number exists there to cite the way
-    `PHASE_1_BASELINE_SIM_TIME_RATIO` does. Printed for a human to diff by
-    eye against phase 2's own run output instead of fabricating one here."""
+async def _check_cost_against_workcell(world: WorldApi, run_label: str) -> tuple[str, bool]:
+    """Item 6: cost, printed as a first reading against the workcell suite's.
+    The workcell suite has no recorded GPU run yet, so no `sim_time_ratio`
+    number exists there to cite the way `FIRST_BOX_BASELINE_SIM_TIME_RATIO`
+    does. Printed for a human to diff by eye against the workcell suite's own
+    run output instead of fabricating one here."""
     import json
 
     ready = await sample_ready_time(world)
@@ -1874,16 +2346,17 @@ async def _check_cost_against_phase_2(world: WorldApi, run_label: str) -> tuple[
     print(f"  [{run_label}] step_rate: {json.dumps(step_rate, default=str, sort_keys=True)}")
     sim_time_ratio = step_rate.get("baseline", {}).get("sim_time_ratio")
     line = verdict(
-        PHASE_3_ITEMS[5],
+        PACK_ITEMS[5],
         True,
         f"run_label={run_label} ready_time_s={ready['ready_time_s']} "
-        f"sim_time_ratio={sim_time_ratio}; compare by eye against phase 2's own recorded run",
+        f"sim_time_ratio={sim_time_ratio}; compare by eye against the workcell suite's own "
+        "recorded run",
     )
     print(line)
     return line, True
 
 
-async def _run_phase_3(
+async def _run_pack(
     world: WorldApi,
     palletizer: Any,
     sequencer: SequencerClient,
@@ -1914,8 +2387,8 @@ async def _run_phase_3(
     print("\n-- skip on repeated failure --")
     results.append(await _check_skip_handling(sequencer, str(status.get("state", ""))))
 
-    print("\n-- cost vs phase 2 --")
-    results.append(await _check_cost_against_phase_2(world, run_label))
+    print("\n-- cost vs the workcell suite --")
+    results.append(await _check_cost_against_workcell(world, run_label))
 
     print("\n== summary ==")
     for line, _ in results:
@@ -1942,7 +2415,7 @@ async def _guarded(item: str, check: Callable[[], Awaitable[tuple[str, bool]]]) 
         return line, False
 
 
-async def _run_phase_2(
+async def _run_workcell(
     world: WorldApi,
     arm: Any,
     gripper: Any,
@@ -1980,7 +2453,7 @@ async def _run_phase_2(
     print("\n-- component frames --")
     results.append(
         await _guarded(
-            PHASE_2_ITEMS[0],
+            WORKCELL_ITEMS[0],
             lambda: _check_component_frames(world, robot, arm.name, fragment_frames_mm),
         )
     )
@@ -1988,20 +2461,20 @@ async def _run_phase_2(
     print("\n-- support drop tests --")
     results.append(
         await _guarded(
-            PHASE_2_ITEMS[1],
+            WORKCELL_ITEMS[1],
             lambda: _check_support_drops(world, box_prop, declared_colliders_mm),
         )
     )
 
     print("\n-- fence and scan-tunnel obstacles --")
     results.append(
-        await _guarded(PHASE_2_ITEMS[2], lambda: _check_fence_and_tunnel_obstacles(world))
+        await _guarded(WORKCELL_ITEMS[2], lambda: _check_fence_and_tunnel_obstacles(world))
     )
 
-    print("\n-- phase 1 pick and place regression --")
+    print("\n-- first-box suite pick and place regression --")
     results.append(
         await _guarded(
-            PHASE_2_ITEMS[3],
+            WORKCELL_ITEMS[3],
             lambda: _run_pick_and_place_regression(
                 world,
                 arm,
@@ -2016,17 +2489,17 @@ async def _run_phase_2(
     )
 
     print("\n-- scan-tunnel collider question --")
-    results.append(await _guarded(PHASE_2_ITEMS[4], lambda: _check_scan_tunnel_collider(world)))
+    results.append(await _guarded(WORKCELL_ITEMS[4], lambda: _check_scan_tunnel_collider(world)))
 
-    print("\n-- cost vs phase 1 --")
+    print("\n-- cost vs the first-box suite --")
     results.append(
-        await _guarded(PHASE_2_ITEMS[5], lambda: _check_cost_against_phase_1(world, run_label))
+        await _guarded(WORKCELL_ITEMS[5], lambda: _check_cost_against_first_box(world, run_label))
     )
 
     print("\n-- render-only scenery risk (caution-tape) --")
     results.append(
         await _guarded(
-            PHASE_2_ITEMS[6],
+            WORKCELL_ITEMS[6],
             lambda: _check_render_only_has_no_collider(
                 world, gripper, box_prop, fragment_frames_mm
             ),
@@ -2039,7 +2512,1197 @@ async def _run_phase_2(
     return results
 
 
-async def _run(
+async def _check_epick_smoke_cited() -> tuple[str, bool]:
+    """Item 0: not re-run. The rig that produced this result drives a bare
+    gripper it authors over the arm's mount link itself, and the module now
+    owns that link for the EPick body, so running it again would author a
+    second gripper over it."""
+    line = verdict(
+        EPICK_ITEMS[0],
+        True,
+        "cited: passed 2026-09-22 20:02 on the GPU machine, three passes (one attachment "
+        "point on the tool body grips a box prop, then four on the cup pattern); not re-run "
+        "here, since the rig that produced this result would author a second gripper over "
+        "the mount link the model now owns",
+    )
+    print(line)
+    return line, True
+
+
+async def _check_epick_render_and_kinematics(
+    world: WorldApi, arm: Any, gripper: Any, motion: Any
+) -> tuple[str, bool]:
+    """Item 1: `get_kinematics` serves the vendored `epick_model.json`
+    byte for byte, that file's own cup collision boxes reach no closer than
+    the 26 mm approach gap, and the render body's prim sits where the
+    module's own EPICK dimensions say it should, along the tool axis from a
+    TCP reading independent of the render code."""
+    import json
+
+    from viam.proto.common import PoseInFrame
+
+    vendored_path = (
+        Path(__file__).resolve().parent.parent
+        / "src"
+        / "isaac_module"
+        / "kinematics_files"
+        / "epick_model.json"
+    )
+    vendored_bytes = vendored_path.read_bytes()
+    kinematics_reply = await gripper.get_kinematics()
+    sva_bytes = bytes(kinematics_reply[1])
+    bytes_match = sva_bytes == vendored_bytes
+    model = json.loads(sva_bytes)
+    reach_z_mm = collision_reach_z_mm(model)
+    expected_reach_z_mm = float(EPICK["cups"]["tcp_clearance_z_mm"])
+    reach_ok = reach_z_mm == expected_reach_z_mm
+
+    arrived: Any = await motion.get_pose(component_name=gripper.name, destination_frame="world")
+    tcp_mm = _full_pose_mm(arrived.pose if isinstance(arrived, PoseInFrame) else arrived)
+
+    body_prim_path = f"/World/{prim_name(arm.name)}/wrist_3_link/{EPICK_PRIM}/render/body"
+    prim_reply = await world.do_command(
+        {"command": "prim_pose", "name": arm.name, "prim_path": body_prim_path}
+    )
+    prim_mm = prim_pose_reply_mm(prim_reply)
+    offset_mm = offset_along_tool_mm(tcp_mm, prim_mm)
+    expected_offset_mm = abs(float(EPICK["body"]["visual_center_z_mm"]))
+    offset_ok = abs(offset_mm - expected_offset_mm) <= REACH_TOLERANCE_MM
+
+    ok = bytes_match and reach_ok and offset_ok
+    detail = (
+        f"kinematics bytes match vendored file={bytes_match}, collision reach {reach_z_mm:.1f} "
+        f"mm (expected {expected_reach_z_mm:.1f}), render body {offset_mm:.2f} mm behind the "
+        f"TCP (expected {expected_offset_mm:.1f})"
+    )
+    line = verdict(EPICK_ITEMS[1], ok, detail)
+    print(line)
+    return line, ok
+
+
+async def _check_gating(
+    world: WorldApi,
+    gripper: Any,
+    motion: Any,
+    box_prop: str,
+    pick_pose_mm: Mapping[str, float],
+    grab_delay_ms: float,
+    retry_interval_s: float,
+) -> tuple[str, bool]:
+    """Item 2: a grab at the normal CUP_APPROACH_GAP_MM holds, one over
+    GRAB_GATING_MISS_MM does not, and the refusal itself is bounded rather
+    than a hang."""
+    from viam.proto.common import Pose
+
+    reset_ok, reset_detail = await _reset_pick_box(world, box_prop, pick_pose_mm, "pick-station")
+    if not reset_ok:
+        line = verdict(
+            EPICK_ITEMS[2], False, f"box did not settle on the pick station ({reset_detail})"
+        )
+        print(line)
+        return line, False
+
+    top_face_xyz_mm = await _box_top_face_xyz_mm(world, box_prop)
+    if top_face_xyz_mm is None:
+        line = verdict(EPICK_ITEMS[2], False, f"{box_prop!r} has no known geometry in the world")
+        print(line)
+        return line, False
+    state = await _cell_world_state(world, {box_prop})
+    standoff = pick_grasp_standoff_pose(top_face_xyz_mm)
+    grasp = pick_grasp_pose(top_face_xyz_mm)
+
+    async def approach(pose: Any, linear: bool) -> bool:
+        await _move(gripper, motion, pose, state, linear=linear, leg="gating approach")
+        return True
+
+    async def descend(pose: Any, linear: bool) -> bool:
+        await _move(gripper, motion, pose, state, linear=linear, leg="gating descent")
+        return True
+
+    await approach_and_descend(approach, descend, standoff, grasp)
+    holds_at_gap = await gripper.grab()
+    print(f"  grab at {CUP_APPROACH_GAP_MM:.0f} mm over the top face: {holds_at_gap}")
+    await gripper.open()
+    await _move(gripper, motion, standoff, state, linear=True, leg="gating retreat")
+
+    x, y, top_face_z_mm = top_face_xyz_mm
+    miss_pose = Pose(
+        x=x, y=y, z=top_face_z_mm + GRAB_GATING_MISS_MM, o_x=0.0, o_y=0.0, o_z=-1.0, theta=0.0
+    )
+    await _move(gripper, motion, miss_pose, state, linear=True, leg="gating miss descent")
+    started_at = time.monotonic()
+    grabbed_at_miss = await gripper.grab()
+    elapsed_s = time.monotonic() - started_at
+    print(
+        f"  grab at {GRAB_GATING_MISS_MM:.0f} mm over the top face: {grabbed_at_miss}, elapsed "
+        f"{elapsed_s:.2f} s"
+    )
+    await gripper.open()
+    timing_ok = refusal_within(elapsed_s, grab_delay_ms, retry_interval_s, GRAB_REFUSAL_SLACK_S)
+
+    ok = holds_at_gap and not grabbed_at_miss and timing_ok
+    bound_s = grab_delay_ms / 1000.0 + retry_interval_s + GRAB_REFUSAL_SLACK_S
+    detail = (
+        f"holds at {CUP_APPROACH_GAP_MM:.0f} mm={holds_at_gap}, refuses at "
+        f"{GRAB_GATING_MISS_MM:.0f} mm={not grabbed_at_miss}, refusal took {elapsed_s:.2f} s "
+        f"(bound {bound_s:.2f} s)={timing_ok}"
+    )
+    line = verdict(EPICK_ITEMS[2], ok, detail)
+    print(line)
+    return line, ok
+
+
+async def _check_swing(
+    world: WorldApi,
+    gripper: Any,
+    motion: Any,
+    box_prop: str,
+    pick_pose_mm: Mapping[str, float],
+    place_pose_mm: Mapping[str, float],
+) -> tuple[str, bool]:
+    """Item 3: a level cross-cell carry, the same free-move-plus-orientation-
+    constraint box-palletizer uses once the cup holds something, sampled at
+    TRAJECTORY_SAMPLE_HZ so the tilt it actually rode is measured rather than
+    assumed from the constraint's own bound."""
+    from viam.proto.common import Pose, PoseInFrame
+
+    reset_ok, reset_detail = await _reset_pick_box(world, box_prop, pick_pose_mm, "pick-station")
+    if not reset_ok:
+        line = verdict(
+            EPICK_ITEMS[3], False, f"box did not settle on the pick station ({reset_detail})"
+        )
+        print(line)
+        return line, False
+
+    top_face_xyz_mm = await _box_top_face_xyz_mm(world, box_prop)
+    if top_face_xyz_mm is None:
+        line = verdict(EPICK_ITEMS[3], False, f"{box_prop!r} has no known geometry in the world")
+        print(line)
+        return line, False
+
+    standoff = pick_grasp_standoff_pose(top_face_xyz_mm)
+    grasp = pick_grasp_pose(top_face_xyz_mm)
+    pick_state = await _cell_world_state(world, {box_prop})
+
+    async def approach(pose: Any, linear: bool) -> bool:
+        await _move(gripper, motion, pose, pick_state, linear=linear, leg="swing approach")
+        return True
+
+    async def descend(pose: Any, linear: bool) -> bool:
+        await _move(gripper, motion, pose, pick_state, linear=linear, leg="swing descent")
+        return True
+
+    await approach_and_descend(approach, descend, standoff, grasp)
+    if not await gripper.grab():
+        line = verdict(EPICK_ITEMS[3], False, "grab() returned False at the pick pose")
+        print(line)
+        return line, False
+
+    try:
+        await _move(gripper, motion, standoff, pick_state, linear=True, leg="swing lift")
+        swing_lift_status = await gripper.is_holding_something()
+        held_after_lift = swing_lift_status.is_holding_something
+        print(
+            f"  held after swing lift: {held_after_lift}, "
+            f"{hold_load_detail(swing_lift_status.meta)}"
+        )
+        if not held_after_lift:
+            box_mm = await _box_pose_mm(world, box_prop)
+            print(f"  box pose: {box_mm}")
+            line = verdict(EPICK_ITEMS[3], False, hold_lost_detail("swing lift", box_mm))
+            print(line)
+            return line, False
+
+        box_dims_mm = await _box_dims_mm(world, box_prop)
+        held = held_box_transform(box_prop, box_dims_mm, gripper.name)
+        carry_state = await _cell_world_state(world, {box_prop}, held)
+
+        pick_x, pick_y, _pick_z = top_face_xyz_mm
+        dx, dy = place_pose_mm["x"] - pick_x, place_pose_mm["y"] - pick_y
+        norm = math.hypot(dx, dy) or 1.0
+        carry_target = Pose(
+            x=pick_x + dx / norm * SWING_CARRY_DISTANCE_MM,
+            y=pick_y + dy / norm * SWING_CARRY_DISTANCE_MM,
+            z=standoff.z,
+            o_x=0.0,
+            o_y=0.0,
+            o_z=-1.0,
+            theta=0.0,
+        )
+
+        async def _read_tool_mm() -> dict[str, float]:
+            arrived: Any = await motion.get_pose(
+                component_name=gripper.name, destination_frame="world"
+            )
+            return _full_pose_mm(arrived.pose if isinstance(arrived, PoseInFrame) else arrived)
+
+        samples: list[tuple[dict[str, float], Mapping[str, float] | None, bool]] = []
+
+        async def _sample_loop() -> None:
+            while True:
+                tool_mm = await _read_tool_mm()
+                box_mm = await _box_pose_mm(world, box_prop)
+                holding = (await gripper.is_holding_something()).is_holding_something
+                samples.append((tool_mm, box_mm, holding))
+                await asyncio.sleep(TRAJECTORY_SAMPLE_INTERVAL_S)
+
+        carry_started_at = time.monotonic()
+        sampler = asyncio.create_task(_sample_loop())
+        try:
+            await _move(
+                gripper, motion, carry_target, carry_state, level=True, leg="cross-cell carry"
+            )
+        finally:
+            sampler.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await sampler
+        carry_duration_s = time.monotonic() - carry_started_at
+
+        carry_status = await gripper.is_holding_something()
+        held_after_carry = carry_status.is_holding_something
+        print(
+            f"  held after cross-cell carry: {held_after_carry}, "
+            f"{hold_load_detail(carry_status.meta)}"
+        )
+        if not held_after_carry:
+            box_mm = await _box_pose_mm(world, box_prop)
+            print(f"  box pose: {box_mm}")
+            line = verdict(EPICK_ITEMS[3], False, hold_lost_detail("cross-cell carry", box_mm))
+            print(line)
+            return line, False
+
+        await asyncio.sleep(SWING_SETTLE_S)
+        residual_tool_mm = await _read_tool_mm()
+        residual_box_mm = await _box_pose_mm(world, box_prop)
+
+        tilts_deg = [
+            tilt_deg(pose_quat(tool_mm), pose_quat(box_mm))
+            for tool_mm, box_mm, _holding in samples
+            if box_mm is not None
+        ]
+        held_throughout = bool(samples) and all(holding for _t, _b, holding in samples)
+        max_tilt_deg = max(tilts_deg) if tilts_deg else 0.0
+        residual_tilt_deg = (
+            tilt_deg(pose_quat(residual_tool_mm), pose_quat(residual_box_mm))
+            if residual_box_mm is not None
+            else math.inf
+        )
+        print(
+            f"  carry duration {carry_duration_s:.2f} s, {len(samples)} samples, max tilt "
+            f"{max_tilt_deg:.3f} deg, residual {residual_tilt_deg:.3f} deg, held "
+            f"throughout={held_throughout}"
+        )
+
+        ok, detail = swing_verdict(max_tilt_deg, residual_tilt_deg, held_throughout)
+        line = verdict(EPICK_ITEMS[3], ok, detail)
+        print(line)
+        return line, ok
+    finally:
+        try:
+            await gripper.open()
+        except Exception:  # noqa: BLE001 - the box restore below still matters if opening failed
+            pass
+        try:
+            await asyncio.sleep(RESET_SETTLE_S)
+            await _reset_pick_box(world, box_prop, pick_pose_mm, "pick-station")
+        except Exception:  # noqa: BLE001 - report the item's own failure, not the cleanup's
+            pass
+
+
+async def _stow_tear_off_stand_in(
+    world: WorldApi,
+    prop: str,
+    mass_kg: float,
+    stow_xyz_mm: tuple[float, float, float],
+    real_box_dims_mm: tuple[float, float, float],
+) -> None:
+    """Finds `prop` and teleports it to `stow_xyz_mm`, or spawns it there at
+    `mass_kg` scaled to the real box's own measured `real_box_dims_mm` if it
+    has never existed this run, then reads back where it settled."""
+    geometries = (await world.do_command({"command": "prop_geometries"}))["geometries"]
+    already_spawned = any(str(geometry.get("name")) == prop for geometry in geometries)
+    if already_spawned:
+        print(f"  reusing {prop} from an earlier run: its mass is whatever that run spawned")
+        await world.do_command(
+            {
+                "command": "set_prop_pose",
+                "name": prop,
+                "position": list(stow_xyz_mm),
+                "orientation_rpy_deg": [0.0, 0.0, 0.0],
+            }
+        )
+    else:
+        await world.do_command(
+            {
+                "command": "spawn_prop",
+                "prop": {
+                    "name": prop,
+                    "type": "cube",
+                    # a unit-edge cube scaled to the real box's own measured dimensions: the
+                    # live world reports box_dims_mm composed already, not the config's
+                    # original size/scale split
+                    "position": [v / MM_PER_M for v in stow_xyz_mm],
+                    "size": 1.0,
+                    "scale": [d / MM_PER_M for d in real_box_dims_mm],
+                    "mass": mass_kg,
+                    "friction": TEAR_OFF_BOX_FRICTION,
+                    "restitution": TEAR_OFF_BOX_RESTITUTION,
+                    "contact_offset": TEAR_OFF_BOX_CONTACT_OFFSET_M,
+                },
+            }
+        )
+    await asyncio.sleep(RESET_SETTLE_S)
+    settled_geometries = (await world.do_command({"command": "prop_geometries"}))["geometries"]
+    settled_mm = prop_pose_mm(settled_geometries, prop)
+    print(f"  stand-in {prop} sent to stow {stow_xyz_mm}: settled at {settled_mm}")
+
+
+async def _tear_off_lift(
+    world: WorldApi,
+    gripper: Any,
+    motion: Any,
+    arm: Any,
+    prop: str,
+    mass_kg: float,
+    leg_label: str,
+) -> TearOffReading | None:
+    """Approaches, grabs and lifts `prop` back to its standoff, printing the
+    reading the same way for the over-limit stand-in, the under-limit
+    stand-in and the 2 kg box: grab's own return, the rise, whether the
+    plugin still reports holding, and the sag (the box's top face below the
+    TCP while held). None when `prop` has no known geometry to approach."""
+    top_face_xyz_mm = await _box_top_face_xyz_mm(world, prop)
+    if top_face_xyz_mm is None:
+        return None
+    standoff = pick_grasp_standoff_pose(top_face_xyz_mm)
+    grasp = pick_grasp_pose(top_face_xyz_mm)
+    state = await _cell_world_state(world, {prop})
+
+    async def approach(pose: Any, linear: bool) -> bool:
+        # the arm's own planner from the seeded configuration, the way item 5
+        # reaches its standoff: the motion service's free move from the same
+        # seed twice resolved to the shoulder folded into the pedestal and
+        # stalled the base joint (GPU machine, 2026-09-23)
+        await arm.move_to_position(pose)
+        return True
+
+    async def descend(pose: Any, linear: bool) -> bool:
+        await _move(gripper, motion, pose, state, linear=linear, leg=f"{leg_label} descent")
+        return True
+
+    # the approach starts from the same seeded configuration item 5 uses for
+    # this pick, so the arm's planner resolves the standoff to the same branch
+    from viam.proto.component.arm import JointPositions
+
+    seed_joints_deg = PLACE_DESCENT_SEED_JOINTS_DEG["B"]
+    await arm.move_to_joint_positions(JointPositions(values=list(seed_joints_deg)))
+    print(f"  {leg_label}: seeded branch B before the approach")
+    await approach_and_descend(approach, descend, standoff, grasp)
+    grabbed = await gripper.grab()
+    if not grabbed:
+        print(f"  {prop} ({mass_kg:.0f} kg): grab=False rise 0.0 mm holding=False sag n/a")
+        return TearOffReading(held=False, rise_mm=0.0, sag_mm=None, mass_kg=mass_kg)
+
+    before_mm = await _box_pose_mm(world, prop)
+    try:
+        await _move(gripper, motion, standoff, state, linear=True, leg=f"{leg_label} lift")
+    except Exception as error:
+        if not is_execution_failure(error):
+            raise
+        print(f"  {lift_stall_detail(prop, str(error))}")
+        after_mm = await _box_pose_mm(world, prop)
+        stalled_status = await gripper.is_holding_something()
+        holding = stalled_status.is_holding_something
+        rise_mm = (
+            lift_delta_mm(before_mm, after_mm)[0]
+            if before_mm is not None and after_mm is not None
+            else 0.0
+        )
+        print(
+            f"  {prop} ({mass_kg:.0f} kg): holding={holding} rise {rise_mm:.1f} mm, "
+            f"{hold_load_detail(stalled_status.meta)}"
+        )
+        return TearOffReading(
+            held=holding,
+            rise_mm=rise_mm,
+            sag_mm=None,
+            could_not_lift=True,
+            mass_kg=mass_kg,
+            peak_load_n=stalled_status.meta.get("peak_coaxial_load_n"),
+            released_load_n=stalled_status.meta.get("released_load_n"),
+        )
+
+    after_mm = await _box_pose_mm(world, prop)
+    lift_status = await gripper.is_holding_something()
+    holding = lift_status.is_holding_something
+    rise_mm = (
+        lift_delta_mm(before_mm, after_mm)[0]
+        if before_mm is not None and after_mm is not None
+        else 0.0
+    )
+
+    from viam.proto.common import PoseInFrame
+
+    tcp_reply: Any = await motion.get_pose(component_name=gripper.name, destination_frame="world")
+    tcp_mm = _full_pose_mm(tcp_reply.pose if isinstance(tcp_reply, PoseInFrame) else tcp_reply)
+    top_face_after_mm = await _box_top_face_xyz_mm(world, prop)
+    sag_mm = tcp_mm["z"] - top_face_after_mm[2] if top_face_after_mm is not None else None
+    sag_str = f"{sag_mm:.1f} mm" if sag_mm is not None else "n/a"
+    print(
+        f"  {prop} ({mass_kg:.0f} kg): grab=True rise {rise_mm:.1f} mm holding={holding} sag "
+        f"{sag_str}, {hold_load_detail(lift_status.meta)}"
+    )
+    return TearOffReading(
+        held=holding,
+        rise_mm=rise_mm,
+        sag_mm=sag_mm,
+        mass_kg=mass_kg,
+        peak_load_n=lift_status.meta.get("peak_coaxial_load_n"),
+        released_load_n=lift_status.meta.get("released_load_n"),
+    )
+
+
+async def _move_tear_off_prop_onto_pick_spot(
+    world: WorldApi, prop: str, target_mm: Mapping[str, float], box_height_mm: float
+) -> bool:
+    """Teleports `prop` onto the real box's own resting spot and reads back
+    whether it settled on the pick station rather than beside it."""
+    target_pick_mm = [target_mm["x"], target_mm["y"], target_mm["z"]]
+    print(f"  moving stand-in {prop} onto the pick spot {target_pick_mm}")
+    await world.do_command(
+        {
+            "command": "set_prop_pose",
+            "name": prop,
+            "position": target_pick_mm,
+            "orientation_rpy_deg": [0.0, 0.0, 0.0],
+        }
+    )
+    await asyncio.sleep(RESET_SETTLE_S)
+    settled_geometries = (await world.do_command({"command": "prop_geometries"}))["geometries"]
+    settled_mm = prop_pose_mm(settled_geometries, prop)
+    rest_ok, rest_detail = box_rests_on_support(
+        settled_mm, box_height_mm, support_geometry_mm(settled_geometries, "pick-station")
+    )
+    print(f"  stand-in settled at {settled_mm}, {rest_detail}")
+    return rest_ok
+
+
+async def _stow_tear_off_after_lift(
+    world: WorldApi, gripper: Any, prop: str, stow_xyz_mm: tuple[float, float, float]
+) -> None:
+    """Opens the gripper, lets `prop` drop and settle, and teleports it to
+    its stow spot so the next stand-in's lift is not fouled by it."""
+    await gripper.open()
+    await asyncio.sleep(DROP_SETTLE_S)
+    dropped_geometries = (await world.do_command({"command": "prop_geometries"}))["geometries"]
+    print(f"  {prop} after the drop: {prop_pose_mm(dropped_geometries, prop)}")
+    await world.do_command(
+        {
+            "command": "set_prop_pose",
+            "name": prop,
+            "position": list(stow_xyz_mm),
+            "orientation_rpy_deg": [0.0, 0.0, 0.0],
+        }
+    )
+    stow_read_geometries = (await world.do_command({"command": "prop_geometries"}))["geometries"]
+    print(f"  {prop} stowed at {prop_pose_mm(stow_read_geometries, prop)}")
+
+
+async def _check_tear_off(
+    world: WorldApi,
+    gripper: Any,
+    motion: Any,
+    arm: Any,
+    box_prop: str,
+    pick_pose_mm: Mapping[str, float],
+    coaxial_limit_n: float,
+) -> tuple[str, bool]:
+    """Item 4: three lifts prove the coaxial threshold rather than a cliff.
+    The over-limit stand-in (past what the cups can hold at `coaxial_limit_n`,
+    `gripper-1`'s own configured per-cup break force) drops on lift, the
+    under-limit stand-in (well under it) holds, and the 2 kg box holds too.
+    See tear_off_verdict for how the three readings settle a pass.
+
+    Both stand-ins are found or spawned at their own stow spots BEFORE
+    anything else moves. A spawn resets the world, which puts every prop
+    back at its configured pose, so spawning either one after the 2 kg box
+    has been sidestepped undoes the sidestep and lands props on top of
+    each other."""
+    cups = EPICK["cups"]["names"]
+    over_mass_kg = tear_off_mass_kg(cups, coaxial_limit_n)
+    under_mass_kg = under_limit_mass_kg(cups, coaxial_limit_n)
+    four_cup_hold_kg = len(cups) * coaxial_limit_n / STANDARD_GRAVITY_M_S2
+    print(
+        f"  coaxial limit {coaxial_limit_n:.1f} N per cup, four cups hold "
+        f"{four_cup_hold_kg:.1f} kg, over-limit stand-in {over_mass_kg:.0f} kg, under-limit "
+        f"stand-in {under_mass_kg:.0f} kg, window {COAXIAL_LOAD_WINDOW_S:.1f} s"
+    )
+
+    # the previous item leaves the arm wherever its last leg ended, on the fourth GPU pass
+    # hovering over the pick spot, and a stand-in spawned into the tool
+    await _park_arm(world, gripper, motion)
+    reset_ok, reset_detail = await _reset_pick_box(world, box_prop, pick_pose_mm, "pick-station")
+    if not reset_ok:
+        line = verdict(
+            EPICK_ITEMS[4], False, f"box did not settle on the pick station ({reset_detail})"
+        )
+        print(line)
+        return line, False
+
+    box_pose_mm = await _box_pose_mm(world, box_prop)
+    box_dims_mm = await _box_dims_mm(world, box_prop)
+    if box_pose_mm is None:
+        line = verdict(EPICK_ITEMS[4], False, f"{box_prop!r} has no known geometry in the world")
+        print(line)
+        return line, False
+
+    await _stow_tear_off_stand_in(
+        world, TEAR_OFF_BOX_PROP, over_mass_kg, TEAR_OFF_STOW_XYZ_MM, box_dims_mm
+    )
+    await _stow_tear_off_stand_in(
+        world,
+        TEAR_OFF_UNDER_LIMIT_BOX_PROP,
+        under_mass_kg,
+        TEAR_OFF_UNDER_LIMIT_STOW_XYZ_MM,
+        box_dims_mm,
+    )
+
+    # clear the real box off its own resting spot before either stand-in moves onto it,
+    # along the station's own travel axis. The station runs from y -1200 to -100 mm and the
+    # box rests near its +y end, so the sidestep goes toward -y to stay on the deck
+    sidestep_target_mm = {
+        "x": box_pose_mm["x"],
+        "y": box_pose_mm["y"] + TEAR_OFF_SIDESTEP_MM,
+        "z": box_pose_mm["z"],
+    }
+    await world.do_command(
+        {
+            "command": "set_prop_pose",
+            "name": box_prop,
+            "position": [
+                sidestep_target_mm["x"],
+                sidestep_target_mm["y"],
+                sidestep_target_mm["z"],
+            ],
+            "orientation_rpy_deg": [0.0, 0.0, 0.0],
+        }
+    )
+    await asyncio.sleep(RESET_SETTLE_S)
+    sidestep_geometries = (await world.do_command({"command": "prop_geometries"}))["geometries"]
+    sidestepped_mm = prop_pose_mm(sidestep_geometries, box_prop)
+    sidestep_ok, sidestep_detail = box_rests_on_support(
+        sidestepped_mm, box_dims_mm[2], support_geometry_mm(sidestep_geometries, "pick-station")
+    )
+    print(
+        f"  sidestepped {box_prop} to {sidestep_target_mm}: settled at {sidestepped_mm}, "
+        f"{sidestep_detail}"
+    )
+    if not sidestep_ok:
+        line = verdict(
+            EPICK_ITEMS[4],
+            False,
+            f"box did not settle off its spot after sidestep ({sidestep_detail})",
+        )
+        print(line)
+        return line, False
+
+    try:
+        if not await _move_tear_off_prop_onto_pick_spot(
+            world, TEAR_OFF_BOX_PROP, box_pose_mm, box_dims_mm[2]
+        ):
+            line = verdict(
+                EPICK_ITEMS[4], False, "over-limit stand-in did not settle on the pick station"
+            )
+            print(line)
+            return line, False
+        over_reading = await _tear_off_lift(
+            world, gripper, motion, arm, TEAR_OFF_BOX_PROP, over_mass_kg, "tear-off over-limit"
+        )
+        if over_reading is None:
+            line = verdict(EPICK_ITEMS[4], False, f"{TEAR_OFF_BOX_PROP!r} never spawned")
+            print(line)
+            return line, False
+        await _stow_tear_off_after_lift(world, gripper, TEAR_OFF_BOX_PROP, TEAR_OFF_STOW_XYZ_MM)
+
+        if not await _move_tear_off_prop_onto_pick_spot(
+            world, TEAR_OFF_UNDER_LIMIT_BOX_PROP, box_pose_mm, box_dims_mm[2]
+        ):
+            line = verdict(
+                EPICK_ITEMS[4], False, "under-limit stand-in did not settle on the pick station"
+            )
+            print(line)
+            return line, False
+        under_reading = await _tear_off_lift(
+            world,
+            gripper,
+            motion,
+            arm,
+            TEAR_OFF_UNDER_LIMIT_BOX_PROP,
+            under_mass_kg,
+            "tear-off under-limit",
+        )
+        if under_reading is None:
+            line = verdict(
+                EPICK_ITEMS[4], False, f"{TEAR_OFF_UNDER_LIMIT_BOX_PROP!r} never spawned"
+            )
+            print(line)
+            return line, False
+        await _stow_tear_off_after_lift(
+            world, gripper, TEAR_OFF_UNDER_LIMIT_BOX_PROP, TEAR_OFF_UNDER_LIMIT_STOW_XYZ_MM
+        )
+
+        restore_ok, restore_detail = await _reset_pick_box(
+            world, box_prop, pick_pose_mm, "pick-station"
+        )
+        if not restore_ok:
+            line = verdict(
+                EPICK_ITEMS[4], False, f"could not restore {box_prop!r} ({restore_detail})"
+            )
+            print(line)
+            return line, False
+
+        light_reading = await _tear_off_lift(
+            world, gripper, motion, arm, box_prop, 2.0, "tear-off control"
+        )
+        if light_reading is None:
+            line = verdict(
+                EPICK_ITEMS[4], False, f"{box_prop!r} has no known geometry in the world"
+            )
+            print(line)
+            return line, False
+
+        ok, detail = tear_off_verdict(over_reading, under_reading, light_reading)
+        line = verdict(EPICK_ITEMS[4], ok, detail)
+        print(line)
+        return line, ok
+    finally:
+        # each step guarded so one failure never hides the next. A second stow of an
+        # already-stowed stand-in, or a second restore of an already-restored box, is
+        # harmless, so this runs even when the try block's own cleanup already succeeded
+        try:
+            await gripper.open()
+        except Exception:  # noqa: BLE001 - the stows and restore below still matter
+            pass
+        try:
+            await world.do_command(
+                {
+                    "command": "set_prop_pose",
+                    "name": TEAR_OFF_BOX_PROP,
+                    "position": list(TEAR_OFF_STOW_XYZ_MM),
+                    "orientation_rpy_deg": [0.0, 0.0, 0.0],
+                }
+            )
+        except Exception:  # noqa: BLE001 - the other stow and the restore below still matter
+            pass
+        try:
+            await world.do_command(
+                {
+                    "command": "set_prop_pose",
+                    "name": TEAR_OFF_UNDER_LIMIT_BOX_PROP,
+                    "position": list(TEAR_OFF_UNDER_LIMIT_STOW_XYZ_MM),
+                    "orientation_rpy_deg": [0.0, 0.0, 0.0],
+                }
+            )
+        except Exception:  # noqa: BLE001 - the box restore below still matters
+            pass
+        try:
+            await _reset_pick_box(world, box_prop, pick_pose_mm, "pick-station")
+        except Exception:  # noqa: BLE001 - report the item's own failure, not the cleanup's
+            pass
+
+
+async def _check_place_descent_branches(
+    world: WorldApi,
+    arm: Any,
+    gripper: Any,
+    motion: Any,
+    sequencer: SequencerClient,
+    box_prop: str,
+    pick_pose_mm: Mapping[str, float],
+) -> tuple[str, bool]:
+    """Item 5: the place descent reproduced from each of the two arm
+    configurations the 2026-09-22 stall investigation recorded
+    (`PLACE_DESCENT_SEED_JOINTS_DEG`).
+
+    The seed joint move happens before the box is ever picked, with the
+    gripper empty, so it only leans the planner toward a branch rather than
+    swinging a held box through the 150 degrees of wrist travel the
+    2026-09-22 run measured between the two seeds. Every later move is a
+    planned Cartesian move, either `arm.move_to_position` or a linear
+    descent through the motion service, never a second joint teleport. The
+    branch actually reached at the standoff and at the descent start is read
+    back and reported rather than assumed to match the seed."""
+    from viam.proto.common import Pose
+    from viam.proto.component.arm import JointPositions
+
+    all_ok = True
+    details: list[str] = []
+    for branch_name, seed_joints_deg in PLACE_DESCENT_SEED_JOINTS_DEG.items():
+        reset_ok, reset_detail = await _reset_pick_box(
+            world, box_prop, pick_pose_mm, "pick-station"
+        )
+        if not reset_ok:
+            all_ok = False
+            details.append(
+                f"{branch_name}: box did not settle on the pick station ({reset_detail})"
+            )
+            continue
+        await gripper.open()
+
+        try:
+            print(f"  {branch_name}: seed joints (deg) {[round(v, 2) for v in seed_joints_deg]}")
+            await arm.move_to_joint_positions(JointPositions(values=list(seed_joints_deg)))
+            seeded_joints = await arm.get_joint_positions()
+            print(
+                f"  {branch_name}: seeded joints (deg): "
+                f"{[round(v, 2) for v in seeded_joints.values]}"
+            )
+
+            top_face_xyz_mm = await _box_top_face_xyz_mm(world, box_prop)
+            if top_face_xyz_mm is None:
+                all_ok = False
+                details.append(f"{branch_name}: {box_prop!r} has no known geometry in the world")
+                continue
+
+            standoff, grasp = _pick_grasp_poses(top_face_xyz_mm)
+            pick_state = await _cell_world_state(world, {box_prop})
+
+            print(f"  {branch_name}: standoff (mm) {_pose_to_mm(standoff)}")
+            await arm.move_to_position(standoff)
+            at_standoff_joints = await arm.get_joint_positions()
+            branch_at_standoff = branch_of(at_standoff_joints.values)
+            print(
+                f"  {branch_name}: at standoff, joints (deg): "
+                f"{[round(v, 2) for v in at_standoff_joints.values]}, branch "
+                f"{branch_at_standoff} "
+                f"({'matches' if branch_at_standoff == branch_name else 'does not match'} "
+                "the seed)"
+            )
+
+            print(f"  {branch_name}: grasp (mm) {_pose_to_mm(grasp)}")
+            await _move(
+                gripper, motion, grasp, pick_state, linear=True, leg=f"{branch_name} descent"
+            )
+            if not await gripper.grab():
+                all_ok = False
+                details.append(f"{branch_name}: grab() returned False at the pick pose")
+                continue
+
+            await _move(
+                gripper, motion, standoff, pick_state, linear=True, leg=f"{branch_name} lift"
+            )
+            branch_lift_status = await gripper.is_holding_something()
+            held_after_lift = branch_lift_status.is_holding_something
+            print(
+                f"  held after {branch_name} lift: {held_after_lift}, "
+                f"{hold_load_detail(branch_lift_status.meta)}"
+            )
+            if not held_after_lift:
+                box_mm = await _box_pose_mm(world, box_prop)
+                print(f"  box pose: {box_mm}")
+                all_ok = False
+                details.append(hold_lost_detail(f"{branch_name} lift", box_mm))
+                continue
+
+            await sequencer.reset_cursor()
+            next_box = await sequencer.next_box()
+            if next_box.is_complete or next_box.place_end_in_world is None:
+                all_ok = False
+                details.append(f"{branch_name}: the sequencer has no next slot")
+                continue
+            place_end = next_box.place_end_in_world
+            release_pose = place_release_pose(place_end)
+            descent_start = Pose(
+                x=release_pose.x,
+                y=release_pose.y,
+                z=release_pose.z + DESCENT_START_RAISE_MM,
+                o_x=release_pose.o_x,
+                o_y=release_pose.o_y,
+                o_z=release_pose.o_z,
+                theta=release_pose.theta,
+            )
+            print(f"  {branch_name}: descent start (mm) {_pose_to_mm(descent_start)}")
+            await arm.move_to_position(descent_start)
+            confirm_joints = await arm.get_joint_positions()
+            branch_at_descent_start = branch_of(confirm_joints.values)
+            print(
+                f"  {branch_name}: at descent start, joints (deg): "
+                f"{[round(v, 2) for v in confirm_joints.values]}, branch "
+                f"{branch_at_descent_start}"
+            )
+            descent_start_status = await gripper.is_holding_something()
+            held_after_descent_start = descent_start_status.is_holding_something
+            print(
+                f"  held after {branch_name} descent start move: {held_after_descent_start}, "
+                f"{hold_load_detail(descent_start_status.meta)}"
+            )
+            if not held_after_descent_start:
+                box_mm = await _box_pose_mm(world, box_prop)
+                print(f"  box pose: {box_mm}")
+                all_ok = False
+                details.append(hold_lost_detail(f"{branch_name} descent start move", box_mm))
+                continue
+
+            box_dims_mm = await _box_dims_mm(world, box_prop)
+            held = held_box_transform(box_prop, box_dims_mm, gripper.name)
+            descent_state = await _cell_world_state(world, {box_prop}, held)
+
+            samples: list[list[float]] = []
+
+            async def _sample_joints(into: list[list[float]] = samples) -> None:
+                while True:
+                    current = await arm.get_joint_positions()
+                    into.append(list(current.values))
+                    await asyncio.sleep(TRAJECTORY_SAMPLE_INTERVAL_S)
+
+            async def _place_descent_move(
+                pose: Any, linear: bool, state: Any = descent_state, branch: str = branch_name
+            ) -> bool:
+                await _move(
+                    gripper,
+                    motion,
+                    pose,
+                    state,
+                    linear=linear,
+                    leg=f"{branch} place descent",
+                )
+                return True
+
+            print(f"  {branch_name}: place release (mm) {_pose_to_mm(release_pose)}")
+            sampler = asyncio.create_task(_sample_joints())
+            try:
+                await move_linear_or_free(
+                    _place_descent_move, release_pose, f"{branch_name} place descent"
+                )
+            finally:
+                sampler.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await sampler
+
+            branch_descent_status = await gripper.is_holding_something()
+            held_after_descent = branch_descent_status.is_holding_something
+            print(
+                f"  held after {branch_name} descent: {held_after_descent}, "
+                f"{hold_load_detail(branch_descent_status.meta)}"
+            )
+            if not held_after_descent:
+                box_mm = await _box_pose_mm(world, box_prop)
+                print(f"  box pose: {box_mm}")
+                all_ok = False
+                details.append(hold_lost_detail(f"{branch_name} descent", box_mm))
+                continue
+
+            await gripper.open()
+            await asyncio.sleep(PLACE_SETTLE_S)
+
+            landed_mm = await _box_pose_mm(world, box_prop)
+            slot_xy_mm = {"x": place_end.x, "y": place_end.y}
+            placed_ok, place_error_mm = placement_check(landed_mm, slot_xy_mm)
+            fold_deg = wrist_fold_deg(samples) if samples else 0.0
+            all_ok = all_ok and placed_ok
+            details.append(
+                f"{branch_report(branch_name, branch_at_standoff, branch_at_descent_start)}, "
+                f"place error {place_error_mm:.2f} mm, wrist fold {fold_deg:.2f} deg"
+            )
+            print(f"  {details[-1]}")
+        finally:
+            try:
+                await gripper.open()
+            except Exception:  # noqa: BLE001 - the box restore below still matters if this failed
+                pass
+            try:
+                await _reset_pick_box(world, box_prop, pick_pose_mm, "pick-station")
+            except Exception:  # noqa: BLE001 - report the branch's own result, not the cleanup's
+                pass
+
+    line = verdict(EPICK_ITEMS[5], all_ok, "; ".join(details))
+    print(line)
+    return line, all_ok
+
+
+async def _check_release_at_contact(
+    world: WorldApi,
+    gripper: Any,
+    motion: Any,
+    sequencer: SequencerClient,
+    box_prop: str,
+    pick_pose_mm: Mapping[str, float],
+) -> tuple[str, bool]:
+    """Item 6: descend to `place_end` itself, not the release pose, catching
+    a stall against the deck the way `_descend_to_release` does, then read
+    how far the box's bottom actually sat above the deck at that moment
+    against the 25 mm the service releases at."""
+    from viam.proto.common import PoseInFrame
+
+    reset_ok, reset_detail = await _reset_pick_box(world, box_prop, pick_pose_mm, "pick-station")
+    if not reset_ok:
+        line = verdict(
+            EPICK_ITEMS[6], False, f"box did not settle on the pick station ({reset_detail})"
+        )
+        print(line)
+        return line, False
+
+    top_face_xyz_mm = await _box_top_face_xyz_mm(world, box_prop)
+    if top_face_xyz_mm is None:
+        line = verdict(EPICK_ITEMS[6], False, f"{box_prop!r} has no known geometry in the world")
+        print(line)
+        return line, False
+    standoff = pick_grasp_standoff_pose(top_face_xyz_mm)
+    grasp = pick_grasp_pose(top_face_xyz_mm)
+    pick_state = await _cell_world_state(world, {box_prop})
+
+    async def approach(pose: Any, linear: bool) -> bool:
+        await _move(gripper, motion, pose, pick_state, linear=linear, leg="release approach")
+        return True
+
+    async def descend(pose: Any, linear: bool) -> bool:
+        await _move(gripper, motion, pose, pick_state, linear=linear, leg="release descent")
+        return True
+
+    await approach_and_descend(approach, descend, standoff, grasp)
+    if not await gripper.grab():
+        line = verdict(EPICK_ITEMS[6], False, "grab() returned False at the pick pose")
+        print(line)
+        return line, False
+
+    try:
+        await _move(gripper, motion, standoff, pick_state, linear=True, leg="release lift")
+        release_lift_status = await gripper.is_holding_something()
+        held_after_lift = release_lift_status.is_holding_something
+        print(
+            f"  held after release lift: {held_after_lift}, "
+            f"{hold_load_detail(release_lift_status.meta)}"
+        )
+        if not held_after_lift:
+            box_mm = await _box_pose_mm(world, box_prop)
+            print(f"  box pose: {box_mm}")
+            line = verdict(EPICK_ITEMS[6], False, hold_lost_detail("release lift", box_mm))
+            print(line)
+            return line, False
+
+        await sequencer.reset_cursor()
+        next_box = await sequencer.next_box()
+        if next_box.is_complete or next_box.place_end_in_world is None:
+            line = verdict(EPICK_ITEMS[6], False, "the sequencer has no next slot")
+            print(line)
+            return line, False
+        place_end = next_box.place_end_in_world
+
+        box_dims_mm = await _box_dims_mm(world, box_prop)
+        held = held_box_transform(box_prop, box_dims_mm, gripper.name)
+        place_state = await _cell_world_state(world, {box_prop}, held)
+
+        async def to_deck(pose: Any, linear: bool) -> bool:
+            await _move(
+                gripper, motion, pose, place_state, linear=linear, leg="release descent to deck"
+            )
+            return True
+
+        try:
+            await move_linear_or_free(to_deck, place_end, "release descent")
+        except Exception as error:
+            if not is_execution_failure(error):
+                raise
+            arrived: Any = await motion.get_pose(
+                component_name=gripper.name, destination_frame="world"
+            )
+            cup_pose = arrived.pose if isinstance(arrived, PoseInFrame) else arrived
+            if not touched_down(cup_pose, place_end):
+                line = verdict(
+                    EPICK_ITEMS[6], False, f"place descent stalled away from the deck: {error}"
+                )
+                print(line)
+                return line, False
+            print(
+                f"  stalled at {_pose_to_mm(cup_pose)}, within {PLACE_STALL_TOLERANCE_MM:.0f} mm "
+                "of the deck: box is down"
+            )
+
+        release_descent_status = await gripper.is_holding_something()
+        held_after_descent = release_descent_status.is_holding_something
+        print(
+            f"  held after release descent to deck: {held_after_descent}, "
+            f"{hold_load_detail(release_descent_status.meta)}"
+        )
+
+        box_pose_at_release_mm = await _box_pose_mm(world, box_prop)
+        if held_after_descent:
+            geometries = (await world.do_command({"command": "prop_geometries"}))["geometries"]
+            support = support_geometry_mm(geometries, "pallet")
+            if support is not None and box_pose_at_release_mm is not None:
+                clearance_mm = (
+                    float(box_pose_at_release_mm["z"])
+                    - box_dims_mm[2] / 2.0
+                    - support_top_z_mm(support)
+                )
+                print(
+                    f"  release clearance candidate: {clearance_mm:.2f} mm (service uses "
+                    f"{PLACE_RELEASE_CLEARANCE_MM:.1f} mm)"
+                )
+        else:
+            box_mm = box_pose_at_release_mm
+            print(f"  box pose: {box_mm}")
+            line = verdict(
+                EPICK_ITEMS[6], False, hold_lost_detail("release descent to deck", box_mm)
+            )
+            print(line)
+            return line, False
+
+        await gripper.open()
+        await asyncio.sleep(PLACE_SETTLE_S)
+
+        landed_mm = await _box_pose_mm(world, box_prop)
+        slot_xy_mm = {"x": place_end.x, "y": place_end.y}
+        placed_ok, place_error_mm = placement_check(landed_mm, slot_xy_mm)
+        if landed_mm is not None:
+            box_tilt_deg = orientation_delta_deg({}, landed_mm)
+            tilt_ok = box_tilt_deg < RELEASE_TILT_TOLERANCE_DEG
+        else:
+            box_tilt_deg = math.inf
+            tilt_ok = False
+
+        ok = placed_ok and tilt_ok
+        detail = (
+            f"place error {place_error_mm:.2f} mm (tolerance {PLACEMENT_TOLERANCE_MM:.0f}), tilt "
+            f"{box_tilt_deg:.2f} deg (tolerance {RELEASE_TILT_TOLERANCE_DEG:.0f})"
+        )
+        line = verdict(EPICK_ITEMS[6], ok, detail)
+        print(line)
+        return line, ok
+    finally:
+        try:
+            await gripper.open()
+        except Exception:  # noqa: BLE001 - the box restore below still matters if opening failed
+            pass
+        try:
+            await _reset_pick_box(world, box_prop, pick_pose_mm, "pick-station")
+        except Exception:  # noqa: BLE001 - report the item's own failure, not the cleanup's
+            pass
+
+
+async def _guarded_if_listed(
+    idx: int,
+    item: str,
+    items: frozenset[int] | None,
+    check: Callable[[], Awaitable[tuple[str, bool]]],
+) -> tuple[str, bool] | None:
+    """Runs item `idx` through `_guarded`, or skips it with no verdict line
+    printed at all when `items` is given and does not list `idx`."""
+    if items is not None and idx not in items:
+        return None
+    return await _guarded(item, check)
+
+
+async def _run_epick(
+    world: WorldApi,
+    arm: Any,
+    gripper: Any,
+    motion: Any,
+    sequencer: SequencerClient,
+    box_prop: str,
+    pick_pose_mm: Mapping[str, float],
+    place_pose_mm: Mapping[str, float],
+    run_label: str,
+    grab_delay_ms: float,
+    retry_interval_s: float,
+    coaxial_limit_n: float,
+    items: frozenset[int] | None = None,
+) -> list[tuple[str, bool]]:
+    results: list[tuple[str, bool]] = []
+
+    await gripper.open()
+    try:
+        await _park_arm(world, gripper, motion)
+    except Exception as exc:  # noqa: BLE001 - a park that fails leaves the items to say what it cost
+        print(f"  arm could not be parked before the run: {exc!r}")
+
+    print("\n-- smoke (cited) --")
+    result = await _guarded_if_listed(0, EPICK_ITEMS[0], items, _check_epick_smoke_cited)
+    if result is not None:
+        results.append(result)
+
+    print("\n-- EPick render, kinematics, collision reach --")
+    result = await _guarded_if_listed(
+        1,
+        EPICK_ITEMS[1],
+        items,
+        lambda: _check_epick_render_and_kinematics(world, arm, gripper, motion),
+    )
+    if result is not None:
+        results.append(result)
+
+    print("\n-- gating --")
+    result = await _guarded_if_listed(
+        2,
+        EPICK_ITEMS[2],
+        items,
+        lambda: _check_gating(
+            world, gripper, motion, box_prop, pick_pose_mm, grab_delay_ms, retry_interval_s
+        ),
+    )
+    if result is not None:
+        results.append(result)
+
+    print("\n-- swing --")
+    result = await _guarded_if_listed(
+        3,
+        EPICK_ITEMS[3],
+        items,
+        lambda: _check_swing(world, gripper, motion, box_prop, pick_pose_mm, place_pose_mm),
+    )
+    if result is not None:
+        results.append(result)
+
+    print("\n-- tear-off --")
+    result = await _guarded_if_listed(
+        4,
+        EPICK_ITEMS[4],
+        items,
+        lambda: _check_tear_off(
+            world, gripper, motion, arm, box_prop, pick_pose_mm, coaxial_limit_n
+        ),
+    )
+    if result is not None:
+        results.append(result)
+
+    print("\n-- place descent branches --")
+    result = await _guarded_if_listed(
+        5,
+        EPICK_ITEMS[5],
+        items,
+        lambda: _check_place_descent_branches(
+            world, arm, gripper, motion, sequencer, box_prop, pick_pose_mm
+        ),
+    )
+    if result is not None:
+        results.append(result)
+
+    print("\n-- release at contact --")
+    result = await _guarded_if_listed(
+        6,
+        EPICK_ITEMS[6],
+        items,
+        lambda: _check_release_at_contact(
+            world, gripper, motion, sequencer, box_prop, pick_pose_mm
+        ),
+    )
+    if result is not None:
+        results.append(result)
+
+    print("\n-- cost vs the workcell suite --")
+    result = await _guarded_if_listed(
+        7, EPICK_ITEMS[7], items, lambda: _check_cost(world, run_label, item=EPICK_ITEMS[7])
+    )
+    if result is not None:
+        results.append(result)
+
+    print("\n== summary ==")
+    for line, _ in results:
+        print(line)
+    return results
+
+
+async def _run_first_box(
     world: WorldApi,
     arm: Any,
     gripper: Any,
@@ -2093,19 +3756,33 @@ class Args:
     motion: str
     palletizer: str
     sequencer: str
-    # None only under --phase 3, which reads the infeed pose and every place
-    # target off box-palletizer's own status records instead. _parse_args
-    # rejects a missing one under phases 1 and 2.
+    # None only under the pack suite, which reads the infeed pose and every
+    # place target off box-palletizer's own status records instead.
+    # _parse_args rejects a missing one under the other three suites.
     box_prop: str | None
     pick_x_mm: float | None
     pick_y_mm: float | None
     pick_z_mm: float | None
     place_x_mm: float | None
     place_y_mm: float | None
-    phase: int
+    suite: str
     run_label: str
     obstacle_source_label: str
     fragment: str
+    grab_delay_ms: float
+    retry_interval_s: float
+    coaxial_limit_n: float
+    items: frozenset[int] | None
+
+
+def _parse_items(value: str) -> frozenset[int]:
+    """Parses `--items`' comma-separated item numbers into the set `_run_epick`
+    filters against. Raises on anything that is not an integer, so argparse
+    reports it as a usage error rather than a silent empty selection."""
+    try:
+        return frozenset(int(part) for part in value.split(","))
+    except ValueError as error:
+        raise argparse.ArgumentTypeError(f"invalid --items value {value!r}: {error}") from error
 
 
 def _parse_args(argv: Sequence[str] | None) -> Args:
@@ -2126,13 +3803,14 @@ def _parse_args(argv: Sequence[str] | None) -> Args:
         "--sequencer",
         default="pack-sequencer",
         help="the viam:pack-sequencer:sequencer service name (box-palletizer's own "
-        "'sequencer' attribute), phase 3 only",
+        "'sequencer' attribute), the pack suite only",
     )
     parser.add_argument(
         "--box-prop",
-        help="prop name of the single box driven directly for phases 1 and 2's grab-mechanism "
-        "items. Phase 3 drives all of box-palletizer's own 'box_props' list instead, and reads "
-        "them off the service's own status records rather than this flag",
+        help="prop name of the single box driven directly for the first-box, workcell and "
+        "epick suites' grab-mechanism items. The pack suite drives all of box-palletizer's own "
+        "'box_props' list instead, and reads them off the service's own status records rather "
+        "than this flag",
     )
     parser.add_argument("--pick-x-mm", type=float, help="the box's known resting centre, x in mm")
     parser.add_argument("--pick-y-mm", type=float, help="the box's known resting centre, y in mm")
@@ -2140,23 +3818,44 @@ def _parse_args(argv: Sequence[str] | None) -> Args:
     parser.add_argument(
         "--place-x-mm",
         type=float,
-        help="the place target x in mm for phases 1 and 2's own single-box place test, "
-        "unrelated to box-palletizer's config (it has no place_pose_mm attribute; the "
-        "sequencer owns every place target for phase 3)",
+        help="the place target x in mm for the first-box, workcell and epick suites' own "
+        "single-box place test, unrelated to box-palletizer's config (it has no "
+        "place_pose_mm attribute; the sequencer owns every place target for the pack suite)",
     )
     parser.add_argument(
         "--place-y-mm",
         type=float,
-        help="the place target y in mm for phases 1 and 2's own single-box place test, "
-        "unrelated to box-palletizer's config (it has no place_pose_mm attribute; the "
-        "sequencer owns every place target for phase 3)",
+        help="the place target y in mm for the first-box, workcell and epick suites' own "
+        "single-box place test, unrelated to box-palletizer's config (it has no "
+        "place_pose_mm attribute; the sequencer owns every place target for the pack suite)",
     )
     parser.add_argument(
-        "--phase",
-        type=int,
-        choices=(1, 2, 3),
-        default=1,
-        help="which phase's checklist items to run (default: 1)",
+        "--suite",
+        type=str,
+        choices=("first-box", "workcell", "epick", "pack"),
+        default="first-box",
+        help="which suite's checklist items to run (default: first-box)",
+    )
+    parser.add_argument(
+        "--grab-delay-ms",
+        type=float,
+        default=250.0,
+        help="the epick suite item 2's expected grab delay, the overlay's own value "
+        "(default: 250.0)",
+    )
+    parser.add_argument(
+        "--retry-interval-s",
+        type=float,
+        default=2.0,
+        help="the epick suite item 2's automatic-mode retry window, the gripper's own value "
+        "(default: 2.0)",
+    )
+    parser.add_argument(
+        "--coaxial-limit-n",
+        type=float,
+        default=DEFAULT_COAXIAL_FORCE_LIMIT_N,
+        help="the per-cup coaxial break force gripper-1 is configured with, so the tear-off "
+        f"item's stand-ins are sized against it (default: {DEFAULT_COAXIAL_FORCE_LIMIT_N})",
     )
     parser.add_argument(
         "--run-label",
@@ -2170,24 +3869,32 @@ def _parse_args(argv: Sequence[str] | None) -> Args:
         "--obstacle-source-label",
         default="world_state_store",
         choices=("world_state_store", "prop_geometries"),
-        help="tags phase 3 item 3's obstacle-source reading with whichever value the overlay's "
-        "box-palletizer.obstacle_source is currently deployed with. Run the script once per "
-        "value, redeploying the overlay between runs, and compare",
+        help="tags the pack suite item 3's obstacle-source reading with whichever value the "
+        "overlay's box-palletizer.obstacle_source is currently deployed with. Run the script "
+        "once per value, redeploying the overlay between runs, and compare",
     )
     parser.add_argument(
         "--fragment",
         default=str(
             Path(__file__).resolve().parent.parent / "fragments" / "isaac-sim-palletizing.json"
         ),
-        help="path to the vendored fragment JSON, for phase 2 item 1's declared component frames",
+        help="path to the vendored fragment JSON, for the workcell suite item 1's declared "
+        "component frames",
+    )
+    parser.add_argument(
+        "--items",
+        type=_parse_items,
+        default=None,
+        help="comma-separated item numbers to run, the epick suite only (default: every item "
+        "in the suite). An item not listed is skipped with no verdict line",
     )
     ns = parser.parse_args(argv)
-    # Phases 1 and 2 drive the box directly and need its resting pose and a
-    # place target. Phase 3 reads both off box-palletizer's own status
-    # records, so requiring them there would mean typing numbers the run
-    # ignores, which is how an invented value ends up looking like a
-    # measurement.
-    if ns.phase in (1, 2):
+    # The first-box, workcell and epick suites drive the box directly and need
+    # its resting pose and a place target. The pack suite reads both off
+    # box-palletizer's own status records, so requiring them there would mean
+    # typing numbers the run ignores, which is how an invented value ends up
+    # looking like a measurement.
+    if ns.suite in ("first-box", "workcell", "epick"):
         missing = [
             name
             for name, value in (
@@ -2201,7 +3908,7 @@ def _parse_args(argv: Sequence[str] | None) -> Args:
             if value is None
         ]
         if missing:
-            parser.error(f"--phase {ns.phase} requires {', '.join(missing)}")
+            parser.error(f"--suite {ns.suite} requires {', '.join(missing)}")
     return Args(
         address=ns.address,
         api_key=ns.api_key,
@@ -2218,18 +3925,22 @@ def _parse_args(argv: Sequence[str] | None) -> Args:
         pick_z_mm=ns.pick_z_mm,
         place_x_mm=ns.place_x_mm,
         place_y_mm=ns.place_y_mm,
-        phase=ns.phase,
+        suite=ns.suite,
         run_label=ns.run_label,
         obstacle_source_label=ns.obstacle_source_label,
         fragment=ns.fragment,
+        grab_delay_ms=ns.grab_delay_ms,
+        retry_interval_s=ns.retry_interval_s,
+        coaxial_limit_n=ns.coaxial_limit_n,
+        items=ns.items,
     )
 
 
 def _single_box_args(args: Args) -> tuple[str, dict[str, float], dict[str, float]]:
-    """Phases 1 and 2's directly-driven box: its prop name, its known resting
-    centre and the place target. ``_parse_args`` rejects a missing one under
-    those phases, so this narrows the types rather than re-checking a case a
-    caller can reach."""
+    """The first-box, workcell and epick suites' directly-driven box: its
+    prop name, its known resting centre and the place target. ``_parse_args``
+    rejects a missing one under those suites, so this narrows the types
+    rather than re-checking a case a caller can reach."""
     if (
         args.box_prop is None
         or args.pick_x_mm is None
@@ -2238,7 +3949,7 @@ def _single_box_args(args: Args) -> tuple[str, dict[str, float], dict[str, float
         or args.place_x_mm is None
         or args.place_y_mm is None
     ):
-        raise ValueError(f"--phase {args.phase} needs the box prop and the pick and place poses")
+        raise ValueError(f"--suite {args.suite} needs the box prop and the pick and place poses")
     return (
         args.box_prop,
         {"x": args.pick_x_mm, "y": args.pick_y_mm, "z": args.pick_z_mm},
@@ -2273,11 +3984,11 @@ async def _run_real(args: Args) -> None:
         # the sequencer is an rdk:service:world_state_store, not a generic
         # service, so it is reached through that API's own client. Asking the
         # generic API for it answers ResourceNotFoundError, which is what ended
-        # the 15:12 run before its first item and what phase 3's own path,
-        # never yet run, would have hit too.
+        # the 15:12 run before its first item and what the pack suite's own
+        # path, never yet run, would have hit too.
         sequencer = SequencerClient(WorldStateStore.from_robot(robot, args.sequencer))
-        if args.phase == 3:
-            await _run_phase_3(
+        if args.suite == "pack":
+            await _run_pack(
                 world,
                 palletizer,
                 sequencer,
@@ -2285,11 +3996,14 @@ async def _run_real(args: Args) -> None:
                 args.obstacle_source_label,
             )
             return
-        # the place target the flags name is not used by any check any more:
-        # the sequencer owns the slot, and item 4 judges against its record
-        box_prop, pick_pose_mm, _place_xy_mm = _single_box_args(args)
-        if args.phase == 2:
-            await _run_phase_2(
+        # the place target the flags name is not used by the first-box or
+        # workcell suites' own checks any more: the sequencer owns the slot,
+        # and item 4 judges against its record. The epick suite's swing item
+        # still wants a rough direction to carry the box across the cell, so
+        # it reads the same flag.
+        box_prop, pick_pose_mm, place_xy_mm = _single_box_args(args)
+        if args.suite == "workcell":
+            await _run_workcell(
                 world,
                 arm,
                 gripper,
@@ -2302,8 +4016,24 @@ async def _run_real(args: Args) -> None:
                 robot,
                 Path(args.fragment),
             )
+        elif args.suite == "epick":
+            await _run_epick(
+                world,
+                arm,
+                gripper,
+                motion,
+                sequencer,
+                box_prop,
+                pick_pose_mm,
+                place_xy_mm,
+                args.run_label,
+                args.grab_delay_ms,
+                args.retry_interval_s,
+                args.coaxial_limit_n,
+                args.items,
+            )
         else:
-            await _run(
+            await _run_first_box(
                 world,
                 arm,
                 gripper,

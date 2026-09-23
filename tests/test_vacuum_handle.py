@@ -1,13 +1,19 @@
+import math
 import time
+from typing import ClassVar
 
 import pytest
 
+from isaac_module.asset_catalog import CUP_APPROACH_GAP_MM
+from isaac_module.epick import attachment_points_tool_m
 from isaac_module.handles.vacuum import (
     DEFAULT_GRAB_DELAY_MS,
-    author_suction_joint,
-    remove_suction_joint,
-    select_payload_for_cup,
+    DEFAULT_RELEASE_DELAY_MS,
+    IsaacVacuumHandle,
+    StagePoseReader,
 )
+from isaac_module.spatial import quat_from_axis_angle
+from isaac_module.surface_gripper import CupCompliance, HoldLoad
 
 # --- protocol conformance against the mock ---------------------------------
 
@@ -95,10 +101,11 @@ def test_grab_delay_defaults_to_the_epick_default(sim):
         {"world": "isaac-world", "arm": "vacuum-arm-dg", "mock_attach_prop": "box-1"},
     )
 
-    assert DEFAULT_GRAB_DELAY_MS == 1000
+    # the EPick's own gripping time from its manual
+    assert DEFAULT_GRAB_DELAY_MS == 150
     vacuum.grab()
     assert vacuum.is_moving() is True
-    assert vacuum._grab_delay_s == pytest.approx(1.0)
+    assert vacuum._grab_delay_s == pytest.approx(0.15)
 
 
 def test_open_clears_the_grab_window(sim):
@@ -145,281 +152,650 @@ def test_poll_state_matches_is_moving_and_is_holding(sim):
     assert holding is True
 
 
-# --- select_payload_for_cup: a pure decision --------------------------------
+# --- IsaacVacuumHandle over a fake surface gripper interface ---------------
 
 
-def test_select_payload_accepts_a_box_within_gap_and_overlap():
-    cup_position = (0.0, 0.0, 0.20)
-    candidates = [("box-1", (0.0, 0.0, 0.10), (0.05, 0.05, 0.05))]
-    # top face at 0.125, gap to cup face (0.20) is 0.075
-    assert select_payload_for_cup(cup_position, 0.07, 0.1, candidates) == "box-1"
+class _FakeWorld:
+    """The two physics-callback methods release() drives through _sim.run."""
+
+    def __init__(self) -> None:
+        self._callbacks: set[str] = set()
+
+    def add_physics_callback(self, name, callback):
+        self._callbacks.add(name)
+
+    def physics_callback_exists(self, name):
+        return name in self._callbacks
+
+    def remove_physics_callback(self, name):
+        self._callbacks.discard(name)
 
 
-def test_select_payload_rejects_too_far_vertically():
-    cup_position = (0.0, 0.0, 0.50)
-    candidates = [("box-1", (0.0, 0.0, 0.10), (0.05, 0.05, 0.05))]
-    # top face at 0.125, gap to cup face (0.50) is 0.375, past max_gap_m
-    assert select_payload_for_cup(cup_position, 0.07, 0.1, candidates) is None
+class _FakePoseReader:
+    """A stand-in for StagePoseReader: world_pose() reads whatever the test
+    last set for that prim's path, in a dict shared with the sim, counts
+    begin_step() calls, records every read in order, and raises `error` on a
+    read when a test sets one."""
+
+    def __init__(self, poses) -> None:
+        self._poses = poses
+        self.begin_steps = 0
+        self.reads: list[str] = []
+        self.error: Exception | None = None
+
+    def begin_step(self) -> None:
+        self.begin_steps += 1
+
+    def world_pose(self, path):
+        self.reads.append(path)
+        if self.error is not None:
+            raise self.error
+        return self._poses[path]
 
 
-def test_select_payload_rejects_footprint_clear_of_the_cup():
-    cup_position = (0.0, 0.0, 0.20)
-    # centered a metre away in X: same height, but nowhere near the cup's footprint
-    candidates = [("box-1", (1.0, 0.0, 0.10), (0.05, 0.05, 0.05))]
-    assert select_payload_for_cup(cup_position, 0.07, 0.1, candidates) is None
-
-
-def test_select_payload_tie_breaks_by_smallest_gap_then_name():
-    cup_position = (0.0, 0.0, 0.20)
-    candidates = [
-        ("box-far", (0.0, 0.0, 0.08), (0.05, 0.05, 0.05)),  # top 0.105, gap 0.095
-        ("box-near", (0.0, 0.0, 0.10), (0.05, 0.05, 0.05)),  # top 0.125, gap 0.075
-        ("box-tie-b", (0.0, 0.0, 0.10), (0.05, 0.05, 0.05)),  # same gap as box-near
-    ]
-    assert select_payload_for_cup(cup_position, 0.07, 0.1, candidates) == "box-near"
-
-    # box-near removed: the two remaining candidates tie on gap, so the name
-    # ordering ("box-near" < "box-tie-b" doesn't apply here) breaks the tie
-    tied = [
-        ("box-tie-b", (0.0, 0.0, 0.10), (0.05, 0.05, 0.05)),
-        ("box-tie-a", (0.0, 0.0, 0.10), (0.05, 0.05, 0.05)),
-    ]
-    assert select_payload_for_cup(cup_position, 0.07, 0.1, tied) == "box-tie-a"
-
-
-def test_select_payload_accepts_a_penetrating_cup():
-    # cup face at 0.124, a millimetre BELOW the box's top face (0.125) - the
-    # cup pressed firmly onto the box, not hovering above it
-    cup_position = (0.0, 0.0, 0.124)
-    candidates = [("box-1", (0.0, 0.0, 0.10), (0.05, 0.05, 0.05))]
-    assert select_payload_for_cup(cup_position, 0.07, 0.01, candidates) == "box-1"
-
-
-# --- IsaacVacuumHandle._payload_candidates: fixed props never qualify ------
-
-
-class _FakeXformPrim:
-    def __init__(self, pose):
-        self._pose = pose
-
-    def get_world_pose(self):
-        return self._pose
-
-
-class _FakeIsaacNamespace:
-    def __init__(self, world_poses: dict[str, tuple]):
-        self._world_poses = world_poses
-
-    def SingleXFormPrim(self, path):
-        return _FakeXformPrim(self._world_poses[path])
+class _FakeIsaac:
+    """The monitor must never build a prim view, so this namespace has no
+    SingleXFormPrim: any attempt raises AttributeError."""
 
 
 class _FakeSim:
-    def __init__(self, prop_specs: dict, world_poses: dict[str, tuple]):
-        self._prop_specs = prop_specs
-        self._isaac = _FakeIsaacNamespace(world_poses)
+    """run(fn) calls fn() directly, in the spirit of the mock's synchronous
+    handles: nothing here actually needs a sim thread hop."""
 
-
-def test_payload_candidates_excludes_fixed_props():
-    from isaac_module.handles.vacuum import IsaacVacuumHandle
-
-    prop_specs = {
-        "pallet": {"name": "pallet", "fixed": True, "size": 0.4, "scale": (1.0, 1.0, 0.1)},
-        "box-1": {"name": "box-1", "size": 0.05, "scale": (1.0, 1.0, 1.0)},
-    }
-    world_poses = {
-        "/World/pallet": ((0.0, 0.0, 0.05), (1.0, 0.0, 0.0, 0.0)),
-        "/World/box-1": ((0.0, 0.0, 0.10), (1.0, 0.0, 0.0, 0.0)),
-    }
-    fake_sim = _FakeSim(prop_specs, world_poses)
-    handle = IsaacVacuumHandle(fake_sim, "vacuum-x", "/World/Arm/VacuumTool", 0.07, 0.1, 0.0)
-
-    candidates = handle._payload_candidates()
-
-    names = {name for name, _pos, _dims in candidates}
-    assert names == {"box-1"}
-
-
-def test_fixed_prop_under_the_cup_is_never_the_only_candidate_selected():
-    from isaac_module.handles.vacuum import IsaacVacuumHandle
-
-    # the pallet deck is directly under the cup and is the ONLY prop in the
-    # scene - a fixed-prop-only scene must still select nothing
-    prop_specs = {
-        "pallet": {"name": "pallet", "fixed": True, "size": 0.4, "scale": (1.0, 1.0, 0.1)},
-    }
-    world_poses = {
-        "/World/pallet": ((0.0, 0.0, 0.19), (1.0, 0.0, 0.0, 0.0)),
-    }
-    fake_sim = _FakeSim(prop_specs, world_poses)
-    handle = IsaacVacuumHandle(fake_sim, "vacuum-y", "/World/Arm/VacuumTool", 0.07, 0.1, 0.0)
-
-    cup_position = (0.0, 0.0, 0.20)
-    chosen = select_payload_for_cup(
-        cup_position, handle._cup_side_m, handle._max_payload_gap_m, handle._payload_candidates()
-    )
-
-    assert chosen is None
-
-
-# --- author_suction_joint / remove_suction_joint: pure decisions over fakes -
-
-
-class _FakeAttr:
     def __init__(self) -> None:
-        self.value = None
+        self.world = _FakeWorld()
+        # prim path -> (position, orientation-wxyz) and prim path -> half box
+        # dims, both set directly by a test
+        self.poses: dict[str, tuple] = {}
+        self.half_dims: dict[str, tuple[float, float, float]] = {}
+        self.pose_reader = _FakePoseReader(self.poses)
+        self._isaac = _FakeIsaac()
 
-    def Set(self, value):
-        self.value = value
+    def run(self, fn):
+        return fn()
 
-
-class _FakeRel:
-    def __init__(self) -> None:
-        self.targets = None
-
-    def SetTargets(self, targets):
-        self.targets = targets
-
-
-class _FakeJoint:
-    def __init__(self, path: str) -> None:
-        self.path = path
-        self.body0 = _FakeRel()
-        self.body1 = _FakeRel()
-        self.attrs: dict[str, object] = {}
-
-    def CreateBody0Rel(self):
-        return self.body0
-
-    def CreateBody1Rel(self):
-        return self.body1
-
-    def CreateLocalPos0Attr(self, value):
-        self.attrs["local_pos0"] = value
-
-    def CreateLocalRot0Attr(self, value):
-        self.attrs["local_rot0"] = value
-
-    def CreateLocalPos1Attr(self, value):
-        self.attrs["local_pos1"] = value
-
-    def CreateLocalRot1Attr(self, value):
-        self.attrs["local_rot1"] = value
-
-
-class _FakeUsdPhysics:
-    class FixedJoint:
-        @staticmethod
-        def Define(stage, path):
-            joint = _FakeJoint(path)
-            stage.joints[path] = joint
-            return joint
-
-
-class _FakeSdf:
-    class Path(str):
+    def unregister_post_reset(self, name):
         pass
 
 
-class _FakeGf:
-    class Vec3f(tuple):
-        def __new__(cls, x, y, z):
-            return super().__new__(cls, (x, y, z))
+class _FakeGripperInterface:
+    """A stand-in for what acquire_surface_gripper_interface() returns.
+    close_gripper needs two calls to settle on a payload, Closing then
+    Closed, matching a real gripper's retry against its own raycast; with
+    nothing under the cup it never gets past Closing."""
 
-    class Quatf(tuple):
-        def __new__(cls, w, xyz):
-            return super().__new__(cls, (w, *xyz))
+    def __init__(self, has_payload: bool) -> None:
+        self._has_payload = has_payload
+        self.status = "Open"
+        self.objects: list[str] = []
+        self.refuse_close = False
+        self.close_calls = 0
+        self.open_calls = 0
+        self.status_reads = 0
+
+    def close_gripper(self, path: str) -> bool:
+        self.close_calls += 1
+        if self.refuse_close:
+            return False
+        if self._has_payload:
+            self.status = "Closed"
+            self.objects = ["/World/box-1"]
+        else:
+            self.status = "Closing"
+            self.objects = []
+        return True
+
+    def open_gripper(self, path: str) -> bool:
+        self.open_calls += 1
+        self.status = "Open"
+        self.objects = []
+        return True
+
+    def get_gripper_status(self, path: str):
+        self.status_reads += 1
+        return self.status
+
+    def get_gripped_objects(self, path: str):
+        return self.objects
 
 
-class _FakePrim:
-    def __init__(self, valid: bool) -> None:
-        self._valid = valid
+TOOL_PATH = "/World/Arm/EPick"
+OBJECT_PATH = "/World/box-1"
+IDENTITY = (1.0, 0.0, 0.0, 0.0)
+CUPS = attachment_points_tool_m()
+HALF = (0.2, 0.15, 0.125)
+CLEARANCE_M = CUP_APPROACH_GAP_MM / 1000.0
 
-    def IsValid(self):
-        return self._valid
+
+def _make_handle(iface, sim=None, **kwargs) -> IsaacVacuumHandle:
+    if sim is None:
+        sim = _FakeSim()
+    kwargs.setdefault("pose_reader", sim.pose_reader)
+    kwargs.setdefault("prop_half_dims", lambda: sim.half_dims)
+    return IsaacVacuumHandle(
+        sim,
+        "vacuum-x",
+        "/World/Arm/SurfaceGripper",
+        TOOL_PATH,
+        "/World/Arm/wrist_3_link",
+        iface,
+        **kwargs,
+    )
 
 
-class _FakeStage:
+def _coaxial_kwargs(limit_n=20.0):
+    return dict(
+        compliance=CupCompliance(),
+        coaxial_force_limit_n=limit_n,
+        physics_dt=1 / 120,
+        cup_points_tool_m=CUPS,
+    )
+
+
+def _place_box(sim, gap_m, quat=IDENTITY, x=0.0, y=0.0, path=OBJECT_PATH, half=HALF):
+    """Puts a box under the tool with its near face `gap_m` below the cup
+    plane. The tool sits at the world origin looking along +Z, so with the
+    box's frame aligned to the tool's its -Z face is the one the cups see."""
+    sim.poses[TOOL_PATH] = ((0.0, 0.0, 0.0), IDENTITY)
+    sim.poses[path] = ((x, y, gap_m + half[2]), quat)
+    sim.half_dims[path] = half
+
+
+def test_grab_with_a_payload_reads_closed_holding_and_engaged():
+    iface = _FakeGripperInterface(has_payload=True)
+    handle = _make_handle(iface)
+
+    handle.grab()
+
+    assert handle.is_holding() is True
+    assert handle.is_engaged() is True
+    status, objects = handle.gripper_status()
+    assert status == "Closed"
+    assert objects == ["/World/box-1"]
+
+
+def test_grab_with_nothing_under_the_cup_reads_closing_not_holding():
+    iface = _FakeGripperInterface(has_payload=False)
+    handle = _make_handle(iface)
+
+    handle.grab()
+
+    assert handle.is_engaged() is True
+    assert handle.is_holding() is False
+    status, _objects = handle.gripper_status()
+    assert status == "Closing"
+
+
+def test_open_reads_open_not_holding_not_engaged():
+    iface = _FakeGripperInterface(has_payload=True)
+    handle = _make_handle(iface)
+
+    handle.grab()
+    handle.open()
+
+    assert handle.is_holding() is False
+    assert handle.is_engaged() is False
+    status, objects = handle.gripper_status()
+    assert status == "Open"
+    assert objects == []
+
+
+def test_a_mid_carry_loss_reads_not_holding_with_no_call_in_between():
+    iface = _FakeGripperInterface(has_payload=True)
+    handle = _make_handle(iface)
+
+    handle.grab()
+    assert handle.is_holding() is True
+
+    # the plugin itself broke the hold under load, with nothing commanded here
+    iface.status = "Open"
+    iface.objects = []
+
+    assert handle.is_holding() is False
+
+
+def test_stop_opens():
+    iface = _FakeGripperInterface(has_payload=True)
+    handle = _make_handle(iface)
+
+    handle.grab()
+    handle.stop()
+
+    assert handle.is_engaged() is False
+    status, _objects = handle.gripper_status()
+    assert status == "Open"
+
+
+@pytest.mark.parametrize(
+    ("status", "objects", "expected"),
+    [
+        ("Closed", ["/World/box-1"], True),
+        ("Closed", [], False),
+        ("Closing", ["/World/box-1"], False),
+        ("Open", ["/World/box-1"], False),
+    ],
+)
+def test_is_holding_truth_table(status, objects, expected):
+    iface = _FakeGripperInterface(has_payload=False)
+    iface.status = status
+    iface.objects = objects
+    handle = _make_handle(iface)
+
+    assert handle.is_holding() is expected
+
+
+def test_post_reset_recloses_when_engaged():
+    iface = _FakeGripperInterface(has_payload=True)
+    handle = _make_handle(iface)
+
+    handle.grab()
+    calls_before = iface.close_calls
+    handle.post_reset()
+
+    assert iface.close_calls == calls_before + 1
+
+
+def test_post_reset_does_nothing_when_not_engaged():
+    iface = _FakeGripperInterface(has_payload=True)
+    handle = _make_handle(iface)
+
+    handle.post_reset()
+
+    assert iface.close_calls == 0
+    assert iface.open_calls == 0
+
+
+def test_release_delay_s_defaults_to_the_epick_release_time():
+    iface = _FakeGripperInterface(has_payload=True)
+    handle = _make_handle(iface)
+
+    # the EPick's own release time from its manual
+    assert DEFAULT_RELEASE_DELAY_MS == 180
+    assert handle.release_delay_s == pytest.approx(0.18)
+
+
+def test_release_delay_s_follows_release_delay_ms():
+    iface = _FakeGripperInterface(has_payload=True)
+    handle = _make_handle(iface, release_delay_ms=250)
+
+    assert handle.release_delay_s == pytest.approx(0.25)
+
+
+def test_a_refused_close_leaves_not_holding_and_still_engaged():
+    iface = _FakeGripperInterface(has_payload=True)
+    iface.refuse_close = True
+    handle = _make_handle(iface)
+
+    handle.grab()
+
+    assert handle.is_engaged() is True
+    assert handle.is_holding() is False
+
+
+# --- the coaxial monitor: _on_physics_step ----------------------------------
+
+
+class _RaisingInterface:
+    """Fails any call, so a test that expects the monitor to be off can
+    prove it never touches the interface."""
+
+    def get_gripper_status(self, path):
+        raise AssertionError("interface read while the coaxial monitor should be off")
+
+    def get_gripped_objects(self, path):
+        raise AssertionError("interface read while the coaxial monitor should be off")
+
+    def open_gripper(self, path):
+        raise AssertionError("open_gripper called while the coaxial monitor should be off")
+
+
+class _EnumLike:
+    def __init__(self, name: str) -> None:
+        self.name = name
+
+
+def test_status_name_normalises_int_enum_and_str():
+    from isaac_module.surface_gripper import status_name
+
+    assert status_name(2) == "Closed"
+    assert status_name(_EnumLike("Closing")) == "Closing"
+    assert status_name("Open") == "Open"
+
+
+class _OffInterface:
+    """Raises on any read: the monitor must not touch the interface while off."""
+
+    def get_gripper_status(self, path):
+        raise AssertionError("interface read while the coaxial monitor should be off")
+
+    def get_gripped_objects(self, path):
+        raise AssertionError("interface read while the coaxial monitor should be off")
+
+
+def _armed_handle(limit_n=20.0, gap_before_grab_m=CLEARANCE_M):
+    """A handle that grabbed box-1 with the monitor on, the box under the cups
+    at `gap_before_grab_m` when the grab was read (the clearance itself by
+    default, so the face rests at the cup plane), ready for face samples."""
+    iface = _FakeGripperInterface(has_payload=True)
+    sim = _FakeSim()
+    handle = _make_handle(iface, sim=sim, **_coaxial_kwargs(limit_n))
+    _place_box(sim, gap_before_grab_m)
+    handle.grab()
+    return handle, iface, sim
+
+
+def test_zero_limit_turns_the_monitor_off():
+    handle = _make_handle(_OffInterface(), **_coaxial_kwargs(limit_n=0.0))
+
+    handle._on_physics_step(1 / 120)
+
+    assert handle.hold_load().monitor == "off"
+
+
+def test_monitor_is_off_without_a_pose_reader_or_prop_dimensions():
+    no_reader = _make_handle(_OffInterface(), pose_reader=None, **_coaxial_kwargs())
+    no_dims = _make_handle(_OffInterface(), prop_half_dims=None, **_coaxial_kwargs())
+
+    no_reader._on_physics_step(1 / 120)
+    no_dims._on_physics_step(1 / 120)
+
+    assert no_reader.hold_load().monitor == "off"
+    assert no_dims.hold_load().monitor == "off"
+
+
+def test_grab_reads_where_the_plugin_will_leave_the_face_at_rest():
+    handle, _, sim = _armed_handle(gap_before_grab_m=0.0057)
+
+    assert handle._cup_rest_offsets_m == pytest.approx((0.0014,) * 4)
+    assert sim.pose_reader.reads[0] == TOOL_PATH
+    assert OBJECT_PATH in sim.pose_reader.reads
+
+
+@pytest.mark.parametrize("gap_m", [0.040, -0.002])
+def test_grab_with_no_box_in_reach_leaves_the_rest_at_the_cup_plane(gap_m):
+    handle, _, _ = _armed_handle(gap_before_grab_m=gap_m)
+
+    assert handle._cup_rest_offsets_m is None
+
+
+def test_grab_picks_the_nearest_of_two_boxes_under_the_cups():
+    iface = _FakeGripperInterface(has_payload=True)
+    sim = _FakeSim()
+    handle = _make_handle(iface, sim=sim, **_coaxial_kwargs())
+    _place_box(sim, 0.009, path="/World/box-far")
+    _place_box(sim, 0.006)
+
+    handle.grab()
+
+    assert handle._cup_rest_offsets_m == pytest.approx((0.002,) * 4)
+
+
+def test_a_failing_read_before_the_grab_is_logged_and_the_grab_still_closes(caplog):
+    iface = _FakeGripperInterface(has_payload=True)
+    sim = _FakeSim()
+    handle = _make_handle(iface, sim=sim, **_coaxial_kwargs())
+    sim.pose_reader.error = RuntimeError("stage gone")
+
+    with caplog.at_level("ERROR"):
+        handle.grab()
+
+    assert iface.close_calls == 1
+    assert handle._cup_rest_offsets_m is None
+    assert any("could not read the box under the cups" in r.message for r in caplog.records)
+
+
+def test_open_status_resets_the_window_and_never_opens():
+    iface = _FakeGripperInterface(has_payload=True)
+    sim = _FakeSim()
+    handle = _make_handle(iface, sim=sim, **_coaxial_kwargs())
+    handle._load_window.push(30.0)
+    handle._hold_active = True
+
+    handle._on_physics_step(1 / 120)
+
+    assert handle._hold_active is False
+    assert handle.hold_load().coaxial_load_n == 0.0
+    assert handle.hold_load().monitor == "idle"
+    assert iface.open_calls == 0
+    assert sim.pose_reader.begin_steps == 0
+
+
+def test_the_face_5_5mm_below_the_plane_reads_25n_and_opens_on_the_twelfth_step():
+    handle, iface, sim = _armed_handle()
+    _place_box(sim, 0.0055)
+
+    for _ in range(11):
+        handle._on_physics_step(1 / 120)
+    assert iface.open_calls == 0
+    assert handle.hold_load().coaxial_load_n == 0.0
+    assert handle.hold_load().monitor == "armed"
+
+    handle._on_physics_step(1 / 120)
+
+    assert iface.open_calls == 1
+    assert iface.status == "Open"
+    assert handle.hold_load().released_load_n == pytest.approx(25.0)
+    assert handle.hold_load().peak_coaxial_load_n == pytest.approx(25.0)
+    assert handle.hold_load().monitor == "idle"
+    assert handle.is_holding() is False
+
+    handle._on_physics_step(1 / 120)
+    assert iface.open_calls == 1
+
+
+def test_the_stretch_is_read_against_where_the_face_rests():
+    handle, _, sim = _armed_handle(gap_before_grab_m=0.0057)
+    # rest 1.4 mm, dead band 0.5 mm, spring 4.5 mm: 22.5 N
+    _place_box(sim, 0.0014 + 0.0005 + 0.0045)
+
+    handle._on_physics_step(1 / 120)
+
+    assert handle.hold_load().peak_coaxial_load_n == pytest.approx(22.5)
+
+
+def test_a_face_above_the_plane_reads_no_load():
+    handle, _, sim = _armed_handle()
+    _place_box(sim, -0.003)
+
+    handle._on_physics_step(1 / 120)
+
+    assert handle.hold_load().peak_coaxial_load_n == 0.0
+
+
+def test_one_onset_step_over_the_limit_does_not_open_but_raises_the_peak():
+    handle, iface, sim = _armed_handle()
+    _place_box(sim, 0.002)
+    for _ in range(11):
+        handle._on_physics_step(1 / 120)
+    _place_box(sim, 0.008)
+
+    handle._on_physics_step(1 / 120)
+
+    assert iface.open_calls == 0
+    assert handle.hold_load().peak_coaxial_load_n == pytest.approx(37.5)
+    assert handle.hold_load().coaxial_load_n == pytest.approx((11 * 7.5 + 37.5) / 12)
+
+
+def test_a_tilted_box_loads_its_far_cups_and_the_step_reads_the_worst_one():
+    handle, _, sim = _armed_handle()
+    tilt = quat_from_axis_angle((0.0, 1.0, 0.0), math.radians(3.0))
+    _place_box(sim, 0.003, quat=tilt)
+    handle._on_physics_step(1 / 120)
+    tilted_peak = handle.hold_load().peak_coaxial_load_n
+
+    handle.grab()
+    _place_box(sim, 0.003)
+    handle._on_physics_step(1 / 120)
+    flat_peak = handle.hold_load().peak_coaxial_load_n
+
+    assert tilted_peak > flat_peak
+    assert flat_peak == pytest.approx(12.5)
+
+
+def test_a_held_object_with_no_dimensions_is_not_watched_and_warns_once(caplog):
+    handle, iface, sim = _armed_handle()
+    del sim.half_dims[OBJECT_PATH]
+
+    with caplog.at_level("WARNING"):
+        handle._on_physics_step(1 / 120)
+        handle._on_physics_step(1 / 120)
+
+    assert handle.hold_load().monitor == "idle"
+    assert iface.open_calls == 0
+    warnings = [r.message for r in caplog.records if "cannot read" in r.message]
+    assert len(warnings) == 1
+    assert "no box dimensions" in warnings[0]
+
+
+def test_a_held_box_no_cup_sits_over_is_not_watched_and_warns_once(caplog):
+    handle, _, sim = _armed_handle()
+    _place_box(sim, 0.005, x=0.6)
+
+    with caplog.at_level("WARNING"):
+        handle._on_physics_step(1 / 120)
+        handle._on_physics_step(1 / 120)
+
+    assert handle.hold_load().monitor == "idle"
+    warnings = [r.message for r in caplog.records if "cannot read" in r.message]
+    assert len(warnings) == 1
+    assert "no cup sits over" in warnings[0]
+
+
+def test_grab_resets_the_readings_and_open_keeps_them():
+    handle, _, sim = _armed_handle()
+    _place_box(sim, 0.0055)
+    for _ in range(12):
+        handle._on_physics_step(1 / 120)
+    assert handle.hold_load().released_load_n == pytest.approx(25.0)
+
+    handle.open()
+    assert handle.hold_load().peak_coaxial_load_n == pytest.approx(25.0)
+    assert handle.hold_load().released_load_n == pytest.approx(25.0)
+
+    handle.grab()
+    assert handle.hold_load() == HoldLoad(monitor="idle")
+    assert handle._hold_active is False
+
+
+def test_release_removes_the_physics_callback():
+    iface = _FakeGripperInterface(has_payload=True)
+    sim = _FakeSim()
+    handle = _make_handle(iface, sim=sim, **_coaxial_kwargs())
+    sim.world.add_physics_callback(handle.coaxial_callback_name, handle._on_physics_step)
+
+    handle.release()
+
+    assert not sim.world.physics_callback_exists(handle.coaxial_callback_name)
+
+
+def test_monitor_state_reads_off_idle_armed_and_back_to_idle():
+    assert _make_handle(_FakeGripperInterface(has_payload=True)).hold_load().monitor == "off"
+
+    handle, iface, sim = _armed_handle()
+    assert handle.hold_load().monitor == "idle"
+    _place_box(sim, 0.001)
+    handle._on_physics_step(1 / 120)
+    assert handle.hold_load().monitor == "armed"
+
+    iface.open_gripper("/World/Arm/SurfaceGripper")
+    handle._on_physics_step(1 / 120)
+    assert handle.hold_load().monitor == "idle"
+
+
+def test_monitor_begins_one_pose_step_per_monitored_physics_step():
+    handle, _, sim = _armed_handle()
+    _place_box(sim, 0.001)
+    sim.pose_reader.begin_steps = 0
+    sim.pose_reader.reads.clear()
+
+    for _ in range(3):
+        handle._on_physics_step(1 / 120)
+
+    assert sim.pose_reader.begin_steps == 3
+    assert sim.pose_reader.reads == [TOOL_PATH, OBJECT_PATH] * 3
+
+
+def test_a_raising_pose_read_stops_the_monitor_after_one_logged_error(caplog):
+    handle, iface, sim = _armed_handle()
+    _place_box(sim, 0.001)
+    sim.pose_reader.error = RuntimeError("stage gone")
+
+    with caplog.at_level("ERROR"):
+        handle._on_physics_step(1 / 120)
+        handle._on_physics_step(1 / 120)
+
+    assert handle.hold_load().monitor == "stopped"
+    assert iface.open_calls == 0
+    assert sum("coaxial monitor stopped" in r.message for r in caplog.records) == 1
+
+
+class _FakeQuat:
+    def __init__(self, w, x, y, z) -> None:
+        self._w, self._xyz = w, (x, y, z)
+
+    def GetReal(self):
+        return self._w
+
+    def GetImaginary(self):
+        return self._xyz
+
+
+class _FakeMatrix:
+    """A stand-in for the Gf.Matrix4d an XformCache returns: a translation and
+    a rotation, with RemoveScaleShear() a no-op on it."""
+
+    def __init__(self, translation, quat_wxyz) -> None:
+        self._translation = translation
+        self._quat = quat_wxyz
+
+    def ExtractTranslation(self):
+        return self._translation
+
+    def RemoveScaleShear(self):
+        return self
+
+    def ExtractRotationQuat(self):
+        return _FakeQuat(*self._quat)
+
+
+class _FakeXformCache:
+    instances: ClassVar[list["_FakeXformCache"]] = []
+
     def __init__(self) -> None:
-        self.joints: dict[str, _FakeJoint] = {}
-        self.removed: list[str] = []
+        self.clears = 0
+        _FakeXformCache.instances.append(self)
 
-    def GetPrimAtPath(self, path):
-        return _FakePrim(path in self.joints)
+    def Clear(self) -> None:
+        self.clears += 1
 
-    def RemovePrim(self, path):
-        self.removed.append(path)
-        self.joints.pop(path, None)
-
-
-def test_author_suction_joint_wires_body0_body1_and_identity_frames():
-    stage = _FakeStage()
-    author_suction_joint(
-        _FakeUsdPhysics, _FakeSdf, _FakeGf, stage, "/World/Tool/Joint", "/World/Tool", "/World/Box"
-    )
-
-    joint = stage.joints["/World/Tool/Joint"]
-    assert joint.body0.targets == ["/World/Tool"]
-    assert joint.body1.targets == ["/World/Box"]
-    assert joint.attrs["local_pos0"] == (0.0, 0.0, 0.0)
-    assert joint.attrs["local_pos1"] == (0.0, 0.0, 0.0)
-    assert joint.attrs["local_rot0"] == (1.0, 0.0, 0.0, 0.0)
-    assert joint.attrs["local_rot1"] == (1.0, 0.0, 0.0, 0.0)
+    def GetLocalToWorldTransform(self, prim):
+        return _FakeMatrix(*prim)
 
 
-def test_remove_suction_joint_removes_and_reports_present():
-    stage = _FakeStage()
-    author_suction_joint(
-        _FakeUsdPhysics, _FakeSdf, _FakeGf, stage, "/World/Tool/Joint", "/World/Tool", "/World/Box"
-    )
-
-    assert remove_suction_joint(stage, "/World/Tool/Joint") is True
-    assert "/World/Tool/Joint" not in stage.joints
+class _FakeUsdGeom:
+    XformCache = _FakeXformCache
 
 
-def test_remove_suction_joint_reports_absent():
-    stage = _FakeStage()
-    assert remove_suction_joint(stage, "/World/Tool/Joint") is False
-    assert stage.removed == []
+def test_stage_pose_reader_reads_a_prim_through_one_xform_cache_cleared_per_step():
+    _FakeXformCache.instances.clear()
+    prims = {"/World/box-1": ((1.0, 2.0, 3.0), (0.5, 0.5, 0.5, 0.5))}
+    reader = StagePoseReader(_FakeUsdGeom, prims.__getitem__)
+
+    reader.begin_step()
+    position, orientation = reader.world_pose("/World/box-1")
+    reader.begin_step()
+    reader.world_pose("/World/box-1")
+
+    assert position == (1.0, 2.0, 3.0)
+    assert orientation == (0.5, 0.5, 0.5, 0.5)
+    assert len(_FakeXformCache.instances) == 1
+    assert _FakeXformCache.instances[0].clears == 1
 
 
-def test_a_weld_records_the_pose_the_cup_and_payload_are_already_in():
-    """A FixedJoint pulls body0's joint frame onto body1's, so identity local
-    frames on both sides ask PhysX to make the payload's origin coincide with
-    the tool's, and it drags the box through the cup to get there. Recording
-    the relative pose is what leaves the box where it was picked up."""
-    from isaac_module.handles.vacuum import suction_joint_local_frame
+def test_stage_pose_reader_builds_its_cache_on_a_read_before_any_step():
+    _FakeXformCache.instances.clear()
+    prims = {"/World/box-1": ((0.0, 0.0, 0.0), (1.0, 0.0, 0.0, 0.0))}
+    reader = StagePoseReader(_FakeUsdGeom, prims.__getitem__)
 
-    identity = (1.0, 0.0, 0.0, 0.0)
-    tool_pose = ((0.0, 0.0, 1.0), identity)
-    payload_pose = ((0.0, 0.0, 0.9), identity)
-
-    local_pos, local_rot = suction_joint_local_frame(tool_pose, payload_pose)
-
-    # the payload sits 100 mm below the anchor's origin, and that is exactly
-    # what the anchor side of the weld has to carry. It goes on the anchor
-    # because a joint frame is read in its own body's local space and the
-    # payload is a cube prim with a non-uniform scale, which would multiply it
-    assert local_pos == pytest.approx((0.0, 0.0, -0.1))
-    assert local_rot == pytest.approx(identity)
-    # the defect this replaces would have recorded the origin
-    assert local_pos != (0.0, 0.0, 0.0)
-
-
-def test_the_weld_anchors_on_the_arm_link_not_the_tool_body():
-    """The tool is a free rigid body bolted to the wrist by its own fixed
-    joint, not a link of the arm's articulation. Welding a payload to it puts
-    two maximal-coordinate joints in series off an articulation, which PhysX
-    resolves with an impulse that throws the arm across the cell. The payload
-    has to attach to a link the articulation solver already owns."""
-    from isaac_module.handles.vacuum import IsaacVacuumHandle
-
-    handle = IsaacVacuumHandle.__new__(IsaacVacuumHandle)
-    handle._tool_prim_path = "/World/pallet_arm/VacuumTool"
-
-    handle.parent_prim_path = "/World/pallet_arm/wrist_3_link"
-    assert handle._weld_anchor_prim_path() == "/World/pallet_arm/wrist_3_link"
-
-    # with no mount link recorded there is nothing better to anchor on
-    handle.parent_prim_path = None
-    assert handle._weld_anchor_prim_path() == "/World/pallet_arm/VacuumTool"
+    assert reader.world_pose("/World/box-1") == ((0.0, 0.0, 0.0), (1.0, 0.0, 0.0, 0.0))
+    assert len(_FakeXformCache.instances) == 1

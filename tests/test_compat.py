@@ -158,4 +158,86 @@ def test_camera_supports_annotator_device() -> None:
     """Camera(annotator_device=...)/get_*(device=...) is a GPU-resident data
     path (CHANGELOG 0.4.0)."""
     assert compat.CAPS_BY_RELEASE[(5, 0)].camera_supports_annotator_device is True
+
+
+def _fake_surface_gripper_modules(
+    monkeypatch: pytest.MonkeyPatch, *, robot_schema_module: str, with_physx_schema: bool
+) -> None:
+    _fake_isaac_module(
+        monkeypatch,
+        "isaacsim.core.utils.extensions",
+        enable_extension=lambda name: True,
+    )
+    _fake_isaac_module(monkeypatch, "isaacsim.robot.surface_gripper._surface_gripper")
+    if robot_schema_module == "usd.schema.isaac":
+        _fake_isaac_module(monkeypatch, "usd.schema.isaac.robot_schema")
+    elif robot_schema_module == "isaacsim.robot.schema":
+        _fake_isaac_module(monkeypatch, "isaacsim.robot.schema.robot_schema")
+
+    pxr = types.ModuleType("pxr")
+    pxr.Gf = _Stub()  # type: ignore[attr-defined]
+    pxr.Sdf = _Stub()  # type: ignore[attr-defined]
+    pxr.UsdGeom = _Stub()  # type: ignore[attr-defined]
+    pxr.UsdPhysics = _Stub()  # type: ignore[attr-defined]
+    if with_physx_schema:
+        pxr.PhysxSchema = _Stub()  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "pxr", pxr)
+
+
+class _Stub:
+    pass
+
+
+def test_import_surface_gripper_reports_the_modules_it_found(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    compat.import_surface_gripper.cache_clear()
+    _fake_surface_gripper_modules(
+        monkeypatch, robot_schema_module="usd.schema.isaac", with_physx_schema=False
+    )
+
+    result = compat.import_surface_gripper()
+
+    for key in (
+        "report",
+        "surface_gripper",
+        "robot_schema",
+        "Gf",
+        "Sdf",
+        "UsdGeom",
+        "UsdPhysics",
+        "PhysxSchema",
+    ):
+        assert key in result, f"import_surface_gripper() result is missing {key!r}"
+    assert result["report"]["robot_schema_module"] == "usd.schema.isaac"
+    assert result["PhysxSchema"] is None
+    compat.import_surface_gripper.cache_clear()
+
+
+def test_import_surface_gripper_falls_back_to_isaacsim_robot_schema(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    compat.import_surface_gripper.cache_clear()
+    _fake_surface_gripper_modules(
+        monkeypatch, robot_schema_module="isaacsim.robot.schema", with_physx_schema=True
+    )
+
+    result = compat.import_surface_gripper()
+
+    assert result["report"]["robot_schema_module"] == "isaacsim.robot.schema"
+    assert result["PhysxSchema"] is not None
+    compat.import_surface_gripper.cache_clear()
+
+
+def test_import_surface_gripper_raises_naming_both_failures_when_neither_schema_exists(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    compat.import_surface_gripper.cache_clear()
+    _fake_surface_gripper_modules(monkeypatch, robot_schema_module="", with_physx_schema=False)
+    monkeypatch.delitem(sys.modules, "usd.schema.isaac.robot_schema", raising=False)
+    monkeypatch.delitem(sys.modules, "isaacsim.robot.schema.robot_schema", raising=False)
+
+    with pytest.raises(ImportError, match=r"usd\.schema\.isaac.*isaacsim\.robot\.schema"):
+        compat.import_surface_gripper()
+    compat.import_surface_gripper.cache_clear()
     assert compat.caps((5, 0, 0)).camera_supports_annotator_device is True

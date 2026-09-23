@@ -49,10 +49,10 @@ def clearance_ordered(items: list[WorkItem], from_xy_mm: tuple[float, float]) ->
     block has the largest planar clearance (distance to its nearest OTHER
     remaining block), so isolated blocks are attempted before crowded ones -
     a crowded block's descent corridor can clip a still-present neighbour
-    (phase-4 GPU evidence), so it should wait until fewer neighbours remain.
+    (GPU evidence), so it should wait until fewer neighbours remain.
     Ties break by ``nearest_first``'s walk order from ``from_xy_mm``.
 
-    Implementation choice (documented per the phase-4 brief): clearance is
+    Implementation choice: clearance is
     recomputed from scratch against the shrinking remaining set after every
     pick, rather than incrementally updated, since re-sorting a scattered
     work list of this size is cheap and the simpler code is easier to trust.

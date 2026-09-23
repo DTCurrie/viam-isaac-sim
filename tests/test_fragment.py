@@ -276,7 +276,7 @@ def test_wrist_and_side_cameras_carry_a_collision_geometry_for_the_planner():
     carries its RealSense body (90x25x25 mm, centred on the frame origin) as
     frame geometry with no translation. A box, not the
     tools/generate_realsense_mesh.py mesh: the app's fragment validation
-    rejected mesh geometries on 2026-09-02 (phase-4 §Deferred). The wrist
+    rejected mesh geometries on 2026-09-02, a deferred fix. The wrist
     camera's long side runs along the frame's x (its boresight); the side
     camera is rolled 90 degrees about its boresight (`th`) so its image is
     upright, which puts its long side along the frame's x; in the world it
@@ -341,11 +341,11 @@ def test_side_cam_mount_stands_on_the_table_and_meets_the_camera_body():
 
 
 def test_side_camera_sits_outside_the_scatter_region_and_aims_at_its_centre():
-    """Phase 4 seam: `side-cam` is planted just past the scatter region's far
+    """Seam: `side-cam` is planted just past the scatter region's far
     -x edge at lens height above the table top, looking back toward the arm.
     It aims via a FRAME orientation, not `target`: the frame is what
     transform_pose reports, so prim aim and frame claim must be one
-    quaternion (GPU phase-4 run 1: `target` aimed the prim while the frame
+    quaternion (a GPU run: `target` aimed the prim while the frame
     claimed identity, and side scans measured the backdrop at 7994 mm). The
     orientation vector must point from the lens to the scatter-region centre
     on the table top."""
@@ -606,7 +606,7 @@ def _hue_distance_deg(hue_a: float, hue_b: float) -> float:
     return min(diff, 360 - diff)
 
 
-# nominal-color families (PLAN.md dynamic-blocks phase-2): each block's own,
+# nominal-color families: each block's own,
 # unlit RGB default's hue must stay within its color's family band, so the
 # family assignment cannot be gamed by picking a default outside it.
 NOMINAL_HUE_FAMILIES_DEG: dict[str, tuple[float, float]] = {

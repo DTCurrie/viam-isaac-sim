@@ -1,4 +1,4 @@
-"""Pure loop/telemetry records for the conductor's multi-loop runs (phase 5).
+"""Pure loop/telemetry records for the conductor's multi-loop runs.
 
 No viam imports. The shapes here are the status contract: the conductor
 serializes these via ``to_dict`` into its ``status`` DoCommand, and the
@@ -103,7 +103,7 @@ class LoopRecord:
     # are empty and the loop counted toward loops_errored, not loops_completed
     error: str | None = None
     # resident set size of the module process in MiB, sampled when the loop's
-    # record is cut (phase-6 soak self-certification); None when the platform
+    # record is cut for soak self-certification; None when the platform
     # offers no reading
     rss_mb: float | None = None
 

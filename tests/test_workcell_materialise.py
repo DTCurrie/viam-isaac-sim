@@ -9,7 +9,6 @@ mesh paths run under test with no GPU and no Isaac import.
 
 from __future__ import annotations
 
-import sys
 import threading
 import types
 from typing import Any, ClassVar
@@ -17,9 +16,19 @@ from typing import Any, ClassVar
 import numpy as np
 import pytest
 
+from isaac_module.epick import epick_body_prim_paths
 from isaac_module.handles.arm import IsaacArmHandle
 from isaac_module.handles.vacuum import DEFAULT_GRAB_DELAY_MS
 from isaac_module.sim_manager import ComponentScenery, SimManager
+from isaac_module.surface_gripper import (
+    DEFAULT_COAXIAL_FORCE_LIMIT_N,
+    DEFAULT_CUP_DAMPING_N_S_PER_M,
+    DEFAULT_CUP_STIFFNESS_N_PER_M,
+    DEFAULT_MAX_GRIP_DISTANCE_MM,
+    DEFAULT_RETRY_INTERVAL_S,
+    DEFAULT_SHEAR_FORCE_LIMIT_N,
+    AttachmentRig,
+)
 
 
 class _FakeXForm:
@@ -67,12 +76,22 @@ class _FakeScene:
 class _FakeWorld:
     def __init__(self) -> None:
         self.scene = _FakeScene()
+        self._callbacks: dict[str, Any] = {}
 
     def reset(self) -> None:
         pass
 
     def stop(self) -> None:
         pass
+
+    def add_physics_callback(self, name: str, fn: Any) -> None:
+        self._callbacks[name] = fn
+
+    def remove_physics_callback(self, name: str) -> None:
+        self._callbacks.pop(name, None)
+
+    def physics_callback_exists(self, name: str) -> bool:
+        return name in self._callbacks
 
 
 class _FakePrim:
@@ -220,7 +239,8 @@ def test_component_frame_composes_onto_primitive_local_pose():
 
 
 # ----------------------------------------------------------------------
-# grab_delay_ms reaches the Isaac vacuum handle
+# _create_vacuum_gripper_isaac authors the EPick body, the attachment rig
+# and a world reset, then hands the handle the gripper interface
 # ----------------------------------------------------------------------
 
 
@@ -228,82 +248,169 @@ class _FakeArticulation:
     dof_names: ClassVar[list[str]] = []
 
 
-class _FakeXformableOp:
-    def Set(self, value) -> None:
-        pass
-
-
-class _FakeXformable:
-    def __init__(self, prim) -> None:
-        pass
-
-    def ClearXformOpOrder(self) -> None:
-        pass
-
-    def AddTranslateOp(self):
-        return _FakeXformableOp()
-
-    def AddOrientOp(self):
-        return _FakeXformableOp()
-
-    def AddScaleOp(self):
-        return _FakeXformableOp()
-
-
-class _FakeCubeGeom:
-    def CreateSizeAttr(self, value) -> None:
-        pass
-
-
-class _FakeCubeCls:
-    @staticmethod
-    def Define(stage, path):
-        return _FakeCubeGeom()
-
-
-class _FakeVecOrQuat:
-    def __init__(self, *args) -> None:
-        self.args = args
-
-
 class _FakeStage:
     pass
 
 
 class _FakePrimHandle:
+    """get_prim_at_path's stand-in: IsValid() says whether this path was
+    already authored, the way a re-attach after release_handle finds one."""
+
+    def __init__(self, valid: bool = False) -> None:
+        self._valid = valid
+
     def GetStage(self):
         return _FakeStage()
 
+    def IsValid(self) -> bool:
+        return self._valid
+
+
+def _fake_get_prim_at_path(existing: set[str]):
+    def get_prim_at_path(path: str) -> _FakePrimHandle:
+        return _FakePrimHandle(valid=path in existing)
+
+    return get_prim_at_path
+
 
 @pytest.fixture
-def fake_pxr(monkeypatch):
-    fake_gf = types.SimpleNamespace(
-        Vec3d=_FakeVecOrQuat, Vec3f=_FakeVecOrQuat, Quatf=_FakeVecOrQuat
+def fake_surface_gripper(monkeypatch):
+    """Stands in for compat.import_surface_gripper and the two authoring
+    functions sim_manager calls, so _create_vacuum_gripper_isaac runs with
+    no real Isaac import and every authored prim recorded for assertions."""
+    sentinel_iface = object()
+    fake_modules: dict[str, Any] = {
+        "report": {},
+        "surface_gripper": types.SimpleNamespace(
+            acquire_surface_gripper_interface=lambda: sentinel_iface
+        ),
+        "robot_schema": types.SimpleNamespace(),
+        "Gf": types.SimpleNamespace(),
+        "Sdf": types.SimpleNamespace(),
+        "UsdGeom": types.SimpleNamespace(),
+        "UsdPhysics": types.SimpleNamespace(),
+        "PhysxSchema": None,
+    }
+    monkeypatch.setattr("isaac_module.sim_manager.import_surface_gripper", lambda: fake_modules)
+
+    epick_calls: list[dict[str, Any]] = []
+
+    def fake_author_epick_body(usd_geom, usd_physics, gf, stage, body_path, tool_pose):
+        epick_calls.append({"body_path": body_path, "tool_pose": tool_pose})
+        return [body_path]
+
+    monkeypatch.setattr("isaac_module.sim_manager.author_epick_body", fake_author_epick_body)
+
+    rig_calls: list[dict[str, Any]] = []
+
+    def fake_author_attachment_rig(modules, stage, **kwargs):
+        rig_calls.append(kwargs)
+        scope = kwargs["scope_path"]
+        joint_count = len(kwargs["points_tool_m"])
+        return AttachmentRig(
+            scope_path=scope,
+            anchor_path=f"{scope}/Anchor",
+            joint_paths=tuple(f"{scope}/AttachmentPoint_{i}" for i in range(joint_count)),
+            gripper_path=f"{scope}/SurfaceGripper",
+        )
+
+    monkeypatch.setattr(
+        "isaac_module.sim_manager.author_attachment_rig", fake_author_attachment_rig
     )
-    fake_usdgeom = types.SimpleNamespace(Cube=_FakeCubeCls, Xformable=_FakeXformable)
-    fake_module = types.ModuleType("pxr")
-    fake_module.Gf = fake_gf
-    fake_module.UsdGeom = fake_usdgeom
-    monkeypatch.setitem(sys.modules, "pxr", fake_module)
 
-
-def test_vacuum_gripper_isaac_forwards_configured_grab_delay_ms(fake_pxr):
-    manager = _manager()
-    manager._isaac.get_prim_at_path = lambda path: _FakePrimHandle()
-    arm = IsaacArmHandle(manager, _FakeArticulation(), None, prim_path="/World/Arm")
-
-    handle = manager._create_vacuum_gripper_isaac(
-        "vacuum-1", {"arm": "arm-1", "grab_delay_ms": 250}, arm
+    return types.SimpleNamespace(
+        interface=sentinel_iface, epick_calls=epick_calls, rig_calls=rig_calls
     )
 
-    assert handle._grab_delay_s == pytest.approx(0.25)
+
+def _reset_counter(manager: SimManager) -> list[None]:
+    calls: list[None] = []
+    manager._reset_world = lambda: calls.append(None)
+    return calls
 
 
-def test_vacuum_gripper_isaac_defaults_grab_delay_ms(fake_pxr):
+def test_vacuum_gripper_isaac_authors_body_and_rig_with_defaults(fake_surface_gripper):
     manager = _manager()
-    manager._isaac.get_prim_at_path = lambda path: _FakePrimHandle()
+    manager._isaac.get_prim_at_path = _fake_get_prim_at_path(set())
+    reset_calls = _reset_counter(manager)
     arm = IsaacArmHandle(manager, _FakeArticulation(), None, prim_path="/World/Arm")
 
     handle = manager._create_vacuum_gripper_isaac("vacuum-1", {"arm": "arm-1"}, arm)
 
+    (epick_call,) = fake_surface_gripper.epick_calls
+    assert epick_call["body_path"] == "/World/Arm/wrist_3_link/EPick"
+    position, orientation = epick_call["tool_pose"]
+    assert position == pytest.approx((0.0, 0.0, 0.196))
+    assert orientation == pytest.approx((1.0, 0.0, 0.0, 0.0))
+
+    (rig_call,) = fake_surface_gripper.rig_calls
+    assert rig_call["scope_path"] == "/World/vacuum_1_gripper"
+    assert rig_call["clearance_offset_m"] == pytest.approx(0.005)
+    assert len(rig_call["points_tool_m"]) == 4
+    limits = rig_call["limits"]
+    assert limits.max_grip_distance_m == pytest.approx(DEFAULT_MAX_GRIP_DISTANCE_MM / 1000.0)
+    assert limits.coaxial_force_limit_n == pytest.approx(DEFAULT_COAXIAL_FORCE_LIMIT_N)
+    assert limits.shear_force_limit_n == pytest.approx(DEFAULT_SHEAR_FORCE_LIMIT_N)
+    assert limits.retry_interval_s == pytest.approx(DEFAULT_RETRY_INTERVAL_S)
+    compliance = rig_call["compliance"]
+    assert compliance.stiffness_n_per_m == pytest.approx(DEFAULT_CUP_STIFFNESS_N_PER_M)
+    assert compliance.damping_n_s_per_m == pytest.approx(DEFAULT_CUP_DAMPING_N_S_PER_M)
+
+    assert len(reset_calls) == 1
+
+    assert handle.parent_prim_path == "/World/Arm/wrist_3_link"
+    assert handle.tool_prim_path == "/World/Arm/wrist_3_link/EPick"
+    assert handle._gripper_prim_path == "/World/vacuum_1_gripper/SurfaceGripper"
     assert handle._grab_delay_s == pytest.approx(DEFAULT_GRAB_DELAY_MS / 1000.0)
+    assert handle._interface is fake_surface_gripper.interface
+    assert manager.world.physics_callback_exists(handle.coaxial_callback_name)
+    assert manager.world._callbacks[handle.coaxial_callback_name] == handle._on_physics_step
+
+
+def test_vacuum_gripper_isaac_forwards_configured_attrs(fake_surface_gripper):
+    manager = _manager()
+    manager._isaac.get_prim_at_path = _fake_get_prim_at_path(set())
+    reset_calls = _reset_counter(manager)
+    arm = IsaacArmHandle(manager, _FakeArticulation(), None, prim_path="/World/Arm")
+
+    handle = manager._create_vacuum_gripper_isaac(
+        "vacuum-1",
+        {
+            "arm": "arm-1",
+            "grab_delay_ms": 250,
+            "max_grip_distance_mm": 20,
+            "coaxial_force_limit_n": 60,
+            "cup_stiffness": 3000,
+        },
+        arm,
+    )
+
+    (rig_call,) = fake_surface_gripper.rig_calls
+    limits = rig_call["limits"]
+    assert limits.max_grip_distance_m == pytest.approx(0.02)
+    assert limits.coaxial_force_limit_n == pytest.approx(60.0)
+    compliance = rig_call["compliance"]
+    assert compliance.stiffness_n_per_m == pytest.approx(3000.0)
+
+    assert len(reset_calls) == 1
+    assert handle._grab_delay_s == pytest.approx(0.25)
+
+
+def test_vacuum_gripper_isaac_reattach_authors_and_resets_nothing(fake_surface_gripper):
+    manager = _manager()
+    manager._isaac.get_prim_at_path = _fake_get_prim_at_path(
+        {
+            "/World/Arm/wrist_3_link/EPick",
+            epick_body_prim_paths("/World/Arm/wrist_3_link/EPick")[-1],
+            "/World/vacuum_1_gripper",
+        }
+    )
+    reset_calls = _reset_counter(manager)
+    arm = IsaacArmHandle(manager, _FakeArticulation(), None, prim_path="/World/Arm")
+
+    handle = manager._create_vacuum_gripper_isaac("vacuum-1", {"arm": "arm-1"}, arm)
+
+    assert fake_surface_gripper.epick_calls == []
+    assert fake_surface_gripper.rig_calls == []
+    assert reset_calls == []
+    assert handle._gripper_prim_path == "/World/vacuum_1_gripper/SurfaceGripper"

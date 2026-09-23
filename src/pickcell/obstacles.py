@@ -119,9 +119,9 @@ def pick_area_keepout(
     height_mm: float = KEEPOUT_HEIGHT_MM,
     label: str = "pick_area_keepout",
 ) -> Geometry:
-    """The carry-phase no-fly box over a work region: from the region's
+    """The carry-leg no-fly box over a work region: from the region's
     own z (the support surface) up ``height_mm`` (KEEPOUT_HEIGHT_MM by
-    default; phase 4 passes the measured-tallest-derived height), grown by
+    default; callers pass the measured-tallest-derived height), grown by
     KEEPOUT_MARGIN_MM sideways. ``label`` names the box in planner
     violation messages (the place-pad keep-out passes its own)."""
     (x0, y0, z0), (x1, y1, _z1) = region_mm
@@ -165,7 +165,7 @@ def pad_top_centre_mm(
 # pipeline's own randomize fallback (_sim_obstacles) calls reachable_region_mm
 # directly, so the function and its constants must be importable from the
 # same module PickPipeline lives beside. examples/pick_red_block.py re-exports
-# both names so the phase-1 seam cross-check against cell_layout still holds.
+# both names so the cross-check against cell_layout still holds.
 REACHABLE_REGION_X_MM = (-1350.0, -700.0)
 REACHABLE_REGION_Y_MM = (-300.0, 300.0)
 

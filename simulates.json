@@ -94,7 +94,7 @@
       "carry": {},
       "verified": true,
       "source": "https://github.com/viam-labs/robotiq-epick epick/gripper.go, read 2026-09-15",
-      "note": "the sim vacuum needs the arm it is bolted to, carried from the frame parent the same way the 2f-grippers row does. host, port, mode, max_pressure_pct, min_pressure_pct, timeout_ms and include_realsense configure a URCap socket connection and real pressure registers the sim has no equivalent for, so nothing carries. grab_delay_ms is not a real epick attribute at all, it belongs to this module's own simulated-epick-vacuum-gripper model, so it is not listed here even though the sim's own grab_delay_ms attribute matches its name and default"
+      "note": "the sim vacuum needs the arm it is bolted to, carried from the frame parent the same way the 2f-grippers row does. host, port, mode, max_pressure_pct, min_pressure_pct, timeout_ms and include_realsense configure a URCap socket connection and real pressure registers the sim has no equivalent for, so nothing carries. the sim holds through Isaac's surface gripper, contact-gated, with the EPick's own measured geometry and kinematics document. grab_delay_ms is not a real epick attribute at all, it belongs to this module's own simulated-epick-vacuum-gripper model, so it is not listed here even though the sim's own grab_delay_ms attribute matches its name and default"
     },
     {
       "real_model": "rdk:builtin:wheeled",

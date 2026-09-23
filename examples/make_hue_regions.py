@@ -1,7 +1,7 @@
 """Writes the ``--regions`` file ``gpu_checklist_photoreal.py``'s hue item reads.
 
 The hue item samples one pixel box per block colour. Finding those boxes by
-looking at a frame is what left phase 1 without a regions file at all, so this
+looking at a frame is what left this workflow without a regions file at all, so this
 derives them instead: each block's world pose comes from the world's
 ``prop_geometries``, the camera's own intrinsics and a four-probe
 camera-to-world affine turn that pose into pixels, and the box lands on the

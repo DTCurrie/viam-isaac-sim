@@ -168,7 +168,7 @@ def test_move_to_joint_positions_out_of_limits_raises(world, tmp_path):
 
 
 def test_boundary_joint_target_clamps_instead_of_raising(world, tmp_path):
-    """GPU phase-1 wedge: physics settle drifted wrist_2 to -360.00003 deg,
+    """GPU wedge: physics settle drifted wrist_2 to -360.00003 deg,
     the motion service echoed that reported state back as a plan waypoint,
     and the strict limit check rejected every subsequent plan. A target
     within the tolerance of a limit must clamp onto the limit and execute;

@@ -313,7 +313,7 @@ async def run_soft_reset_demo(
     }
 
 
-# checks this phase marks not applicable
+# checks marked not applicable or deferred
 
 
 def run_mesh_table_check() -> str:

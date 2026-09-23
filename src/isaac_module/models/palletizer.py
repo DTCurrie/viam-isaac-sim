@@ -91,6 +91,7 @@ from pickcell.pipeline import GripperApi, Mover, WorldApi
 from pickcell.poses import PRE_GRASP_STANDOFF_MM, _pointing_down, _pose_to_dict
 
 from .. import DEFAULT_WORLD_NAME, FAMILY, NAMESPACE
+from ..asset_catalog import CUP_APPROACH_GAP_MM
 from ..sequencer_client import NextBox, SequencerClient
 from ..sort_plan import OUTCOME_FAILED, OUTCOME_PLACED
 
@@ -115,30 +116,20 @@ _DEFAULT_OBSTACLE_SOURCE = _OBSTACLE_SOURCE_WORLD_STATE_STORE
 # "prop_geometries" obstacle path.
 _FLOOR_Z_MM = 0.0
 
-# the cup stops this far above a payload's top face rather than on it. Driving
-# a rigid tool onto a rigid box makes contact the arm cannot push through, and
-# it stalls short of its commanded pose. A vacuum mechanism constant, not
-# packing geometry: it holds regardless of which box or which cell this runs in.
-CUP_APPROACH_GAP_MM = 5.0
-
-# how far above its slot the box's bottom is when the cup lets go. The box
-# hangs CUP_APPROACH_GAP_MM below the cup, the grasp gap the weld froze, and
-# the sequencer's place_end puts the cup where the box's top face is when the
-# box sits on its slot, so a descent to place_end itself drives the box that
-# far into the deck. The release pose sits the gap plus this clearance above
-# place_end, which leaves the box's bottom exactly this clearance above the
-# deck, and the box drops the rest of the way as it would from a real cup.
+# how far above its slot the box's bottom is when the cup lets go. The
+# sequencer's place_end puts the cup where the box's top face rides when the
+# box sits flat on its slot, and the surface gripper draws the box's top face
+# up to the cup on close, so a descent to place_end itself sets the box down
+# and the arm stops when the deck stops the box. Zero means release at
+# contact, the way a real palletizer sets a box down, and _descend_to_release
+# takes that stop as the touchdown it is.
 #
-# Measured on 2026-09-22, twice. With 5 mm of clearance, a descent in the
-# arm's elbow-up configuration over the pallet touched down early on every
-# run: at the last waypoint the shoulder was 1 degree over, which lowers the
-# cup 9 mm at that reach, and wrist 1 was 4 degrees short, which lowers the
-# hanging box's far corner another 7 mm. The corner met the deck 16 mm
-# early, the box tilted on the deck's edge, and it settled 28 mm from its
-# slot. The elbow-down configuration never touched. The clearance has to
-# cover that transient with room to spare, and the drop it adds lands a box
-# flat: a box dropped 200 mm onto this pallet settles within 0.1 mm.
-PLACE_RELEASE_CLEARANCE_MM = 25.0
+# Measured on 2026-09-22 with the EPick held through the surface gripper: the
+# descent to place_end stopped with the box's bottom 0.00 mm over the deck and
+# the released box settled 0.10 to 0.16 mm from its slot, in both arm
+# configurations, with no wrist fold. The 25 mm drop this replaces landed
+# 0.35 to 0.64 mm out and covered a wrist fold the compliant cups no longer cause.
+PLACE_RELEASE_CLEARANCE_MM = 0.0
 
 # how far from the release pose the cup may stop, box on the deck, and still
 # be released. A place descent that stalls with the cup this close to its
@@ -253,18 +244,17 @@ def pick_grasp_standoff_pose(top_face_xyz_mm: tuple[float, float, float]) -> Pos
 
 def place_release_pose(place_end: Pose) -> Pose:
     """Where the cup lets go: the sequencer's `place_end_in_world` raised by
-    the grasp gap the box hangs below the cup and the release clearance.
+    the release clearance.
 
     `place_end` is the cup pose with the box's top face at the cup and the
-    box on its slot. The cup never holds a box at its top face, it holds it
-    CUP_APPROACH_GAP_MM above, so a descent to `place_end` itself drives the
-    box that far into the deck and the arm stalls a few tenths of a degree
-    short. Only z changes: the slot's x, y and orientation are the
-    sequencer's business."""
+    box on its slot, so a descent all the way to `place_end` sets the box
+    on its slot. `PLACE_RELEASE_CLEARANCE_MM` is how far above that the cup
+    lets go, zero for release at contact. Only z changes: the slot's x, y
+    and orientation are the sequencer's business."""
     return Pose(
         x=place_end.x,
         y=place_end.y,
-        z=place_end.z + CUP_APPROACH_GAP_MM + PLACE_RELEASE_CLEARANCE_MM,
+        z=place_end.z + PLACE_RELEASE_CLEARANCE_MM,
         o_x=place_end.o_x,
         o_y=place_end.o_y,
         o_z=place_end.o_z,
@@ -287,10 +277,10 @@ def held_box_transform(
 
     The gripper frame's z axis is the tool axis and points down at a grasp
     (`_pointing_down`'s orientation vector is (0, 0, -1)), so the box hangs
-    along the gripper's +z: the grasp gap the weld froze, then half the box's
-    height to its centre."""
+    along the gripper's +z, its top face at the cup: half the box's height
+    to its centre."""
     _length_mm, _width_mm, height_mm = box_dims_mm
-    centre_below_cup_mm = CUP_APPROACH_GAP_MM + height_mm / 2.0
+    centre_below_cup_mm = height_mm / 2.0
     return Transform(
         reference_frame=box_prop,
         pose_in_observer_frame=PoseInFrame(
@@ -997,8 +987,8 @@ class IsaacPalletizer(Generic, EasyResource):  # type: ignore[misc]  # SDK: API 
         await self._gripper.open()
         await move_linear_or_free(over_the_place, place_start, "retreat off the place")
 
-        # the box drops PLACE_RELEASE_CLEARANCE_MM onto its slot after the
-        # release, so the pose reported back is read once it has stopped
+        # the box settles onto its slot after the release, so the pose
+        # reported back is read once it has stopped
         settled_geometries = await self._settled_geometries(box_prop)
         measured_pose = _measured_box_pose(settled_geometries, box_prop)
         measured_pose_mm = _pose_to_dict(measured_pose) if measured_pose is not None else None
