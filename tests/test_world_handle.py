@@ -384,9 +384,11 @@ FAKE_SIM_EVENTS: list[str] = []
 class _FakeCubeObject(_FakeXForm):
     """Stands in for the scene-registered Dynamic/FixedCuboid object
     (sized props): adds set_local_scale, the API IsaacWorldHandle
-    rescales through."""
+    rescales through, plus set_contact_offset/set_mass for prop physics."""
 
     _SCALE_STORE: ClassVar[dict[str, np.ndarray]] = {}
+    _CONTACT_OFFSET_STORE: ClassVar[dict[str, float]] = {}
+    _MASS_STORE: ClassVar[dict[str, float]] = {}
 
     def set_local_scale(self, scale) -> None:
         FAKE_SIM_EVENTS.append("scale")
@@ -394,6 +396,14 @@ class _FakeCubeObject(_FakeXForm):
 
     def get_local_scale(self):
         return self._SCALE_STORE.get(self.prim_path, np.array([1.0, 1.0, 1.0]))
+
+    def set_contact_offset(self, value) -> None:
+        FAKE_SIM_EVENTS.append("contact_offset")
+        self._CONTACT_OFFSET_STORE[self.prim_path] = float(value)
+
+    def set_mass(self, value) -> None:
+        FAKE_SIM_EVENTS.append("mass")
+        self._MASS_STORE[self.prim_path] = float(value)
 
 
 class _FakeScene:
@@ -440,6 +450,8 @@ class _FakeIsaacNamespace:
 def isaac_handle():
     _FakeXForm._STORE.clear()
     _FakeCubeObject._SCALE_STORE.clear()
+    _FakeCubeObject._CONTACT_OFFSET_STORE.clear()
+    _FakeCubeObject._MASS_STORE.clear()
     FAKE_SIM_EVENTS.clear()
     manager = SimManager()
     manager.mock = False
@@ -480,6 +492,23 @@ def test_isaac_handle_set_prop_pose_then_reset_restores_spawn_pose(isaac_handle)
 def test_isaac_handle_set_prop_pose_unknown_name_raises_value_error(isaac_handle):
     with pytest.raises(ValueError):
         isaac_handle.set_prop_pose("ghost", (0.0, 0.0, 0.0))
+
+
+def test_isaac_handle_set_prop_physics_applies_and_updates_spec(isaac_handle):
+    effective = isaac_handle.set_prop_physics("a", {"contact_offset": 0.01, "mass": 0.3})
+
+    assert effective == {"contact_offset": 0.01, "mass": 0.3}
+    scene_object = isaac_handle._sim.world.scene.get_object("a")
+    assert scene_object._CONTACT_OFFSET_STORE["/World/a"] == pytest.approx(0.01)
+    assert scene_object._MASS_STORE["/World/a"] == pytest.approx(0.3)
+    assert isaac_handle._sim._prop_specs["a"]["contact_offset"] == pytest.approx(0.01)
+    assert isaac_handle._sim._prop_specs["a"]["mass"] == pytest.approx(0.3)
+    assert isaac_handle.prop_physics("a") == {"contact_offset": 0.01, "mass": 0.3}
+
+
+def test_isaac_handle_set_prop_physics_unknown_name_raises_value_error(isaac_handle):
+    with pytest.raises(ValueError):
+        isaac_handle.set_prop_physics("ghost", {"mass": 0.1})
 
 
 def test_isaac_handle_spawn_prop_appears_and_survives_reset(isaac_handle):

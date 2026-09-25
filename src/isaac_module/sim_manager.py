@@ -1781,6 +1781,7 @@ class SimManager:
             meta.get("joint_names"),
             base_correction=correction,
             prim_path=prim_path,
+            drive_gains=attrs.get("drive_gains"),
         )
 
     def create_camera(self, name: str, attrs: dict[str, Any]) -> "CameraHandle":

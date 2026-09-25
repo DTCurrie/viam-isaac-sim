@@ -177,6 +177,16 @@ Neither side implements any `DoCommand` verb for the base, so this section has n
 
 Where the sim departs from a real driver on purpose, and why.
 
+- The palletizer cell's arm carries 0.1 of joint armature on wrist 2 and wrist 3 (`drive_gains`
+  on `arm-1`), which the UR5e asset authors at zero on every joint. A real UR5e's wrist servos hold
+  a 2 kg box through any swing; in PhysX an articulation drive whose link has a body jointed on
+  through maximal-coordinate joints (the surface gripper's attachment points) goes soft, and on
+  2026-09-24 wrist 3 with the box on accelerated at about one radian per second squared while the
+  base ran at 177 deg/s, so every carry from the wound standoff flung the tool and stalled the
+  wrist. Armature adds rotor inertia to the joint's own term in the implicit drive; at 0.1 wrist 3
+  runs at its 180 deg/s limit with the box on and the carry step completes in 1.7 s, at 1.0 it
+  overshoots six degrees. The value is a sim tuning for this payload, not a property of the arm.
+
 - The vacuum gripper's pull-off threshold was a one-step peak, not a weight, because Isaac 5.0's
   surface gripper plugin releases the attachment when the reported force along the cup axis
   passes `coaxial_force_limit_n` on any single physics step, with no window, and the arm follows
@@ -202,10 +212,31 @@ Where the sim departs from a real driver on purpose, and why.
   default limit the hold is never lost to weight. Research:
   `.claude/plans/palletizer-cell/research/2026-09-23-tear-off-in-isaac.md` and
   `2026-09-23-surface-gripper-attach-mechanics.md` beside it.
+- The sequencer centres a placed box's geometry on the pose `set_box_transform` is given, rather
+  than resting the box's top face on it. So the palletizer sends the box's centre to the store, and
+  keeps the top face only in its own records (`measured_pose_mm`), where item 4 of
+  `gpu_checklist_palletizer.py` compares it against the sequencer's own top-face target.
+- The palletizer reads the placed box's settled pose and settle time off the simulator, where the
+  demo it adopts reads nothing and reports a hold on a timer. That reading is what feeds
+  `set_box_transform` and the stack stability verdict, and it has no counterpart on a real cell.
 - Sim-only `DoCommand` verbs live on the world's `DoCommand`, keyed by component name, never on
   the component that stands in for hardware. For the arm: `joint_state`, `dof_names` with an
   optional `all`, and `prim_pose`. For the gripper: `dof_names`, `jaw_deg` and `tcp_pose`. The
   camera's `sample_color` stays on the camera, since a real camera module could carry it.
+- The sim arm densifies a plan before following it: between two of the planner's waypoints
+  it inserts straight joint-space sub-targets no more than 5 degrees apart, then drives them as
+  the linear moves already drive their 2 mm waypoints. Until 2026-10-02 the sparse waypoints of
+  a free plan were driven as given, and between two of them each PhysX drive ran to its own
+  target under one shared cap, so the joint with the least to do finished first and the tool
+  left the straight line the planner had collision-checked, sweeping a just-placed box by up to
+  111 mm with the box and a 50 mm keep-out margin both known to the planner. A UR controller
+  synchronises its joints instead. Scaling per-joint drive caps to the same end stalled every
+  move against the settle detector, so density is the parity mechanism here. An inserted
+  sub-target counts as passed on the first physics step every joint is within the 2 degree
+  waypoint tolerance. The planner's own waypoints still hold that tolerance for five steps, so a
+  free leg flows through its sub-targets instead of stopping at each one. A run of inserted
+  sub-targets is driven by one physics-step callback that moves the drive target on the sim
+  thread. A free leg then crosses the sim thread once, where it used to cross three times a point.
 - `MoveOptions` acceleration fields and `max_tcp_speed` are logged and not honored. The UR module
   honors them through its trajectory planner, which the sim does not have.
 - The sim arm takes a config-level `max_vel_degs_per_sec`, carried from a real UR's

@@ -507,9 +507,18 @@ def author_attachment_joint(
     with the given stiffness and damping, which PhysX reports to the
     plugin, and the two lateral rotations are freed within
     +-lateral_limit_deg so the box can pitch as one cup compresses and its
-    opposite stretches. The other three axes stay locked on the one joint
-    that ``carries_shear``, and are free on the rest, so a set of cups never
-    constrains the same freedom twice."""
+    opposite stretches. The two lateral translations stay locked on the one
+    joint that ``carries_shear`` and are free on the rest, so a set of cups
+    never constrains the same freedom twice. Rotation about the cup axis is
+    locked on that joint and limited to the same +-lateral_limit_deg on the
+    rest, never free: PhysX's D6 solver refuses a joint whose one swing axis
+    is limited while the other is free when the limits are the per-axis kind
+    USD authors (``D6JointSolverPrep: invalid joint setup. Double pyramid
+    mode not supported``, ExtD6Joint.cpp), and on 2026-09-24 that refusal
+    was logged every physics step of every hold while the plugin released
+    and re-gripped the box mid-carry. Both swings limited is a setup it
+    accepts, and the shear joint's lock keeps the box's yaw at zero long
+    before the spring cups' limit is reached."""
     joint = usd_physics.Joint.Define(stage, joint_path)
     joint.CreateBody0Rel().SetTargets([sdf.Path(body0_path)])
     joint.CreateBody1Rel().SetTargets([sdf.Path(body1_path)])
@@ -550,6 +559,12 @@ def author_attachment_joint(
             lateral_limit = usd_physics.LimitAPI.Apply(prim, f"rot{letter}")
             lateral_limit.CreateLowAttr().Set(-compliance.lateral_limit_deg)
             lateral_limit.CreateHighAttr().Set(compliance.lateral_limit_deg)
+        if not carries_shear:
+            # both swing axes limited, never one limited and one free: see the
+            # docstring for the PhysX rule this satisfies
+            about_cup_axis = usd_physics.LimitAPI.Apply(prim, f"rot{forward_axis}")
+            about_cup_axis.CreateLowAttr().Set(-compliance.lateral_limit_deg)
+            about_cup_axis.CreateHighAttr().Set(compliance.lateral_limit_deg)
     robot_schema.ApplyAttachmentPointAPI(prim)
     _set_attr(prim, sdf, ATTR_FORWARD_AXIS, "Token", forward_axis)
     _set_attr(prim, sdf, ATTR_CLEARANCE_OFFSET, "Float", float(clearance_offset_m))

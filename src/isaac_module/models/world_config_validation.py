@@ -8,7 +8,7 @@ from viam.proto.app.robot import ComponentConfig
 from viam.utils import ValueTypes
 
 from ..materials import material_spec
-from ..physics import PROP_PHYSICS_KEYS
+from ..physics import PROP_PHYSICS_KEYS, PROP_SOLVER_ITERATIONS_MAX
 from ..sim_manager import prim_name
 from ..visual_props import FIT_TRUE, PROP_KINDS, VISUAL_PROP_KIND, VISUAL_REJECTED_KEYS
 from .component_frame_pose import frame_pose
@@ -264,10 +264,26 @@ def _validate_number(label: str, key: str, value: object) -> float:
     return float(value)
 
 
+_SOLVER_ITERATION_KEYS = ("solver_position_iterations", "solver_velocity_iterations")
+
+
+def _validate_solver_iterations(label: str, key: str, value: object) -> float:
+    number = _validate_number(label, key, value)
+    if not float(number).is_integer():
+        raise ValueError(f"prop {label}: {key!r} must be an integer")
+    if not (1 <= number <= PROP_SOLVER_ITERATIONS_MAX):
+        raise ValueError(f"prop {label}: {key!r} must be in [1, {PROP_SOLVER_ITERATIONS_MAX}]")
+    return number
+
+
 def _validate_prop_physics(label: str, prop: Mapping[str, object]) -> None:
     values: dict[str, float] = {}
     for key in PROP_PHYSICS_KEYS:
-        if key in prop:
+        if key not in prop:
+            continue
+        if key in _SOLVER_ITERATION_KEYS:
+            values[key] = _validate_solver_iterations(label, key, prop[key])
+        else:
             values[key] = _validate_number(label, key, prop[key])
 
     if "mass" in values and values["mass"] <= 0:

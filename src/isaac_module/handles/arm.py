@@ -3,7 +3,8 @@ from __future__ import annotations
 import math
 import threading
 import time
-from collections.abc import Sequence
+from collections import deque
+from collections.abc import Mapping, Sequence
 from enum import Enum
 from typing import TYPE_CHECKING, Any
 
@@ -72,14 +73,140 @@ SETTLE_GUARD_SLACK_S = 5.0
 # (1 s at physics_dt 1/120) by at least STALL_PROGRESS_EPS_RAD.
 STALL_NO_PROGRESS_STEPS = 120
 STALL_PROGRESS_EPS_RAD = math.radians(0.1)
+# a joint closing on its target faster than this is making progress whatever
+# the error window says. Above the 0.05 rad/s (2.9 deg/s) jitter of a joint
+# pinned against a block, which the no-progress rule exists to catch; far
+# under the 20 to 60 deg/s a back-driven wrist recovered at on 2026-09-24,
+# when the window ending at the bottom of its forty degree setback read as
+# no progress and stopped the arm mid-recovery.
+STALL_CONVERGING_SPEED_RAD_S = math.radians(6.0)
+# how many consecutive physics steps an off-target arm must read still before
+# it is a stall. A joint reversing direction dwells under VEL_EPS for a few
+# steps as its velocity crosses zero (the 2026-09-24 wrist back-drives turned
+# around inside 0.1 s and were called stalled at five), while a joint pinned
+# against a block stays still for as long as the drive pushes. Half a second
+# at 60 Hz: an order of magnitude over a reversal, a quarter of the
+# no-progress window.
+STALL_STILL_STEPS = 30
 
 
 class SettleOutcome(str, Enum):
     """Result of ArmHandle.wait_for_settle."""
 
     REACHED = "reached"  # every named joint within tolerance for SETTLE_WINDOW_STEPS steps
-    STALLED = "stalled"  # still (|v| <= VEL_EPS_RAD_S) for the window with a joint off target
+    STALLED = (
+        "stalled"  # still (|v| <= VEL_EPS_RAD_S) for STALL_STILL_STEPS with a joint off target
+    )
     TIMED_OUT = "timed_out"  # the sim-time deadline passed with joints still converging
+
+
+class _StepTracker:
+    """The per-step arrival and stall rules every wait on the drive shares.
+
+    ``step`` takes one physics step of joint state against the targets being
+    waited on and returns the outcome once there is one, None while the wait
+    goes on. ``reset`` starts the rules afresh for the next target, so a path
+    followed point by point is judged by the same rules as a single wait."""
+
+    def __init__(
+        self, arm_name: str, timeout_s: float, tolerance_rad: float, window_steps: int
+    ) -> None:
+        self._arm_name = arm_name
+        self._timeout_s = timeout_s
+        self._tolerance_rad = tolerance_rad
+        self._window_steps = window_steps
+        self.reset()
+
+    def reset(self) -> None:
+        self._within = 0
+        self._still_off_target = 0
+        self._sim_time = 0.0
+        self._max_speed = 0.0
+        # the worst error at each of the last STALL_NO_PROGRESS_STEPS steps,
+        # oldest first, so progress is judged over a window rather than
+        # against the best value ever seen. On 2026-09-24 the base's swing
+        # back-drove wrist 3 forty degrees with a box on the cups. The joint
+        # was recovering at 60 degrees per second when its all-time best, two
+        # seconds behind it, read as no progress and the arm was stopped a
+        # third of the way through the recovery, on every carry from that
+        # branch.
+        self._recent_worst_errors: deque[float] = deque(maxlen=STALL_NO_PROGRESS_STEPS + 1)
+
+    def step(
+        self,
+        positions: Sequence[float],
+        velocities: Sequence[float],
+        targets: Sequence[float],
+        step_size: float,
+    ) -> SettleOutcome | None:
+        max_speed = max((abs(float(v)) for v in velocities), default=0.0)
+        self._max_speed = max(self._max_speed, max_speed)
+        is_still = max_speed <= VEL_EPS_RAD_S
+        errors = [abs(float(p) - t) for p, t in zip(positions, targets, strict=True)]
+        worst_error = max(errors, default=0.0)
+        is_within = worst_error <= self._tolerance_rad
+        # REACHED is a position criterion held over the window, so holding
+        # within tolerance for window_steps steps IS "settled". Velocity only
+        # decides stalls, because PhysX never reads exactly still.
+        self._within = self._within + 1 if is_within else 0
+        self._still_off_target = self._still_off_target + 1 if (is_still and not is_within) else 0
+        # no-progress stall: the worst error is no better than it was
+        # STALL_NO_PROGRESS_STEPS steps ago. A joint pinned against a block
+        # vibrates above VEL_EPS and never reads still, and this is what
+        # catches it. A joint losing ground and winning it back is making
+        # progress over any window that ends in its recovery.
+        self._recent_worst_errors.append(worst_error)
+        # the fastest any off-target joint is closing on its target, where a
+        # joint moving away or a joint at rest contributes nothing
+        closing_speed = max(
+            (
+                float(v) * math.copysign(1.0, t - float(p))
+                for p, v, t in zip(positions, velocities, targets, strict=True)
+                if abs(float(p) - t) > self._tolerance_rad
+            ),
+            default=0.0,
+        )
+        no_progress = (
+            len(self._recent_worst_errors) > STALL_NO_PROGRESS_STEPS
+            and worst_error > self._recent_worst_errors[0] - STALL_PROGRESS_EPS_RAD
+            and closing_speed < STALL_CONVERGING_SPEED_RAD_S
+        )
+
+        if self._within >= self._window_steps:
+            return SettleOutcome.REACHED
+        if self._still_off_target >= STALL_STILL_STEPS or (not is_within and no_progress):
+            # the numbers the decision was made on, since a stall the arm
+            # reports is otherwise indistinguishable from one it caused
+            LOGGER.warning(
+                "arm settle STALLED by %s after %d steps (%.2f s sim): worst error %.1f deg, "
+                "error %d steps ago %.1f deg, max speed %.1f deg/s, closing speed %.1f deg/s, "
+                "still-off-target run %d",
+                "still" if self._still_off_target >= STALL_STILL_STEPS else "no-progress",
+                len(self._recent_worst_errors),
+                self._sim_time,
+                math.degrees(worst_error),
+                STALL_NO_PROGRESS_STEPS,
+                math.degrees(self._recent_worst_errors[0]),
+                math.degrees(max_speed),
+                math.degrees(closing_speed),
+                self._still_off_target,
+            )
+            return SettleOutcome.STALLED
+
+        self._sim_time += step_size
+        if self._sim_time >= self._timeout_s:
+            LOGGER.warning(
+                "arm %r settle timed out after %.2fs sim time: within tolerance=%s, "
+                "still=%s, max |v| seen=%.4f rad/s (VEL_EPS %.4f)",
+                self._arm_name,
+                self._sim_time,
+                is_within,
+                is_still,
+                self._max_speed,
+                VEL_EPS_RAD_S,
+            )
+            return SettleOutcome.TIMED_OUT
+        return None
 
 
 class ArmHandle:
@@ -103,6 +230,26 @@ class ArmHandle:
         physics is actually holding (rad, None when unreadable) and ``named``
         (True for the arm's own joints). The diagnostic that separates "wrong
         target" from "physics fought the target"."""
+        raise NotImplementedError
+
+    def set_drive_gains(self, gains: Mapping[str, Mapping[str, float]]) -> dict[str, Any]:
+        """Override the position gain (``kp``) and damping (``kd``) of the
+        named joints, e.g. ``{"wrist_3_joint": {"kp": 225781, "kd": 90}}``,
+        and keep them across a world reset. Returns the table
+        ``drive_gains`` reports, after the change. The asset's own tuning is
+        for the arm carrying itself; a wrist holding a payload can need more,
+        and the wrist_3 drive of the UR5e asset (kp 57300, kd 0.25 against
+        225781 and 90 one joint up) was back-driven forty degrees by a base
+        swing with a 2 kg box on the cups on 2026-09-24."""
+        raise NotImplementedError
+
+    def prim_attrs(self, prim_path: str) -> dict[str, Any]:
+        """Every authored attribute of the prim at ``prim_path`` as
+        ``{name: value}`` plus its children's names, for reading what a
+        joint's drive, limits and physics really are on the stage. The
+        articulation controller's gain table is not the drive: on 2026-09-24
+        wrist 3's controller gains were raised fourfold with no change in
+        its motion."""
         raise NotImplementedError
 
     def drive_gains(self) -> dict[str, Any]:
@@ -158,6 +305,36 @@ class ArmHandle:
         mock via its interpolation clock. The model never polls wall clock."""
         raise NotImplementedError
 
+    def wait_until_within(self, timeout_s: float, tolerance_rad: float) -> SettleOutcome:
+        """For a caller passing through a point rather than stopping at it:
+        REACHED on the first physics step at which every named joint is within
+        ``tolerance_rad`` of the last commanded targets, with no window of
+        steps held. STALLED and TIMED_OUT follow the same rules as
+        ``wait_for_settle``."""
+        raise NotImplementedError
+
+    def follow_path(
+        self,
+        points: list[list[float]],
+        max_vel_rad_s: float | None,
+        tolerance_rad: float,
+        point_timeout_s: float,
+    ) -> tuple[SettleOutcome, int]:
+        """Drive the named joints through ``points`` in order, blocking the
+        calling (non-sim) thread. A point counts as passed on the first physics
+        step every joint is within ``tolerance_rad`` of it, and on that step the
+        next point becomes the drive target, so the sim thread is not crossed
+        between points.
+
+        Returns ``(REACHED, len(points))`` once the last point is passed.
+        Otherwise it returns ``(STALLED or TIMED_OUT, i)`` at the first point
+        ``i`` not passed, by the same rules as ``wait_until_within`` with
+        ``point_timeout_s`` of sim time per point, and the drive target stays at
+        ``points[i]``. A ``stop()`` during the follow ends it with
+        ``(REACHED, i)`` for the point in flight, with the drive target held
+        where the arm was. An empty list returns ``(REACHED, 0)``."""
+        raise NotImplementedError
+
     def stop(self) -> None:
         raise NotImplementedError
 
@@ -197,6 +374,7 @@ class IsaacArmHandle(ArmHandle):
         joint_names: Sequence[str] | None = None,
         base_correction: Quat = (1.0, 0.0, 0.0, 0.0),
         prim_path: str = "",
+        drive_gains: Mapping[str, Mapping[str, float]] | None = None,
     ) -> None:
         self._sim = sim
         self._art = articulation
@@ -204,6 +382,12 @@ class IsaacArmHandle(ArmHandle):
         self._joint_names = joint_names
         self._base_correction: Quat = base_correction
         self._prim_path = prim_path
+        # per-joint kp/kd overrides, applied whenever the articulation's
+        # gains are (re)read so a reset keeps them
+        self._drive_gain_overrides: dict[str, dict[str, float]] = {
+            str(name): {k: float(v) for k, v in spec.items()}
+            for name, spec in (drive_gains or {}).items()
+        }
         self._dof_names: list[str] = list(articulation.dof_names)
         LOGGER.info(
             "arm %r articulation dof_names: %s",
@@ -254,15 +438,132 @@ class IsaacArmHandle(ArmHandle):
                 if set_iterations is not None:
                     set_iterations(self._solver_iterations)
             self._gains = self._art.get_articulation_controller().get_gains()
+            if self._drive_gain_overrides:
+                self._apply_drive_gains(self._drive_gain_overrides)
+
+    def _apply_drive_gains(self, gains: Mapping[str, Mapping[str, float]]) -> dict[str, Any]:
+        """Sim-thread body of set_drive_gains: the controller's current gains
+        with the named joints' kp/kd replaced, written back and snapshotted
+        so post_reset restores the overridden values rather than the
+        asset's."""
+        controller = self._art.get_articulation_controller()
+        kps, kds = controller.get_gains()
+        kps = np.array(kps, dtype=float).copy()
+        kds = np.array(kds, dtype=float).copy()
+        for name, spec in gains.items():
+            if name not in self._dof_names:
+                raise ValueError(
+                    f"no joint {name!r} in this articulation; joints are {self._dof_names}"
+                )
+            index = self._dof_names.index(name)
+            if "kp" in spec:
+                kps[index] = float(spec["kp"])
+            if "kd" in spec:
+                kds[index] = float(spec["kd"])
+            self._drive_gain_overrides.setdefault(str(name), {}).update(
+                {k: float(v) for k, v in spec.items()}
+            )
+        controller.set_gains(kps=kps, kds=kds)
+        self._gains = (kps, kds)
+        # armature: extra rotor inertia on the joint, the standard remedy for
+        # an articulation drive that goes soft under a jointed payload
+        view = getattr(self._art, "_articulation_view", None)
+        armatures = {name: spec["armature"] for name, spec in gains.items() if "armature" in spec}
+        if armatures:
+            get_arm = getattr(view, "get_armatures", None) if view is not None else None
+            set_arm = getattr(view, "set_armatures", None) if view is not None else None
+            if get_arm is None or set_arm is None:
+                raise ValueError("this articulation view cannot set joint armature")
+            current = get_arm(joint_indices=self._joint_indices)
+            if len(getattr(current, "shape", ())) == 2:
+                current = current[0]
+            values = np.array(current, dtype=float).copy()
+            for name, armature in armatures.items():
+                values[self._dof_names.index(name)] = float(armature)
+            set_arm(values, joint_indices=self._joint_indices)
+        table: dict[str, Any] = {
+            "dof_names": list(self._dof_names),
+            "kp": [float(value) for value in kps],
+            "kd": [float(value) for value in kds],
+        }
+        get_arm = getattr(view, "get_armatures", None) if view is not None else None
+        if get_arm is not None:
+            try:
+                current = get_arm(joint_indices=self._joint_indices)
+                if len(getattr(current, "shape", ())) == 2:
+                    current = current[0]
+                table["armature"] = [float(value) for value in current]
+            except Exception:  # noqa: BLE001 - the readback is a courtesy
+                pass
+        return table
+
+    def set_drive_gains(self, gains: Mapping[str, Mapping[str, float]]) -> dict[str, Any]:
+        return self._sim.run(lambda: self._apply_drive_gains(gains))
+
+    def prim_attrs(self, prim_path: str) -> dict[str, Any]:
+        def _read() -> dict[str, Any]:
+            import omni.usd
+
+            stage = omni.usd.get_context().get_stage()
+            prim = stage.GetPrimAtPath(prim_path)
+            if not prim or not prim.IsValid():
+                raise PrimNotFoundError(f"no prim at {prim_path!r}")
+            attrs: dict[str, Any] = {}
+            for attr in prim.GetAttributes():
+                if not attr.HasAuthoredValue() and not attr.HasValue():
+                    continue
+                try:
+                    value = attr.Get()
+                except Exception:  # noqa: BLE001 - an unreadable attribute is reported as such
+                    value = "<unreadable>"
+                if hasattr(value, "__iter__") and not isinstance(value, str | bytes):
+                    try:
+                        value = [float(v) if isinstance(v, int | float) else str(v) for v in value]
+                    except Exception:  # noqa: BLE001
+                        value = str(value)
+                elif not isinstance(value, int | float | str | bool) and value is not None:
+                    value = str(value)
+                attrs[attr.GetName()] = value
+            return {
+                "prim_path": prim_path,
+                "type": prim.GetTypeName(),
+                "schemas": [str(schema) for schema in prim.GetAppliedSchemas()],
+                "attrs": attrs,
+                "children": [child.GetName() for child in prim.GetChildren()],
+            }
+
+        return self._sim.run(_read)
 
     def drive_gains(self) -> dict[str, Any]:
         def _read() -> dict[str, Any]:
             kps, kds = self._art.get_articulation_controller().get_gains()
-            return {
+            table: dict[str, Any] = {
                 "dof_names": list(self._dof_names),
                 "kp": [float(value) for value in kps],
                 "kd": [float(value) for value in kds],
             }
+            # the drive's force cap, which a stiffness override cannot lift:
+            # a saturated drive is back-driven the same at any kp
+            view = getattr(self._art, "_articulation_view", None)
+            get_max_efforts = getattr(view, "get_max_efforts", None) if view is not None else None
+            if get_max_efforts is not None:
+                try:
+                    efforts = get_max_efforts(joint_indices=self._joint_indices)
+                    if len(getattr(efforts, "shape", ())) == 2:
+                        efforts = efforts[0]
+                    table["max_effort"] = [float(value) for value in efforts]
+                except Exception as error:  # noqa: BLE001 - a diagnostic that cannot read stays absent
+                    LOGGER.info("arm %r max efforts unreadable: %s", self._art.name, error)
+            get_armatures = getattr(view, "get_armatures", None) if view is not None else None
+            if get_armatures is not None:
+                try:
+                    armatures = get_armatures(joint_indices=self._joint_indices)
+                    if len(getattr(armatures, "shape", ())) == 2:
+                        armatures = armatures[0]
+                    table["armature"] = [float(value) for value in armatures]
+                except Exception as error:  # noqa: BLE001 - same courtesy as max_effort
+                    LOGGER.info("arm %r armatures unreadable: %s", self._art.name, error)
+            return table
 
         return self._sim.run(_read)
 
@@ -342,6 +643,11 @@ class IsaacArmHandle(ArmHandle):
     ) -> None:
         """Sim-thread body shared by set_joint_targets and stop's hold-in-place."""
         self._apply_velocity_cap(max_vel_rad_s)
+        self._write_targets_on_sim_thread(positions)
+
+    def _write_targets_on_sim_thread(self, positions: list[float]) -> None:
+        """Command the named joints to ``positions`` and record them as the
+        last targets, leaving the velocity cap as it is."""
         action = self._sim._isaac.ArticulationAction(
             joint_positions=np.array(positions, dtype=float),
             joint_indices=self._joint_indices,
@@ -400,6 +706,23 @@ class IsaacArmHandle(ArmHandle):
     def wait_for_settle(
         self, timeout_s: float, tolerance_rad: float = SETTLE_TOL_RAD
     ) -> SettleOutcome:
+        return self._wait_within_window(timeout_s, tolerance_rad, SETTLE_WINDOW_STEPS)
+
+    def wait_until_within(self, timeout_s: float, tolerance_rad: float) -> SettleOutcome:
+        return self._wait_within_window(timeout_s, tolerance_rad, 1)
+
+    def _judge_step(
+        self, tracker: _StepTracker, targets: Sequence[float], step_size: float
+    ) -> SettleOutcome | None:
+        """One physics step of the named joints' state against ``targets``,
+        judged by ``tracker``. Sim thread only."""
+        velocities = self._art.get_joint_velocities(joint_indices=self._joint_indices)
+        positions = self._art.get_joint_positions(joint_indices=self._joint_indices)
+        return tracker.step(positions, velocities, targets, step_size)
+
+    def _wait_within_window(
+        self, timeout_s: float, tolerance_rad: float, window_steps: int
+    ) -> SettleOutcome:
         # A physics-step callback evaluates the settle predicate on
         # the sim thread every step and signals a threading.Event. This
         # (caller) thread only waits on it, so no wall-clock polling.
@@ -407,69 +730,20 @@ class IsaacArmHandle(ArmHandle):
             return SettleOutcome.REACHED
 
         targets = list(self._targets)
-        joint_indices = self._joint_indices
         event = threading.Event()
         outcome: list[SettleOutcome] = []
-        counters: dict[str, float] = {
-            "within": 0,
-            "still_off_target": 0,
-            "sim_time": 0.0,
-            "max_speed": 0.0,
-            "best_error": math.inf,
-            "no_progress": 0,
-        }
+        tracker = _StepTracker(
+            getattr(self._art, "name", ""), timeout_s, tolerance_rad, window_steps
+        )
         settle_state: dict[str, Any] = {"event": event, "outcome": outcome}
 
         def _on_step(step_size: float) -> None:
-            # sim thread only: touch the counters/Event, never self._sim.run.
+            # sim thread only: touch the tracker/Event, never self._sim.run.
             if event.is_set():
                 return
-            velocities = self._art.get_joint_velocities(joint_indices=joint_indices)
-            max_speed = max((abs(float(v)) for v in velocities), default=0.0)
-            counters["max_speed"] = max(counters["max_speed"], max_speed)
-            is_still = max_speed <= VEL_EPS_RAD_S
-            positions = self._art.get_joint_positions(joint_indices=joint_indices)
-            errors = [abs(float(p) - t) for p, t in zip(positions, targets, strict=True)]
-            worst_error = max(errors, default=0.0)
-            is_within = worst_error <= tolerance_rad
-            # REACHED is a position criterion held over the window - holding
-            # within tolerance for SETTLE_WINDOW_STEPS steps IS "settled".
-            # Velocity only decides stalls: PhysX never reads exactly still.
-            counters["within"] = counters["within"] + 1 if is_within else 0
-            counters["still_off_target"] = (
-                counters["still_off_target"] + 1 if (is_still and not is_within) else 0
-            )
-            # no-progress stall: the worst error has not improved for a while
-            if worst_error < counters["best_error"] - STALL_PROGRESS_EPS_RAD:
-                counters["best_error"] = worst_error
-                counters["no_progress"] = 0
-            else:
-                counters["no_progress"] += 1
-
-            if counters["within"] >= SETTLE_WINDOW_STEPS:
-                outcome.append(SettleOutcome.REACHED)
-                event.set()
-                return
-            if counters["still_off_target"] >= SETTLE_WINDOW_STEPS or (
-                not is_within and counters["no_progress"] >= STALL_NO_PROGRESS_STEPS
-            ):
-                outcome.append(SettleOutcome.STALLED)
-                event.set()
-                return
-
-            counters["sim_time"] += step_size
-            if counters["sim_time"] >= timeout_s:
-                LOGGER.warning(
-                    "arm %r settle timed out after %.2fs sim time: within tolerance=%s, "
-                    "still=%s, max |v| seen=%.4f rad/s (VEL_EPS %.4f)",
-                    getattr(self._art, "name", ""),
-                    counters["sim_time"],
-                    is_within,
-                    is_still,
-                    counters["max_speed"],
-                    VEL_EPS_RAD_S,
-                )
-                outcome.append(SettleOutcome.TIMED_OUT)
+            result = self._judge_step(tracker, targets, step_size)
+            if result is not None:
+                outcome.append(result)
                 event.set()
 
         callback_name = self._settle_callback_name()
@@ -497,20 +771,94 @@ class IsaacArmHandle(ArmHandle):
                     self._active_settle = None
             self._sim.run(_remove)
 
+    def follow_path(
+        self,
+        points: list[list[float]],
+        max_vel_rad_s: float | None,
+        tolerance_rad: float,
+        point_timeout_s: float,
+    ) -> tuple[SettleOutcome, int]:
+        # One sim-thread task sets the first target and registers the
+        # callback. After that the callback steps the target along the path
+        # on the sim thread, so the sim thread is crossed once per path
+        # rather than three times per point.
+        if not points:
+            return SettleOutcome.REACHED, 0
+
+        path = [list(point) for point in points]
+        event = threading.Event()
+        outcome: list[SettleOutcome] = []
+        # the index of the point in flight, and len(path) once the last is passed
+        progress = {"index": 0}
+        tracker = _StepTracker(getattr(self._art, "name", ""), point_timeout_s, tolerance_rad, 1)
+        settle_state: dict[str, Any] = {"event": event, "outcome": outcome}
+
+        def _on_step(step_size: float) -> None:
+            # sim thread only: touch the tracker/Event, never self._sim.run.
+            if event.is_set():
+                return
+            result = self._judge_step(tracker, path[progress["index"]], step_size)
+            if result is None:
+                return
+            if result is not SettleOutcome.REACHED:
+                outcome.append(result)
+                event.set()
+                return
+            progress["index"] += 1
+            if progress["index"] == len(path):
+                outcome.append(SettleOutcome.REACHED)
+                event.set()
+                return
+            self._write_targets_on_sim_thread(path[progress["index"]])
+            tracker.reset()
+
+        callback_name = self._settle_callback_name()
+
+        def _start() -> None:
+            self._apply_joint_targets_on_sim_thread(path[0], max_vel_rad_s)
+            self._sim.world.add_physics_callback(callback_name, _on_step)
+
+        def _remove() -> None:
+            if self._sim.world.physics_callback_exists(callback_name):
+                self._sim.world.remove_physics_callback(callback_name)
+
+        with self._active_settle_lock:
+            self._active_settle = settle_state
+        self._sim.run(_start)
+        try:
+            # a wall-clock guard per point rather than per path: a point that
+            # takes this long without the sim stepping onward means a paused
+            # sim, and the path as a whole may legitimately take far longer.
+            wall_clock_guard_s = point_timeout_s * SETTLE_GUARD_MULTIPLE + SETTLE_GUARD_SLACK_S
+            seen_index = progress["index"]
+            while not event.wait(timeout=wall_clock_guard_s):
+                if progress["index"] == seen_index:
+                    break
+                seen_index = progress["index"]
+        finally:
+            with self._active_settle_lock:
+                if self._active_settle is settle_state:
+                    self._active_settle = None
+            # after this no callback can run, so outcome and progress are final
+            self._sim.run(_remove)
+        return (outcome[0] if outcome else SettleOutcome.TIMED_OUT), progress["index"]
+
     def stop(self) -> None:
         def _hold() -> None:
             positions = self._art.get_joint_positions(joint_indices=self._joint_indices)
             current = [float(v) for v in positions]
             self._apply_joint_targets_on_sim_thread(current, None)
+            # The new target IS the current position, so any in-flight wait
+            # should read as having reached it, not stalled. This happens in
+            # the same sim-thread task as the hold, so no physics step between
+            # the two can advance a followed path to its next point.
+            with self._active_settle_lock:
+                active = self._active_settle
+                if active is not None and not active["event"].is_set():
+                    active["outcome"].append(SettleOutcome.REACHED)
+                    active["event"].set()
 
         self._sim.run(_hold, allow_during_initialization=True)
-        # the new target IS the current position, so any in-flight
-        # wait_for_settle should read as having reached it, not stalled.
-        with self._active_settle_lock:
-            active = self._active_settle
-            if active is not None and not active["event"].is_set():
-                active["outcome"].append(SettleOutcome.REACHED)
-                active["event"].set()
 
     def get_end_pose(self):
         if self._ee is None:
@@ -560,6 +908,10 @@ class IsaacArmHandle(ArmHandle):
             if self._gains is not None:
                 kps, kds = self._gains
                 self._art.get_articulation_controller().set_gains(kps=kps, kds=kds)
+            # armature lives on the view, which the reset rebuilds from the
+            # asset's zeros; the overrides put it back with the gains
+            if self._drive_gain_overrides:
+                self._apply_drive_gains(self._drive_gain_overrides)
             if self._targets is not None:
                 positions = np.array(self._targets, dtype=float)
                 # State write BEFORE the hold action: the reset left the arm
@@ -637,6 +989,9 @@ class MockArmHandle(ArmHandle):
         self._start = [0.0] * dof
         self._target = [0.0] * dof
         self._t0 = time.monotonic()
+        # how many times stop() has run, so a follow_path in flight can tell it
+        # was stopped
+        self._stop_count = 0
         self.spawn_position = to_vec3(attrs.get("position"))
         self.spawn_orientation = spawn_orientation(attrs, meta)
         correction = meta.get("base_frame_correction")
@@ -659,6 +1014,27 @@ class MockArmHandle(ArmHandle):
         return list(self._dof_names)
 
     # a mock articulation has no drives, so it reports the shape of the answer
+    def prim_attrs(self, prim_path: str) -> dict[str, Any]:
+        """The mock has no stage: an empty attribute set for any path."""
+        return {"prim_path": prim_path, "type": "", "schemas": [], "attrs": {}, "children": []}
+
+    def set_drive_gains(self, gains: Mapping[str, Mapping[str, float]]) -> dict[str, Any]:
+        """The mock has no drives: the overrides are kept and reported back,
+        None where a joint was never given a value."""
+        names = list(self._dof_names)
+        for name in gains:
+            if name not in names:
+                raise ValueError(f"no joint {name!r} in this articulation; joints are {names}")
+        overrides = getattr(self, "_drive_gain_overrides", {})
+        for name, spec in gains.items():
+            overrides.setdefault(str(name), {}).update({k: float(v) for k, v in spec.items()})
+        self._drive_gain_overrides = overrides
+        return {
+            "dof_names": names,
+            "kp": [overrides.get(n, {}).get("kp") for n in names],
+            "kd": [overrides.get(n, {}).get("kd") for n in names],
+        }
+
     # with none of the numbers. A caller checking the verb's wiring gets a
     # reply; one reading gains gets Nones rather than an invented stiffness.
     def drive_gains(self) -> dict[str, Any]:
@@ -789,12 +1165,50 @@ class MockArmHandle(ArmHandle):
                 return SettleOutcome.TIMED_OUT
             time.sleep(self.STEP_S)
 
+    def wait_until_within(self, timeout_s: float, tolerance_rad: float) -> SettleOutcome:
+        deadline = time.monotonic() + timeout_s
+        while True:
+            with self._lock:
+                now = time.monotonic()
+                pos = self._positions_at(now)
+                vel = self._velocities_at(now)
+                target = list(self._target)
+            selected = self._selected()
+            if all(abs(pos[i] - target[i]) <= tolerance_rad for i in selected):
+                return SettleOutcome.REACHED
+            if all(abs(vel[i]) <= VEL_EPS_RAD_S for i in selected):
+                return SettleOutcome.STALLED
+            if now >= deadline:
+                return SettleOutcome.TIMED_OUT
+            time.sleep(self.STEP_S)
+
+    def follow_path(
+        self,
+        points: list[list[float]],
+        max_vel_rad_s: float | None,
+        tolerance_rad: float,
+        point_timeout_s: float,
+    ) -> tuple[SettleOutcome, int]:
+        with self._lock:
+            stops_at_start = self._stop_count
+        for index, point in enumerate(points):
+            self.set_joint_targets(point, max_vel_rad_s)
+            outcome = self.wait_until_within(point_timeout_s, tolerance_rad)
+            if outcome is not SettleOutcome.REACHED:
+                return outcome, index
+            with self._lock:
+                was_stopped = self._stop_count != stops_at_start
+            if was_stopped:
+                return SettleOutcome.REACHED, index
+        return SettleOutcome.REACHED, len(points)
+
     def stop(self) -> None:
         with self._lock:
             now = time.monotonic()
             self._start = self._positions_at(now)
             self._target = list(self._start)
             self._t0 = now
+            self._stop_count += 1
 
     def _ee_world_pose(self) -> tuple[Vec3, Quat]:
         """The mock's simulated Isaac root is (spawn_position,

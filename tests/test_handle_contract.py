@@ -118,6 +118,29 @@ def test_arm_set_joint_targets_reaches_and_settles(arm_and_gripper):
     assert arm.is_moving() is False
 
 
+def test_arm_wait_until_within_reaches_after_set_joint_targets(arm_and_gripper):
+    _backend, arm, _gripper = arm_and_gripper
+    arm.set_joint_targets([math.radians(5.0)] * len(UR_JOINT_NAMES))
+
+    assert arm.wait_until_within(ARM_SETTLE_TIMEOUT_S, math.radians(2.0)) == SettleOutcome.REACHED
+
+
+def test_arm_follow_path_over_two_points_reaches_both(arm_and_gripper):
+    backend_name, arm, _gripper = arm_and_gripper
+    count = len(UR_JOINT_NAMES)
+    points = [[math.radians(5.0)] * count, [math.radians(10.0)] * count]
+
+    outcome = arm.follow_path(points, None, math.radians(2.0), ARM_SETTLE_TIMEOUT_S)
+
+    assert outcome == (SettleOutcome.REACHED, 2)
+    # the second point was the last target the follow left, so settling on it
+    # lands the arm there
+    assert arm.wait_for_settle(ARM_SETTLE_TIMEOUT_S) == SettleOutcome.REACHED
+    assert arm.get_joint_positions() == pytest.approx(
+        points[1], abs=ARM_TOLERANCE_ABS[backend_name]
+    )
+
+
 def test_arm_stop_then_not_moving(arm_and_gripper):
     _backend, arm, _gripper = arm_and_gripper
     arm.stop()

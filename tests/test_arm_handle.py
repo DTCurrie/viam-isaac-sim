@@ -9,6 +9,7 @@ from viam.utils import dict_to_struct
 from isaac_module.handles.arm import (
     SETTLE_WINDOW_STEPS,
     STALL_NO_PROGRESS_STEPS,
+    STALL_STILL_STEPS,
     IsaacArmHandle,
     SettleOutcome,
     resolve_joint_indices,
@@ -153,6 +154,16 @@ class FakeArticulationView:
         self.max_velocities = [authored_max] * dof_count
         self.set_calls: list[tuple[list[float], list[int] | None]] = []
         self.get_calls: list[list[int] | None] = []
+        self.armatures = [0.0] * dof_count
+
+    def get_armatures(self, joint_indices=None):
+        indices = range(len(self.armatures)) if joint_indices is None else joint_indices
+        return [self.armatures[i] for i in indices]
+
+    def set_armatures(self, values, joint_indices=None) -> None:
+        indices = range(len(self.armatures)) if joint_indices is None else joint_indices
+        for i, v in zip(indices, values, strict=True):
+            self.armatures[i] = float(v)
 
     def set_max_joint_velocities(self, velocities, joint_indices=None) -> None:
         indices = range(len(self.max_velocities)) if joint_indices is None else joint_indices
@@ -309,7 +320,8 @@ def test_isaac_settle_reaches_after_window_not_before():
 
     result: dict[str, SettleOutcome] = {}
     thread = threading.Thread(
-        target=lambda: result.__setitem__("outcome", handle.wait_for_settle(timeout_s=5.0))
+        target=lambda: result.__setitem__("outcome", handle.wait_for_settle(timeout_s=5.0)),
+        daemon=True,  # a settle thread that outlives its join must not hold the interpreter open
     )
     thread.start()
     assert _wait_until(lambda: sim.world.physics_callback_exists(callback_name))
@@ -326,6 +338,62 @@ def test_isaac_settle_reaches_after_window_not_before():
     assert not sim.world.physics_callback_exists(callback_name)
 
 
+def test_isaac_wait_until_within_reaches_on_the_first_step_inside_tolerance():
+    handle, art, sim = _make_handle()
+    handle._targets = [0.0, 0.0]
+    art.positions = [0.01, -0.01]
+    art.velocities = [0.0, 0.0]
+    callback_name = handle._settle_callback_name()
+
+    result: dict[str, SettleOutcome] = {}
+    thread = threading.Thread(
+        target=lambda: result.__setitem__("outcome", handle.wait_until_within(5.0, 0.05)),
+        daemon=True,
+    )
+    thread.start()
+    assert _wait_until(lambda: sim.world.physics_callback_exists(callback_name))
+    sim.world._callbacks[callback_name](FAKE_PHYSICS_STEP_S)
+    thread.join(timeout=2.0)
+
+    # wait_for_settle on this same input needs SETTLE_WINDOW_STEPS steps
+    assert result["outcome"] == SettleOutcome.REACHED
+    assert not sim.world.physics_callback_exists(callback_name)
+
+
+def test_isaac_wait_until_within_stalls_when_still_and_off_target():
+    handle, art, sim = _make_handle()
+    handle._targets = [1.0, 1.0]
+    art.positions = [0.0, 0.0]
+    art.velocities = [0.0, 0.0]
+    callback_name = handle._settle_callback_name()
+
+    result: dict[str, SettleOutcome] = {}
+    thread = threading.Thread(
+        target=lambda: result.__setitem__("outcome", handle.wait_until_within(5.0, 0.05)),
+        daemon=True,
+    )
+    thread.start()
+    assert _wait_until(lambda: sim.world.physics_callback_exists(callback_name))
+    callback = sim.world._callbacks[callback_name]
+    for _ in range(STALL_STILL_STEPS - 1):
+        callback(FAKE_PHYSICS_STEP_S)
+        assert "outcome" not in result
+    callback(FAKE_PHYSICS_STEP_S)
+    thread.join(timeout=2.0)
+
+    assert result["outcome"] == SettleOutcome.STALLED
+
+
+def test_mock_wait_until_within_reaches_while_the_arm_is_still_moving():
+    from isaac_module.sim_manager import MockArmHandle, SettleOutcome
+
+    handle = MockArmHandle("within-moving-arm", {"asset": "ur5e"})
+    handle.set_joint_targets([1.0] + [0.0] * (len(handle.get_joint_positions()) - 1))
+    # far from the target and moving: a tolerance wider than the whole move is met at once
+    assert handle.wait_until_within(5.0, 2.0) == SettleOutcome.REACHED
+    assert handle.is_moving() is True
+
+
 def test_isaac_settle_stalls_when_still_but_off_target():
     handle, art, sim = _make_handle()
     handle._targets = [1.0, 1.0]
@@ -335,14 +403,19 @@ def test_isaac_settle_stalls_when_still_but_off_target():
 
     result: dict[str, SettleOutcome] = {}
     thread = threading.Thread(
-        target=lambda: result.__setitem__("outcome", handle.wait_for_settle(timeout_s=5.0))
+        target=lambda: result.__setitem__("outcome", handle.wait_for_settle(timeout_s=5.0)),
+        daemon=True,  # a settle thread that outlives its join must not hold the interpreter open
     )
     thread.start()
     assert _wait_until(lambda: sim.world.physics_callback_exists(callback_name))
     callback = sim.world._callbacks[callback_name]
 
-    for _ in range(SETTLE_WINDOW_STEPS):
+    # a joint reversing direction reads still for a few steps; only a run of
+    # STALL_STILL_STEPS is a pinned arm
+    for _ in range(STALL_STILL_STEPS - 1):
         callback(FAKE_PHYSICS_STEP_S)
+        assert "outcome" not in result
+    callback(FAKE_PHYSICS_STEP_S)
     thread.join(timeout=2.0)
 
     assert result["outcome"] == SettleOutcome.STALLED
@@ -358,7 +431,8 @@ def test_isaac_settle_times_out_while_still_converging():
 
     result: dict[str, SettleOutcome] = {}
     thread = threading.Thread(
-        target=lambda: result.__setitem__("outcome", handle.wait_for_settle(timeout_s=0.05))
+        target=lambda: result.__setitem__("outcome", handle.wait_for_settle(timeout_s=0.05)),
+        daemon=True,  # a settle thread that outlives its join must not hold the interpreter open
     )
     thread.start()
     assert _wait_until(lambda: sim.world.physics_callback_exists(callback_name))
@@ -372,6 +446,227 @@ def test_isaac_settle_times_out_while_still_converging():
 
     assert result["outcome"] == SettleOutcome.TIMED_OUT
     assert not sim.world.physics_callback_exists(callback_name)
+
+
+def _hold_commands_without_moving(art: FakeArticulation) -> None:
+    """Make apply_action record the command and leave the joints wherever the
+    test put them, so a test decides when a point is reached."""
+    art.apply_action = art.applied_actions.append
+
+
+def _start_follow(
+    handle: IsaacArmHandle,
+    sim: FakeSim,
+    points: list[list[float]],
+    max_vel_rad_s: float | None = None,
+    tolerance_rad: float = 0.05,
+    point_timeout_s: float = 5.0,
+):
+    """Run follow_path on a helper thread, since it blocks until the path
+    ends. Returns the thread, a dict its (outcome, index) result lands in, and
+    the physics callback it registered."""
+    result: dict[str, tuple[SettleOutcome, int]] = {}
+    thread = threading.Thread(
+        target=lambda: result.__setitem__(
+            "result", handle.follow_path(points, max_vel_rad_s, tolerance_rad, point_timeout_s)
+        ),
+        daemon=True,  # a follow thread that outlives its join must not hold the interpreter open
+    )
+    thread.start()
+    callback_name = handle._settle_callback_name()
+    assert _wait_until(lambda: sim.world.physics_callback_exists(callback_name))
+    return thread, result, sim.world._callbacks[callback_name]
+
+
+def test_isaac_follow_path_advances_on_the_first_in_tolerance_step_and_reaches_the_end():
+    handle, art, sim = _make_handle()
+    _hold_commands_without_moving(art)
+    art.positions = [0.0, 0.0]
+    art.velocities = [0.5, 0.5]  # moving, so nothing here can read as a stall
+    points = [[0.5, 0.5], [1.0, 1.0], [1.5, 1.5]]
+    callback_name = handle._settle_callback_name()
+
+    thread, result, callback = _start_follow(handle, sim, points, max_vel_rad_s=1.0)
+
+    # the one task that registered the callback also capped the velocity and set the first target
+    assert art._articulation_view.set_calls == [([1.0, 1.0], None)]
+    assert handle._targets == points[0]
+
+    callback(FAKE_PHYSICS_STEP_S)  # still far from the first point
+    assert handle._targets == points[0]
+    art.positions = [0.49, 0.52]  # inside the 0.05 tolerance, with no window of steps held
+    callback(FAKE_PHYSICS_STEP_S)
+    assert handle._targets == points[1]
+    art.positions = [1.0, 1.0]
+    callback(FAKE_PHYSICS_STEP_S)
+    assert handle._targets == points[2]
+    assert "result" not in result
+    art.positions = [1.5, 1.5]
+    callback(FAKE_PHYSICS_STEP_S)
+    thread.join(timeout=2.0)
+
+    assert result["result"] == (SettleOutcome.REACHED, 3)
+    assert [action.joint_positions.tolist() for action in art.applied_actions] == points
+    # the cap was applied once for the path, not once per point
+    assert art._articulation_view.set_calls == [([1.0, 1.0], None)]
+    assert not sim.world.physics_callback_exists(callback_name)
+
+
+def test_isaac_follow_path_stalls_at_a_stuck_point_and_leaves_the_target_there():
+    handle, art, sim = _make_handle()
+    _hold_commands_without_moving(art)
+    art.positions = [0.5, 0.5]  # at the first point and never gets any further
+    art.velocities = [0.0, 0.0]
+    points = [[0.5, 0.5], [1.0, 1.0], [1.5, 1.5]]
+    callback_name = handle._settle_callback_name()
+
+    thread, result, callback = _start_follow(handle, sim, points)
+    callback(FAKE_PHYSICS_STEP_S)  # passes the first point
+    assert handle._targets == points[1]
+    for _ in range(STALL_STILL_STEPS - 1):
+        callback(FAKE_PHYSICS_STEP_S)
+        assert "result" not in result
+    callback(FAKE_PHYSICS_STEP_S)
+    thread.join(timeout=2.0)
+
+    assert result["result"] == (SettleOutcome.STALLED, 1)
+    assert handle._targets == points[1]
+    assert not sim.world.physics_callback_exists(callback_name)
+
+
+def test_isaac_follow_path_gives_every_point_its_own_sim_time_budget():
+    handle, art, sim = _make_handle()
+    _hold_commands_without_moving(art)
+    art.positions = [0.0, 0.0]
+    art.velocities = [0.5, 0.5]
+    points = [[0.5, 0.5], [1.0, 1.0]]
+
+    thread, result, callback = _start_follow(handle, sim, points, point_timeout_s=0.05)
+    for _ in range(3):  # 0.03 s of the first point's 0.05 s
+        callback(FAKE_PHYSICS_STEP_S)
+    art.positions = [0.5, 0.5]
+    callback(FAKE_PHYSICS_STEP_S)  # passes the first point
+    assert handle._targets == points[1]
+    # a budget carried over from the first point would be spent after two more steps
+    art.positions = [0.5, 0.5]
+    for _ in range(3):
+        callback(FAKE_PHYSICS_STEP_S)
+        assert "result" not in result
+    for _ in range(4):
+        callback(FAKE_PHYSICS_STEP_S)
+    thread.join(timeout=2.0)
+
+    assert result["result"] == (SettleOutcome.TIMED_OUT, 1)
+    assert handle._targets == points[1]
+
+
+def test_isaac_stop_during_a_follow_ends_it_in_the_task_that_holds_and_freezes_the_target():
+    handle, art, sim = _make_handle()
+    _hold_commands_without_moving(art)
+    art.positions = [0.5, 0.5]
+    art.velocities = [0.5, 0.5]
+    points = [[0.5, 0.5], [1.0, 1.0], [1.5, 1.5]]
+
+    thread, result, callback = _start_follow(handle, sim, points)
+    callback(FAKE_PHYSICS_STEP_S)  # passes the first point, so the second is in flight
+    assert handle._targets == points[1]
+
+    follow_ended = handle._active_settle["event"]
+    ended_after_each_task: list[bool] = []
+    run = sim.run
+
+    def observe(fn, timeout: float = 30.0, *, allow_during_initialization: bool = False):
+        value = run(fn, timeout, allow_during_initialization=allow_during_initialization)
+        if allow_during_initialization:
+            ended_after_each_task.append(follow_ended.is_set())
+        return value
+
+    sim.run = observe
+    handle.stop()
+    thread.join(timeout=2.0)
+
+    # the follow was over by the time the one task that wrote the hold returned
+    assert ended_after_each_task == [True]
+    assert result["result"] == (SettleOutcome.REACHED, 1)
+    held = list(handle._targets)
+    assert held == pytest.approx([0.5, 0.5])
+    actions_after_hold = len(art.applied_actions)
+
+    # the arm now sits inside the second point's tolerance, which would have
+    # advanced the target to the third had the follow gone on
+    art.positions = [1.0, 1.0]
+    for _ in range(SETTLE_WINDOW_STEPS + 2):
+        callback(FAKE_PHYSICS_STEP_S)
+    assert handle._targets == held
+    assert len(art.applied_actions) == actions_after_hold
+
+
+def test_isaac_follow_path_over_no_points_reaches_without_touching_the_sim():
+    handle, _art, sim = _make_handle()
+
+    assert handle.follow_path([], 1.0, 0.05, 5.0) == (SettleOutcome.REACHED, 0)
+
+    assert sim.run_calls == []
+    assert handle._targets is None
+
+
+def test_isaac_release_during_a_follow_removes_the_callback():
+    handle, art, sim = _make_handle()
+    _hold_commands_without_moving(art)
+    callback_name = handle._settle_callback_name()
+
+    thread, _result, _callback = _start_follow(handle, sim, [[0.5, 0.5], [1.0, 1.0]])
+    handle.release()
+
+    assert not sim.world.physics_callback_exists(callback_name)
+    handle.stop()  # ends the follow so its thread does not wait out the wall-clock guard
+    thread.join(timeout=2.0)
+
+
+def test_mock_follow_path_returns_the_first_unreached_index():
+    from isaac_module.sim_manager import MockArmHandle, SettleOutcome
+
+    # a stalled mock closes half of every move and stops
+    handle = MockArmHandle("follow-stalls-arm", {"asset": "ur5e", "mock_stall_fraction": 0.5})
+    rest = [0.0] * (len(handle.get_joint_positions()) - 1)
+
+    # the first point is reached to within 0.06, the second stalls 0.075 short
+    outcome = handle.follow_path([[0.1, *rest], [0.2, *rest], [0.3, *rest]], None, 0.06, 5.0)
+
+    assert outcome == (SettleOutcome.STALLED, 1)
+    # it stopped halfway from wherever the first point left it, which is
+    # within 0.06 of 0.1, to the second target
+    assert handle.get_joint_positions()[0] == pytest.approx(0.125, abs=0.006)
+
+    # a first point out of reach is index 0
+    far = MockArmHandle("follow-stalls-at-once-arm", {"asset": "ur5e", "mock_stall_fraction": 0.5})
+    assert far.follow_path([[1.0, *rest], [2.0, *rest]], None, 0.06, 5.0) == (
+        SettleOutcome.STALLED,
+        0,
+    )
+
+
+def test_mock_follow_path_ends_when_stopped_partway():
+    from isaac_module.sim_manager import MockArmHandle, SettleOutcome
+
+    handle = MockArmHandle("follow-stopped-arm", {"asset": "ur5e"})
+    rest = [0.0] * (len(handle.get_joint_positions()) - 1)
+    result: dict[str, tuple[SettleOutcome, int]] = {}
+    thread = threading.Thread(
+        target=lambda: result.__setitem__(
+            "result", handle.follow_path([[0.5, *rest], [1.0, *rest]], 0.2, 0.01, 10.0)
+        ),
+        daemon=True,
+    )
+    thread.start()
+    assert _wait_until(lambda: handle.get_joint_positions()[0] > 0.0)
+
+    handle.stop()
+    thread.join(timeout=2.0)
+
+    assert result["result"] == (SettleOutcome.REACHED, 0)
+    assert handle.is_moving() is False
+    assert handle.get_joint_positions()[0] < 0.5
 
 
 def test_isaac_arm_post_reset_reapplies_solver_gains_and_targets():
@@ -468,7 +763,8 @@ def test_isaac_settle_reaches_despite_residual_velocity_jitter():
 
     result: dict[str, SettleOutcome] = {}
     thread = threading.Thread(
-        target=lambda: result.__setitem__("outcome", handle.wait_for_settle(timeout_s=5.0))
+        target=lambda: result.__setitem__("outcome", handle.wait_for_settle(timeout_s=5.0)),
+        daemon=True,  # a settle thread that outlives its join must not hold the interpreter open
     )
     thread.start()
     assert _wait_until(lambda: sim.world.physics_callback_exists(callback_name))
@@ -502,7 +798,8 @@ def test_isaac_settle_stalls_on_no_progress_even_while_vibrating():
 
     result: dict[str, SettleOutcome] = {}
     thread = threading.Thread(
-        target=lambda: result.__setitem__("outcome", handle.wait_for_settle(timeout_s=30.0))
+        target=lambda: result.__setitem__("outcome", handle.wait_for_settle(timeout_s=30.0)),
+        daemon=True,  # a settle thread that outlives its join must not hold the interpreter open
     )
     thread.start()
     assert _wait_until(lambda: sim.world.physics_callback_exists(callback_name))
@@ -515,3 +812,144 @@ def test_isaac_settle_stalls_on_no_progress_even_while_vibrating():
     thread.join(timeout=2.0)
 
     assert result["outcome"] == SettleOutcome.STALLED
+
+
+def test_isaac_settle_tolerates_a_joint_that_loses_ground_and_recovers():
+    """The shape of every carry stall on 2026-09-24: the base arrives, wrist 3
+    is back-driven forty degrees the wrong way by the swing, then recovers at
+    speed. Measured against the best error ever seen, the recovery reads as no
+    progress for two seconds and the arm is stopped mid-recovery. Measured over
+    a window, a joint closing on its target is making progress."""
+    handle, art, sim = _make_handle()
+    handle._targets = [0.0, 0.0]
+    art.positions = [0.0, 1.2]
+    art.velocities = [0.0, -0.3]  # moving, never still
+    callback_name = handle._settle_callback_name()
+
+    result: dict[str, SettleOutcome] = {}
+    thread = threading.Thread(
+        target=lambda: result.__setitem__("outcome", handle.wait_for_settle(timeout_s=60.0)),
+        daemon=True,  # a settle thread that outlives its join must not hold the interpreter open
+    )
+    thread.start()
+    assert _wait_until(lambda: sim.world.physics_callback_exists(callback_name))
+    callback = sim.world._callbacks[callback_name]
+
+    # 60 steps closing 1.2 -> 0.6, 60 steps losing ground 0.6 -> 1.0, then
+    # closing 0.02 rad a step: the old best of 0.6 is not beaten again until
+    # 80 steps into the recovery, 140 steps after it was set
+    profile = (
+        [1.2 - 0.01 * k for k in range(1, 61)]
+        + [0.6 + (0.4 / 60.0) * k for k in range(1, 61)]
+        + [max(0.0, 1.0 - 0.02 * k) for k in range(1, 61)]
+    )
+    for error in profile:
+        art.positions = [0.0, error]
+        art.velocities = [0.0, -0.3 if error > 0.0 else 0.0]
+        callback(FAKE_PHYSICS_STEP_S)
+        assert "outcome" not in result, f"stopped the arm at error {error:.2f}"
+    # at the target and still: the settle window closes it as REACHED
+    art.velocities = [0.0, 0.0]
+    for _ in range(SETTLE_WINDOW_STEPS):
+        callback(FAKE_PHYSICS_STEP_S)
+    thread.join(timeout=2.0)
+
+    assert result["outcome"] == SettleOutcome.REACHED
+
+
+def test_isaac_settle_does_not_call_a_joint_closing_at_speed_stalled():
+    """The 14:02 stall: the window ending at the bottom of a back-drive reads
+    worse than its start while the joint is already recovering at 20 deg/s.
+    Closing on the target above STALL_CONVERGING_SPEED_RAD_S is progress."""
+    handle, art, sim = _make_handle()
+    handle._targets = [0.0, 0.0]
+    art.positions = [0.0, 1.0]
+    art.velocities = [0.0, -0.35]  # 20 deg/s toward the target
+    callback_name = handle._settle_callback_name()
+
+    result: dict[str, SettleOutcome] = {}
+    thread = threading.Thread(
+        target=lambda: result.__setitem__("outcome", handle.wait_for_settle(timeout_s=60.0)),
+        daemon=True,  # a settle thread that outlives its join must not hold the interpreter open
+    )
+    thread.start()
+    assert _wait_until(lambda: sim.world.physics_callback_exists(callback_name))
+    callback = sim.world._callbacks[callback_name]
+
+    # the window fills while the error gets WORSE (a back-drive), then the
+    # joint closes at 20 deg/s: the window still reads no net progress for a
+    # while, and the speed is what keeps the arm moving
+    for k in range(STALL_NO_PROGRESS_STEPS + 1):
+        art.positions = [0.0, 1.0 + 0.002 * k]
+        callback(FAKE_PHYSICS_STEP_S)
+    worst = art.positions[1]
+    for k in range(1, 40):
+        art.positions = [0.0, worst - 0.006 * k]
+        callback(FAKE_PHYSICS_STEP_S)
+        assert "outcome" not in result, f"stopped a joint closing at speed, step {k}"
+    thread_alive = thread.is_alive()
+    # finish the move so the callback is torn down
+    art.positions = [0.0, 0.0]
+    art.velocities = [0.0, 0.0]
+    for _ in range(SETTLE_WINDOW_STEPS):
+        callback(FAKE_PHYSICS_STEP_S)
+    thread.join(timeout=2.0)
+    assert thread_alive
+    assert result["outcome"] == SettleOutcome.REACHED
+
+
+def test_isaac_set_drive_gains_writes_the_named_joint_and_snapshots_it():
+    """The UR5e asset's wrist_3 drive is a quarter as stiff and almost
+    undamped next to wrist_1's, and was back-driven forty degrees by a base
+    swing with a box on the cups (2026-09-24). An override has to reach the
+    controller AND the snapshot post_reset restores, or a world reset puts
+    the asset's tuning back."""
+    handle, art, _sim = _make_handle(("j0", "j1"))
+    controller = art.get_articulation_controller()
+    kps_before, _kds_before = controller.get_gains()
+
+    table = handle.set_drive_gains({"j1": {"kp": 4321.0, "kd": 12.5}})
+
+    kps, kds = controller.get_gains()
+    assert list(kps)[1] == 4321.0
+    assert list(kds)[1] == 12.5
+    assert float(kps[0]) == float(kps_before[0])  # the other joint keeps its gain
+    assert table["dof_names"] == ["j0", "j1"]
+    assert table["kp"][1] == 4321.0
+    assert table["kd"][1] == 12.5
+    assert list(handle._gains[0])[1] == 4321.0
+    assert list(handle._gains[1])[1] == 12.5
+    with pytest.raises(ValueError, match="no joint"):
+        handle.set_drive_gains({"nope": {"kp": 1.0}})
+
+
+def test_isaac_drive_gain_overrides_from_config_are_applied_when_dofs_refresh():
+    art = FakeArticulation("fake-arm", ["j0", "j1"])
+    sim = FakeSim()
+    sim.world.scene.objects[art.name] = art
+    handle = IsaacArmHandle(sim, art, None, joint_names=None, drive_gains={"j1": {"kd": 77.0}})
+
+    handle.refresh_dofs()
+
+    _kps, kds = art.get_articulation_controller().get_gains()
+    assert list(kds)[1] == 77.0
+    assert list(handle._gains[1])[1] == 77.0
+
+
+def test_isaac_set_drive_gains_sets_joint_armature_and_reports_it():
+    """The fix for the carry: a PhysX articulation drive goes soft under a
+    body jointed on through maximal-coordinate joints, and armature is what
+    restores it. Measured 2026-09-24 on the UR5e with a 2 kg box on the
+    cups: wrist 3 accelerated at about one radian per second squared at the
+    asset's zero armature, and ran at its 180 deg/s limit at 0.1."""
+    handle, art, _sim = _make_handle(("j0", "j1"))
+
+    table = handle.set_drive_gains({"j1": {"armature": 0.1}})
+
+    assert art._articulation_view.armatures == [0.0, 0.1]
+    assert table["armature"] == [0.0, 0.1]
+    assert handle.drive_gains()["armature"] == [0.0, 0.1]
+    # a reset rebuilds the view from the asset's zeros; the override comes back
+    art._articulation_view.armatures = [0.0, 0.0]
+    handle.post_reset()
+    assert art._articulation_view.armatures == [0.0, 0.1]

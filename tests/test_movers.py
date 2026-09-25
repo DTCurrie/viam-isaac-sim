@@ -8,10 +8,13 @@ from viam.proto.common import Pose, WorldState
 
 from pickcell.movers import (
     CARRY_ORIENTATION_TOLERANCE_DEG,
+    FREE_PLAN_TIMEOUT_S,
     LINEAR_LINE_TOLERANCE_MM,
     LINEAR_ORIENTATION_TOLERANCE_DEG,
+    LINEAR_PLAN_TIMEOUT_S,
     RealMover,
     move_constraints,
+    move_extra,
 )
 
 
@@ -78,3 +81,65 @@ async def test_real_mover_default_move_is_unconstrained():
 
     (call,) = motion.calls
     assert call["constraints"] is None
+
+
+def test_a_straight_line_bounds_the_planners_time_shorter_than_a_free_move():
+    assert move_extra(linear=True) == {"timeout": LINEAR_PLAN_TIMEOUT_S}
+    assert move_extra(linear=False) == {"timeout": FREE_PLAN_TIMEOUT_S}
+    assert LINEAR_PLAN_TIMEOUT_S < FREE_PLAN_TIMEOUT_S
+
+
+async def test_real_mover_hands_the_planning_bound_to_the_motion_service_on_a_line():
+    """On 2026-09-24 a straight descent from a wound standoff ran the
+    constrained planner to its 300 s default and the run died before the
+    free fallback could move. The bound is what gives the fallback its turn."""
+    motion = _FakeMotion()
+    mover = RealMover(motion, "gripper-1", "camera-1")  # type: ignore[arg-type]
+
+    await mover.move_to(POSE, WorldState(), linear=True)
+    await mover.move_to(POSE, WorldState())
+
+    linear_call, free_call = motion.calls
+    assert linear_call["extra"] == {"timeout": LINEAR_PLAN_TIMEOUT_S}
+    assert free_call["extra"] == {"timeout": FREE_PLAN_TIMEOUT_S}
+
+
+def test_a_planner_seed_rides_in_the_extra_only_when_given():
+    assert move_extra(linear=False, planner_seed=None) == {"timeout": FREE_PLAN_TIMEOUT_S}
+    assert move_extra(linear=False, planner_seed=1) == {
+        "timeout": FREE_PLAN_TIMEOUT_S,
+        "rseed": 1,
+    }
+    assert move_extra(linear=True, planner_seed=0) == {
+        "timeout": LINEAR_PLAN_TIMEOUT_S,
+        "rseed": 0,
+    }
+
+
+async def test_real_mover_hands_the_planner_seed_to_the_motion_service():
+    motion = _FakeMotion()
+    mover = RealMover(motion, "gripper-1", "camera-1")  # type: ignore[arg-type]
+
+    await mover.move_to(POSE, WorldState(), planner_seed=7)
+    await mover.move_to(POSE, WorldState())
+
+    seeded, unseeded = motion.calls
+    assert seeded["extra"] == {"timeout": FREE_PLAN_TIMEOUT_S, "rseed": 7}
+    assert unseeded["extra"] == {"timeout": FREE_PLAN_TIMEOUT_S}
+
+
+def test_a_plan_timeout_replaces_the_per_kind_bound():
+    assert move_extra(False, plan_timeout_s=10.0) == {"timeout": 10.0}
+    assert move_extra(False, planner_seed=1, plan_timeout_s=10.0) == {
+        "timeout": 10.0,
+        "rseed": 1,
+    }
+
+
+async def test_real_mover_hands_the_plan_timeout_to_the_motion_service():
+    motion = _FakeMotion()
+    mover = RealMover(motion, "gripper-1", "camera-1")  # type: ignore[arg-type]
+
+    await mover.move_to(POSE, WorldState(), plan_timeout_s=10.0)
+
+    assert motion.calls[0]["extra"] == {"timeout": 10.0}

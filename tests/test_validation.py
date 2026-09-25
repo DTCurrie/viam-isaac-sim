@@ -273,6 +273,43 @@ def test_prop_nonnumeric_friction_rejected():
         IsaacWorld.validate_config(cfg)
 
 
+def test_prop_solver_iterations_pass():
+    cfg = _config(
+        {
+            "props": [
+                {
+                    "name": "block",
+                    "solver_position_iterations": 4,
+                    "solver_velocity_iterations": 4,
+                }
+            ]
+        }
+    )
+    IsaacWorld.validate_config(cfg)
+
+
+def test_prop_solver_iterations_rejects_out_of_range():
+    cfg = _config({"props": [{"name": "block", "solver_position_iterations": 0}]})
+    with pytest.raises(ValueError, match="solver_position_iterations"):
+        IsaacWorld.validate_config(cfg)
+
+    cfg = _config({"props": [{"name": "block", "solver_velocity_iterations": 256}]})
+    with pytest.raises(ValueError, match="solver_velocity_iterations"):
+        IsaacWorld.validate_config(cfg)
+
+
+def test_prop_solver_iterations_rejects_non_integral():
+    cfg = _config({"props": [{"name": "block", "solver_position_iterations": 2.5}]})
+    with pytest.raises(ValueError, match="solver_position_iterations"):
+        IsaacWorld.validate_config(cfg)
+
+
+def test_prop_solver_iterations_rejects_bool():
+    cfg = _config({"props": [{"name": "block", "solver_position_iterations": True}]})
+    with pytest.raises(ValueError, match="solver_position_iterations"):
+        IsaacWorld.validate_config(cfg)
+
+
 def test_visual_prop_with_scale_passes():
     cfg = _config(
         {

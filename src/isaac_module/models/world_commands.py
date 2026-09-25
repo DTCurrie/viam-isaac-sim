@@ -8,6 +8,7 @@ from viam.utils import ValueTypes
 
 from .. import component_diagnostics
 from ..length_units import MM_PER_M
+from ..physics import PROP_PHYSICS_KEYS
 from ..prim_paths import default_base_prim_path, default_ee_prim_path
 from ..sim_manager import (
     ArmHandle,
@@ -140,6 +141,29 @@ def _cmd_set_prop_pose(
     )
     handle.set_prop_pose(name, cast("Any", position_m), orientation_wxyz=orientation_wxyz)
     return {"ok": True}
+
+
+def _cmd_set_prop_physics(
+    world: "IsaacWorld", handle: WorldHandle, command: Mapping[str, ValueTypes]
+) -> dict[str, ValueTypes]:
+    name = str(command.get("name", ""))
+    if not name:
+        raise ValueError("set_prop_physics requires 'name'")
+    physics = command.get("physics")
+    if not isinstance(physics, Mapping) or not physics:
+        raise ValueError("set_prop_physics requires a non-empty 'physics' object")
+    for key in physics:
+        if key not in PROP_PHYSICS_KEYS:
+            raise ValueError(f"set_prop_physics: unknown physics key {key!r}")
+    effective = handle.set_prop_physics(name, physics)
+    return {"ok": True, "name": name, "physics": cast("Any", effective)}
+
+
+def _cmd_prop_physics(
+    world: "IsaacWorld", handle: WorldHandle, command: Mapping[str, ValueTypes]
+) -> dict[str, ValueTypes]:
+    name = _require_name(command)
+    return {"name": name, "physics": cast("Any", handle.prop_physics(name))}
 
 
 def _cmd_randomize_props(
@@ -305,6 +329,49 @@ def _cmd_drive_gains(
     return cast("Any", component_diagnostics.drive_gains(attrs, entry_handle))
 
 
+def _cmd_set_drive_gains(
+    world: "IsaacWorld", handle: WorldHandle, command: Mapping[str, ValueTypes]
+) -> dict[str, ValueTypes]:
+    name = _require_name(command)
+    gains = command.get("gains")
+    if not isinstance(gains, Mapping) or not gains:
+        raise ValueError(
+            'set_drive_gains needs "gains": {"<joint>": {"kp": number, "kd": number}}, '
+            "at least one joint, kp or kd or both"
+        )
+    parsed: dict[str, dict[str, float]] = {}
+    for joint, spec in gains.items():
+        if not isinstance(spec, Mapping) or not any(k in spec for k in ("kp", "kd", "armature")):
+            raise ValueError(f'set_drive_gains: joint {joint!r} needs "kp", "kd" and/or "armature"')
+        parsed[str(joint)] = {}
+        for key in ("kp", "kd", "armature"):
+            if key in spec:
+                value = spec[key]
+                if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
+                    raise ValueError(
+                        f"set_drive_gains: {joint!r} {key} must be a non-negative number, "
+                        f"got {value!r}"
+                    )
+                parsed[str(joint)][key] = float(value)
+    attrs, entry_handle = SimManager.get().handle_entry(name)
+    if not isinstance(entry_handle, ArmHandle):
+        raise ValueError(f"{name!r} is a {type(entry_handle).__name__}, not an arm")
+    return cast("Any", component_diagnostics.set_drive_gains(attrs, entry_handle, parsed))
+
+
+def _cmd_prim_attrs(
+    world: "IsaacWorld", handle: WorldHandle, command: Mapping[str, ValueTypes]
+) -> dict[str, ValueTypes]:
+    name = _require_name(command)
+    prim_path = command.get("prim_path")
+    if not isinstance(prim_path, str) or not prim_path:
+        raise ValueError('prim_attrs needs "prim_path"')
+    _attrs, entry_handle = SimManager.get().handle_entry(name)
+    if not isinstance(entry_handle, ArmHandle):
+        raise ValueError(f"{name!r} is a {type(entry_handle).__name__}, not an arm")
+    return cast("Any", entry_handle.prim_attrs(prim_path))
+
+
 def _cmd_dof_names(
     world: "IsaacWorld", handle: WorldHandle, command: Mapping[str, ValueTypes]
 ) -> dict[str, ValueTypes]:
@@ -400,6 +467,8 @@ COMMAND_HANDLERS: dict[
     "prop_geometries": _cmd_prop_geometries,
     "spawn_prop": _cmd_spawn_prop,
     "set_prop_pose": _cmd_set_prop_pose,
+    "set_prop_physics": _cmd_set_prop_physics,
+    "prop_physics": _cmd_prop_physics,
     "randomize_props": _cmd_randomize_props,
     "ignore_props": _cmd_ignore_props,
     "scatter_cell": _cmd_scatter_cell,
@@ -407,6 +476,8 @@ COMMAND_HANDLERS: dict[
     "joint_state": _cmd_joint_state,
     "dof_names": _cmd_dof_names,
     "drive_gains": _cmd_drive_gains,
+    "set_drive_gains": _cmd_set_drive_gains,
+    "prim_attrs": _cmd_prim_attrs,
     "prim_pose": _cmd_prim_pose,
     "tcp_pose": _cmd_tcp_pose,
     "jaw_deg": _cmd_jaw_deg,

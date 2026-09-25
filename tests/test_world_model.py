@@ -281,6 +281,149 @@ def test_set_prop_pose_then_reset_restores_configured_pose(world):
     assert after_entry["pose_in_world_mm"]["x"] == pytest.approx(100.0)
 
 
+def test_set_prop_physics_then_prop_physics_reads_back(world):
+    async def scenario():
+        await world.do_command(
+            {
+                "command": "spawn_prop",
+                "prop": {"name": "physics_prop", "position": [0.2, 0.2, 0.03]},
+            }
+        )
+        set_result = await world.do_command(
+            {
+                "command": "set_prop_physics",
+                "name": "physics_prop",
+                "physics": {"contact_offset": 0.01, "mass": 0.2},
+            }
+        )
+        read_result = await world.do_command({"command": "prop_physics", "name": "physics_prop"})
+        return set_result, read_result
+
+    set_result, read_result = asyncio.run(scenario())
+    assert set_result == {
+        "ok": True,
+        "name": "physics_prop",
+        "physics": {"contact_offset": 0.01, "mass": 0.2},
+    }
+    assert read_result == {
+        "name": "physics_prop",
+        "physics": {"contact_offset": 0.01, "mass": 0.2},
+    }
+
+
+def test_set_prop_physics_rejects_a_bad_value(world):
+    async def scenario():
+        await world.do_command(
+            {
+                "command": "spawn_prop",
+                "prop": {"name": "physics_bad_value", "position": [0.2, 0.2, 0.03]},
+            }
+        )
+        await world.do_command(
+            {
+                "command": "set_prop_physics",
+                "name": "physics_bad_value",
+                "physics": {"mass": -1.0},
+            }
+        )
+
+    with pytest.raises(ValueError):
+        asyncio.run(scenario())
+
+
+def test_set_prop_physics_refuses_a_rest_offset_above_the_props_contact_offset(world):
+    """The bound spans two keys, and the prop already carries one of them,
+    so the check has to see the merged set before anything is applied."""
+
+    async def scenario():
+        await world.do_command(
+            {
+                "command": "spawn_prop",
+                "prop": {
+                    "name": "physics_cross_key",
+                    "position": [0.2, 0.2, 0.03],
+                    "contact_offset": 0.005,
+                },
+            }
+        )
+        with pytest.raises(ValueError):
+            await world.do_command(
+                {
+                    "command": "set_prop_physics",
+                    "name": "physics_cross_key",
+                    "physics": {"rest_offset": 0.01},
+                }
+            )
+        return await world.do_command({"command": "prop_physics", "name": "physics_cross_key"})
+
+    result = asyncio.run(scenario())
+    assert result["physics"] == {"contact_offset": 0.005}
+
+
+def test_set_prop_physics_rejects_a_stray_key(world):
+    async def scenario():
+        await world.do_command(
+            {
+                "command": "spawn_prop",
+                "prop": {"name": "physics_stray_key", "position": [0.2, 0.2, 0.03]},
+            }
+        )
+        await world.do_command(
+            {
+                "command": "set_prop_physics",
+                "name": "physics_stray_key",
+                "physics": {"not_a_real_key": 1.0},
+            }
+        )
+
+    with pytest.raises(ValueError, match="not_a_real_key"):
+        asyncio.run(scenario())
+
+
+def test_set_prop_physics_unknown_prop_raises(world):
+    with pytest.raises(ValueError):
+        asyncio.run(
+            world.do_command(
+                {
+                    "command": "set_prop_physics",
+                    "name": "no-such-physics-prop",
+                    "physics": {"mass": 0.1},
+                }
+            )
+        )
+
+
+def test_set_prop_physics_refuses_a_visual_prop(world):
+    async def scenario():
+        await world.do_command(
+            {
+                "command": "spawn_prop",
+                "prop": {"name": "physics_visual_collider", "position": [0.2, 0.2, 0.03]},
+            }
+        )
+        await world.do_command(
+            {
+                "command": "spawn_prop",
+                "prop": {
+                    "type": "visual",
+                    "name": "physics_visual",
+                    "usd_path": "nonexistent.usd",
+                    "fit": {"collider": "physics_visual_collider"},
+                },
+            }
+        )
+        await world.do_command(
+            {
+                "command": "set_prop_physics",
+                "name": "physics_visual",
+                "physics": {"mass": 0.1},
+            }
+        )
+
+    with pytest.raises(ValueError):
+        asyncio.run(scenario())
+
+
 def test_randomize_props_deterministic_and_within_region(world):
     names = ["rand_a", "rand_b", "rand_c"]
     region = [[0.0, 0.0, 0.0], [1000.0, 1000.0, 0.0]]
@@ -830,4 +973,47 @@ def test_do_command_drive_gains_refuses_a_component_that_is_not_an_arm(world):
     with pytest.raises(ValueError, match="not an arm"):
         asyncio.run(
             world.do_command({"command": "drive_gains", "name": "world-gripper-drive-gains"})
+        )
+
+
+def test_do_command_set_drive_gains_overrides_the_named_joint(world):
+    IsaacArm.new(
+        _config("world-arm-set-gains", {"world": "isaac-world", "asset": "ur20", "mock_dof": 6}),
+        {},
+    )
+    names = asyncio.run(world.do_command({"command": "dof_names", "name": "world-arm-set-gains"}))[
+        "dof_names"
+    ]
+    result = asyncio.run(
+        world.do_command(
+            {
+                "command": "set_drive_gains",
+                "name": "world-arm-set-gains",
+                "gains": {names[-1]: {"kp": 1000.0, "kd": 5.0}},
+            }
+        )
+    )
+    assert result["dof_names"] == names
+    assert result["kp"][-1] == 1000.0
+    assert result["kd"][-1] == 5.0
+
+
+def test_do_command_set_drive_gains_refuses_a_malformed_request(world):
+    IsaacArm.new(
+        _config("world-arm-set-gains-bad", {"world": "isaac-world", "asset": "ur20"}),
+        {},
+    )
+    with pytest.raises(ValueError, match="non-negative"):
+        asyncio.run(
+            world.do_command(
+                {
+                    "command": "set_drive_gains",
+                    "name": "world-arm-set-gains-bad",
+                    "gains": {"shoulder_pan_joint": {"kp": -1.0}},
+                }
+            )
+        )
+    with pytest.raises(ValueError, match='"gains"'):
+        asyncio.run(
+            world.do_command({"command": "set_drive_gains", "name": "world-arm-set-gains-bad"})
         )

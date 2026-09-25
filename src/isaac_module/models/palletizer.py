@@ -53,12 +53,15 @@ only happens because the sequencer's cursor stayed put.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import math
 import time
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, ClassVar, cast
 
+from grpclib import Status
+from grpclib.exceptions import GRPCError
 from typing_extensions import Self
 from viam.components.arm import Arm
 from viam.logging import getLogger
@@ -94,6 +97,8 @@ from .. import DEFAULT_WORLD_NAME, FAMILY, NAMESPACE
 from ..asset_catalog import CUP_APPROACH_GAP_MM
 from ..sequencer_client import NextBox, SequencerClient
 from ..sort_plan import OUTCOME_FAILED, OUTCOME_PLACED
+from ..stack_stability import DEFAULT_SETTLE_POLICY, Sample, settle_time_s, trailing_window_settled
+from ..store_relay import RelayReading, WorldStateStoreLike, read_store_obstacles
 
 LOGGER = getLogger(__name__)
 
@@ -142,6 +147,30 @@ PLACE_RELEASE_CLEARANCE_MM = 0.0
 # is reported as one.
 PLACE_STALL_TOLERANCE_MM = 25.0
 
+# how far above the sequencer's own place_start the carry arrives, before a
+# straight descent onto place_start begins the placement proper. The
+# sequencer's standoff is box_height_mm + 10, sized for a load that hangs
+# rigid. A box on the cups swings: 7.5 to 10 degrees during a carry, measured
+# 2026-09-23, settling to 0.001 within a second of stopping. At 10 degrees a
+# 125 mm half-diagonal dips 22 mm, past the 10 mm the standoff leaves over a
+# same-layer neighbour, and on 2026-09-24 box 3 arrived swinging over boxes
+# 1 and 2 and stalled on them. 50 mm clears that swing by 28 mm; under half a
+# box height, so the straight settle stays short.
+PLACE_APPROACH_CLEARANCE_MM = 50.0
+
+# the planner seeds every plan with 0 unless told otherwise, so a free plan
+# that timed out times out again on identical inputs. Measured on 2026-10-02
+# on viam-server 1.9.0: the level carry timed out at the 60 s bound once in 33
+# attempts. Seed 1 is the one other draw taken.
+RETRY_PLANNER_SEED = 1
+
+# the first attempt of a free move gets this much planning time, the retry
+# keeps the mover's own bound. On 2026-10-02 the slowest of 57 successful free
+# plans across three packs took 0.27 s, so 10 s is about 37 times that. A first
+# attempt that times out anyway costs 10 s before the re-seeded retry, where
+# the default bound would have spent 60 s.
+FIRST_FREE_PLAN_TIMEOUT_S = 10.0
+
 # the arm model's own words for a move that planned but could not be
 # executed, `ArmMoveStalledError` and `ArmMoveTimeoutError` in models/arm.py.
 # They cross the wire as text inside the motion service's error, so text is
@@ -161,27 +190,32 @@ MAX_ATTEMPTS_PER_SEQ = 2
 # read a moment later, mid-fall, so the descent stopped 5 mm under a top face
 # the box had already left and the cup closed on air. Every restage has the
 # same shape: `set_prop_pose` returns before physics has moved the prop.
-BOX_SETTLE_TOLERANCE_MM = 1.0
-BOX_SETTLE_POLL_S = 0.05
-BOX_SETTLE_TIMEOUT_S = 5.0
+SETTLE_POLICY = DEFAULT_SETTLE_POLICY
+
+# how close a restaged box's centre has to read to the position it was sent
+# to before the teleport counts as landed. The checklist's own reset uses
+# this as its tolerance for the same question - has a prop actually reached
+# where it was told to go.
+RESTAGE_TOLERANCE_MM = 10.0
+
+# how long one teleport gets to land before it is sent again, and how long the
+# retry gets before the restage gives up. On the GPU run of 2026-09-25 the
+# read straight after `set_prop_pose` still showed the box at its parked spot
+# for the whole settle window, seven packs out of ten, and the pick that
+# followed drove the cup down at the parked spot's x rather than the infeed
+# pose's.
+RESTAGE_TIMEOUT_S = 2.0
+
+# how many teleports one restage gets before giving up: one send, two retries.
+# Across seven GPU packs on 2026-10-01 and 2026-10-02 a restage needed a second
+# teleport in six of them, and on 2026-10-02 one box missed both and still read
+# at its parked spot. Each of the other second teleports landed.
+RESTAGE_MAX_ATTEMPTS = 3
 
 
-def box_has_settled(
-    before_mm: Mapping[str, Any] | None,
-    after_mm: Mapping[str, Any] | None,
-    tolerance_mm: float = BOX_SETTLE_TOLERANCE_MM,
-) -> bool:
-    """Whether two consecutive readings of a box put it in the same place.
-
-    A box that has not registered a pose at all has not settled: reaching for
-    one that is not there is the failure this guards, not a special case of
-    it."""
-    if before_mm is None or after_mm is None:
-        return False
-    return (
-        sum((float(after_mm[axis]) - float(before_mm[axis])) ** 2 for axis in ("x", "y", "z"))
-        ** 0.5
-    ) <= tolerance_mm
+class RestageError(ValueError):
+    """A box did not read back within `RESTAGE_TOLERANCE_MM` of the pose it
+    was `set_prop_pose`'d to, after a retry."""
 
 
 def _box_top_face_xyz_mm(
@@ -209,17 +243,56 @@ def _box_pose_mm(
     return None
 
 
-def _measured_box_pose(geometries: Sequence[Mapping[str, Any]], box_prop: str) -> Pose | None:
-    """``box_prop``'s pose as physics settled it, read straight off
-    ``prop_geometries`` rather than where the plan intended it - the whole
-    point of feeding it back to ``set_box_transform``."""
-    pose_mm = _box_pose_mm(geometries, box_prop)
-    if pose_mm is None:
-        return None
+def _landed_within(
+    pose_mm: Mapping[str, Any], target_mm: tuple[float, float, float], tolerance_mm: float
+) -> bool:
+    """Whether ``pose_mm``'s centre reads within ``tolerance_mm`` of
+    ``target_mm``, straight-line."""
+    x, y, z = target_mm
+    return (
+        math.sqrt(
+            (float(pose_mm["x"]) - x) ** 2
+            + (float(pose_mm["y"]) - y) ** 2
+            + (float(pose_mm["z"]) - z) ** 2
+        )
+        <= tolerance_mm
+    )
+
+
+def _pose_from_mm(pose_mm: Mapping[str, Any]) -> Pose:
+    """A ``pose_in_world_mm`` reading as a ``viam.proto.common.Pose``, with no
+    top-face correction: the world state store centres its geometry on
+    exactly the pose it is given, so this is the box's CENTRE."""
     return Pose(
         x=float(pose_mm["x"]),
         y=float(pose_mm["y"]),
         z=float(pose_mm["z"]),
+        o_x=float(pose_mm["o_x"]),
+        o_y=float(pose_mm["o_y"]),
+        o_z=float(pose_mm["o_z"]),
+        theta=float(pose_mm["theta"]),
+    )
+
+
+def _measured_box_pose(geometries: Sequence[Mapping[str, Any]], box_prop: str) -> Pose | None:
+    """``box_prop``'s pose as physics settled it, read straight off
+    ``prop_geometries`` rather than where the plan intended it - the whole
+    point of feeding it back to ``set_box_transform``.
+
+    In the sequencer's convention, the same one its ``place_end_in_world``
+    and every ``target_pose_mm`` here use: the pose of the box's TOP face.
+    ``prop_geometries`` reports the body's centre, so z is raised by half
+    the box's own height. Publishing the centre drew every placed box half
+    sunk into the one below it and read as a 50 mm error on 2026-09-24."""
+    pose_mm = _box_pose_mm(geometries, box_prop)
+    box = _prop_box_mm(geometries, box_prop)
+    if pose_mm is None or box is None:
+        return None
+    _centre_mm, (_dim_x, _dim_y, dim_z) = box
+    return Pose(
+        x=float(pose_mm["x"]),
+        y=float(pose_mm["y"]),
+        z=float(pose_mm["z"]) + float(dim_z) / 2.0,
         o_x=float(pose_mm["o_x"]),
         o_y=float(pose_mm["o_y"]),
         o_z=float(pose_mm["o_z"]),
@@ -240,6 +313,38 @@ def pick_grasp_standoff_pose(top_face_xyz_mm: tuple[float, float, float]) -> Pos
     back to, by PRE_GRASP_STANDOFF_MM above its top face."""
     x, y, top_face_z = top_face_xyz_mm
     return _pointing_down(x, y, top_face_z + CUP_APPROACH_GAP_MM + PRE_GRASP_STANDOFF_MM)
+
+
+def place_approach_pose(place_start: Pose) -> Pose:
+    """Where the carry ends: the sequencer's `place_start_in_world` raised by
+    PLACE_APPROACH_CLEARANCE_MM, so the box has stopped swinging before it is
+    lowered to place_start in a straight line and from there onto its slot.
+    Only z changes."""
+    return Pose(
+        x=place_start.x,
+        y=place_start.y,
+        z=place_start.z + PLACE_APPROACH_CLEARANCE_MM,
+        o_x=place_start.o_x,
+        o_y=place_start.o_y,
+        o_z=place_start.o_z,
+        theta=place_start.theta,
+    )
+
+
+def carry_height_pose(top_face_xyz_mm: tuple[float, float, float], carry_z_mm: float) -> Pose:
+    """Straight above the pick, at the height the carry runs at: the
+    approach's z, so the held box clears the place keep-out before the
+    sweep. Pointing down, like every pick pose."""
+    standoff = pick_grasp_standoff_pose(top_face_xyz_mm)
+    return Pose(
+        x=standoff.x,
+        y=standoff.y,
+        z=carry_z_mm,
+        o_x=standoff.o_x,
+        o_y=standoff.o_y,
+        o_z=standoff.o_z,
+        theta=standoff.theta,
+    )
 
 
 def place_release_pose(place_end: Pose) -> Pose:
@@ -331,10 +436,17 @@ DEFAULT_PLACE_SUPPORT_PROP = "frame_pallet"
 # descends from, so this is headroom the approach still has.
 PICK_KEEPOUT_HEADROOM_MM = 20.0
 
-# how far a keep-out's ceiling stays below the pose the arm approaches it from.
-# Same reasoning as PICK_KEEPOUT_HEADROOM_MM, from the other side: a place
-# keep-out that reaches the approach pose makes the approach unplannable.
-PLACE_KEEPOUT_HEADROOM_MM = 20.0
+# The place keep-out's ceiling is the top face of the layer being placed
+# (`place_end.z`, the sequencer's own pose), which is at least as high as every
+# box already on the pallet, so the stack is covered whole. Until 2026-09-24 the
+# ceiling stopped 20 mm under it and the placed boxes' top 20 mm stood out of
+# the zone, which is where a carried box's corner or a retreating cup clipped
+# them. The held box at `place_start` hangs 10 mm above this ceiling (the
+# sequencer's standoff is box height plus 10), and the carry arrives from
+# PLACE_APPROACH_CLEARANCE_MM above that, so the approach stays plannable.
+# The legs the arm runs empty near the stack use a second keep-out raised by
+# PLACE_APPROACH_CLEARANCE_MM, since a ceiling flush with the top face leaves
+# the planner no margin over it (see `_place_one_box`).
 
 
 def _prop_box_mm(
@@ -351,6 +463,28 @@ def _prop_box_mm(
     return None
 
 
+def _box_footprint_keepout(
+    geometries: Sequence[Mapping[str, Any]], box_prop: str, label: str
+) -> Geometry | None:
+    """A keep-out standing in for ``box_prop`` itself: its own footprint,
+    from the deck up PICK_KEEPOUT_HEADROOM_MM past its top face. Shared by
+    `box_keepout` and `placed_box_keepout`, which differ only in which box
+    this is and what a planner violation should call it."""
+    found = _prop_box_mm(geometries, box_prop)
+    if found is None:
+        return None
+    pose, (dim_x, dim_y, dim_z) = found
+    bottom_z = float(pose["z"]) - dim_z / 2.0
+    return pick_area_keepout(
+        (
+            (float(pose["x"]) - dim_x / 2.0, float(pose["y"]) - dim_y / 2.0, bottom_z),
+            (float(pose["x"]) + dim_x / 2.0, float(pose["y"]) + dim_y / 2.0, bottom_z),
+        ),
+        height_mm=dim_z + PICK_KEEPOUT_HEADROOM_MM,
+        label=label,
+    )
+
+
 def box_keepout(geometries: Sequence[Mapping[str, Any]], box_prop: str) -> Geometry | None:
     """The airspace over the box waiting to be picked, which the arm keeps out
     of until it is descending onto it.
@@ -364,23 +498,26 @@ def box_keepout(geometries: Sequence[Mapping[str, Any]], box_prop: str) -> Geome
     The ceiling stops PICK_KEEPOUT_HEADROOM_MM above the box's own top, which
     is well under the standoff, so the pose the arm descends from stays
     reachable."""
-    found = _prop_box_mm(geometries, box_prop)
-    if found is None:
-        return None
-    pose, (dim_x, dim_y, dim_z) = found
-    bottom_z = float(pose["z"]) - dim_z / 2.0
-    return pick_area_keepout(
-        (
-            (float(pose["x"]) - dim_x / 2.0, float(pose["y"]) - dim_y / 2.0, bottom_z),
-            (float(pose["x"]) + dim_x / 2.0, float(pose["y"]) + dim_y / 2.0, bottom_z),
-        ),
-        height_mm=dim_z + PICK_KEEPOUT_HEADROOM_MM,
-        label="pick_box_keepout",
-    )
+    return _box_footprint_keepout(geometries, box_prop, "pick_box_keepout")
+
+
+def placed_box_keepout(geometries: Sequence[Mapping[str, Any]], box_prop: str) -> Geometry | None:
+    """The airspace over the box just released onto its slot, which the
+    retreat keeps out of.
+
+    Same footprint and headroom as `box_keepout` - the box just placed is as
+    solid as the one about to be picked - under its own label, so a refusal
+    names the placed box rather than the pick station's. On the GPU run of
+    2026-09-25 a straight retreat clipped the box it had just set down once
+    the free fallback (which cannot see this keep-out either) took over."""
+    return _box_footprint_keepout(geometries, box_prop, "placed_box_keepout")
 
 
 def support_keepout(
-    geometries: Sequence[Mapping[str, Any]], support_prop: str, ceiling_z_mm: float
+    geometries: Sequence[Mapping[str, Any]],
+    support_prop: str,
+    ceiling_z_mm: float,
+    label: str = "place_support_keepout",
 ) -> Geometry | None:
     """The airspace over the place support, which the arm keeps out of until
     it is descending onto it.
@@ -388,7 +525,13 @@ def support_keepout(
     Covers the whole support rather than one slot, since what it protects is
     the boxes already stacked on it, and where those are is the sequencer's
     business rather than this service's. Returns None when the support is not
-    in the scene, or when `ceiling_z_mm` leaves no room above its top face."""
+    in the scene, or when `ceiling_z_mm` leaves no room above its top face.
+
+    `label` is what a planner violation calls the zone, and what tells two
+    keep-outs over the same support apart: the legs that carry a box run
+    under one that reaches only the top of the layer being placed, and the
+    empty-armed legs near the stack under one that reaches
+    PLACE_APPROACH_CLEARANCE_MM higher (see `_place_one_box`)."""
     found = _prop_box_mm(geometries, support_prop)
     if found is None:
         return None
@@ -403,7 +546,18 @@ def support_keepout(
             (float(pose["x"]) + dim_x / 2.0, float(pose["y"]) + dim_y / 2.0, top_z),
         ),
         height_mm=height_mm,
-        label="place_support_keepout",
+        label=label,
+    )
+
+
+def is_planner_timeout(error: BaseException) -> bool:
+    """Whether a refused move ran the planner out of time, so that another
+    random seed is a fresh draw. The arm's own timeout carries the same
+    status, which is why an execution failure is excluded: that plan was fine."""
+    return (
+        isinstance(error, GRPCError)
+        and error.status == Status.DEADLINE_EXCEEDED
+        and not is_execution_failure(error)
     )
 
 
@@ -472,6 +626,32 @@ async def approach_and_descend(
     return await move_linear_or_free(descend, grasp, "grasp descent")
 
 
+@contextlib.asynccontextmanager
+async def _leg_timeline(seq: int, name: str) -> AsyncIterator[None]:
+    """Times one motion leg of one box's pick and place: logs when it
+    starts, how long it took once it finishes, or how long it ran before it
+    raised - the error is logged and re-raised, never swallowed.
+
+    On the GPU run of 2026-09-28, every leg planned straight and executed
+    without a stall, and the second box of the second layer was still
+    knocked 524 mm off the pallet while the far row was placed beside it.
+    The pose data at the end could not say which leg did it; this can."""
+    LOGGER.info("palletizer seq %d leg %s: start", seq, name)
+    start = time.monotonic()
+    try:
+        yield
+    except Exception as error:
+        LOGGER.warning(
+            "palletizer seq %d leg %s: failed after %.2f s: %s",
+            seq,
+            name,
+            time.monotonic() - start,
+            error,
+        )
+        raise
+    LOGGER.info("palletizer seq %d leg %s: done in %.2f s", seq, name, time.monotonic() - start)
+
+
 @dataclass(frozen=True)
 class PalletizerRecord:
     """One box's terminal outcome for one attempt: the sequencer's ``seq``
@@ -485,6 +665,9 @@ class PalletizerRecord:
     duration_s: float
     reason: str | None = None
     measured_pose_mm: Mapping[str, float] | None = None
+    planner_obstacles: Mapping[str, int] | None = None
+    settle_s: float | None = None
+    swing_s: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
         result: dict[str, Any] = {
@@ -498,6 +681,12 @@ class PalletizerRecord:
             result["reason"] = self.reason
         if self.measured_pose_mm is not None:
             result["measured_pose_mm"] = dict(self.measured_pose_mm)
+        if self.planner_obstacles is not None:
+            result["planner_obstacles"] = dict(self.planner_obstacles)
+        if self.settle_s is not None:
+            result["settle_s"] = self.settle_s
+        if self.swing_s is not None:
+            result["swing_s"] = self.swing_s
         return result
 
 
@@ -509,6 +698,9 @@ def _outcome_record(
     duration_s: float,
     reason: str | None = None,
     measured_pose_mm: Mapping[str, float] | None = None,
+    planner_obstacles: Mapping[str, int] | None = None,
+    settle_s: float | None = None,
+    swing_s: float | None = None,
 ) -> PalletizerRecord:
     """One box's terminal outcome."""
     return PalletizerRecord(
@@ -519,6 +711,9 @@ def _outcome_record(
         duration_s=duration_s,
         reason=reason,
         measured_pose_mm=measured_pose_mm,
+        planner_obstacles=planner_obstacles,
+        settle_s=settle_s,
+        swing_s=swing_s,
     )
 
 
@@ -545,6 +740,47 @@ def _valid_obstacle_source(config_name: str, attrs: Mapping[str, Any]) -> str:
     return obstacle_source
 
 
+def _valid_world_state_stores(config_name: str, attrs: Mapping[str, Any]) -> list[str]:
+    """The world state store resource names to relay obstacles from, in
+    ``world_state_store`` obstacle mode: the configured ``world_state_stores``
+    list, or just the sequencer when it is not set - the sequencer's own
+    store is the one every cell already has."""
+    stores = attrs.get("world_state_stores")
+    if stores is None:
+        return [str(attrs["sequencer"])]
+    if (
+        not isinstance(stores, Sequence)
+        or isinstance(stores, (str, bytes))
+        or not stores
+        or not all(isinstance(name, str) and name for name in stores)
+    ):
+        raise ValueError(
+            f'{config_name}: set the "world_state_stores" attribute to a non-empty list of '
+            "resource names"
+        )
+    return [str(name) for name in stores]
+
+
+def _validated_stop_after_seq(raw: ValueTypes | None) -> int | None:
+    """The `start` command's `stop_after_seq`, an int of at least 1, or None
+    for an unbounded run.
+
+    A protobuf Struct carries every number as a double, so an int sent
+    through DoCommand crosses the wire as a float with no fractional part -
+    a caller's 4 arrives here as 4.0, and is stored back as 4. A float with a
+    fractional part, a string, a bool or anything under 1 raises."""
+    if raw is None:
+        return None
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        raise ValueError(f'"stop_after_seq" must be an int of at least 1, got {raw!r}')
+    if isinstance(raw, float) and not raw.is_integer():
+        raise ValueError(f'"stop_after_seq" must be an int of at least 1, got {raw!r}')
+    value = int(raw)
+    if value < 1:
+        raise ValueError(f'"stop_after_seq" must be an int of at least 1, got {raw!r}')
+    return value
+
+
 class IsaacPalletizer(Generic, EasyResource):  # type: ignore[misc]  # SDK: API is Final on the service, redeclared by EasyResource
     MODEL: ClassVar[Model] = Model(ModelFamily(NAMESPACE, FAMILY), "palletizer")
 
@@ -555,10 +791,18 @@ class IsaacPalletizer(Generic, EasyResource):  # type: ignore[misc]  # SDK: API 
         self._cancel_requested = False
         self._records: list[PalletizerRecord] = []
         self._failure_reason: str | None = None
-        # box_props[0]'s pose on the first prop_geometries read of a run -
-        # every later box_props[i] is re-posed there before its own pick.
-        # Reset per run (_handle_start), not per box.
+        # box_props[0]'s pose on seq 1's first prop_geometries read - every
+        # later box_props[i] is re-posed there before its own pick. Captured
+        # once and left in place across every later start: only a part
+        # restart parks a fresh box_props[0] on the station, and a run that
+        # reset this on every start forgot it the moment a bounded run
+        # stopped, leaving the start that resumed the pack nothing to
+        # restage onto (see _place_one_box's seq > 1, pose-still-None case).
         self._infeed_position_mm: tuple[float, float, float] | None = None
+        # the seq a bounded run stops after, or None for unbounded. Reset per
+        # run (_handle_start).
+        self._stop_after_seq: int | None = None
+        self._stopped_after_seq: int | None = None
 
     @classmethod
     def new(
@@ -581,6 +825,9 @@ class IsaacPalletizer(Generic, EasyResource):  # type: ignore[misc]  # SDK: API 
 
         _valid_box_props(config.name, attrs)
         _valid_obstacle_source(config.name, attrs)
+        for store_name in _valid_world_state_stores(config.name, attrs):
+            if store_name not in dependencies:
+                dependencies.append(store_name)
         return dependencies, []
 
     def reconfigure(
@@ -610,6 +857,18 @@ class IsaacPalletizer(Generic, EasyResource):  # type: ignore[misc]  # SDK: API 
         self._obstacle_source = _valid_obstacle_source(config.name, attrs)
         self._place_support_prop = str(attrs.get("place_support_prop", DEFAULT_PLACE_SUPPORT_PROP))
 
+        def store(name: str) -> WorldStateStoreLike:
+            if name not in by_name:
+                raise ValueError(
+                    f"{config.name}: dependency {name!r} for 'world_state_stores' was not resolved"
+                )
+            return cast("WorldStateStoreLike", by_name[name])
+
+        store_names = _valid_world_state_stores(config.name, attrs)
+        self._stores: list[tuple[str, WorldStateStoreLike]] = [
+            (name, store(name)) for name in store_names
+        ]
+
     async def do_command(
         self,
         command: Mapping[str, ValueTypes],
@@ -619,21 +878,23 @@ class IsaacPalletizer(Generic, EasyResource):  # type: ignore[misc]  # SDK: API 
     ) -> Mapping[str, ValueTypes]:
         cmd = str(command.get("command", ""))
         if cmd == "start":
-            return self._handle_start()
+            return self._handle_start(command)
         if cmd == "stop":
             return self._handle_stop()
         if cmd == "status":
             return cast("Mapping[str, ValueTypes]", self._status_snapshot())
         raise ValueError(f"unknown command {cmd!r}; supported: start, stop, status")
 
-    def _handle_start(self) -> dict[str, ValueTypes]:
+    def _handle_start(self, command: Mapping[str, ValueTypes]) -> dict[str, ValueTypes]:
         if self._state in (STATE_RUNNING, STATE_STOPPING):
             return {"ok": False, "state": self._state}
+        stop_after_seq = _validated_stop_after_seq(command.get("stop_after_seq"))
         self._state = STATE_RUNNING
         self._records = []
         self._failure_reason = None
         self._cancel_requested = False
-        self._infeed_position_mm = None
+        self._stop_after_seq = stop_after_seq
+        self._stopped_after_seq = None
         self._task = asyncio.create_task(self._run())
         return {"ok": True, "state": "running"}
 
@@ -653,6 +914,8 @@ class IsaacPalletizer(Generic, EasyResource):  # type: ignore[misc]  # SDK: API 
         # machine's logs to learn anything at all.
         if self._failure_reason is not None:
             snapshot["reason"] = self._failure_reason
+        if self._stopped_after_seq is not None:
+            snapshot["stopped_after_seq"] = self._stopped_after_seq
         return snapshot
 
     async def wait_until_done(self) -> None:
@@ -729,47 +992,166 @@ class IsaacPalletizer(Generic, EasyResource):  # type: ignore[misc]  # SDK: API 
         response = await self._world.do_command({"command": "prop_geometries"})
         return cast("Sequence[Mapping[str, Any]]", response.get("geometries", []))
 
-    async def _settled_geometries(self, box_prop: str) -> Sequence[Mapping[str, Any]]:
-        """`prop_geometries`, read once `box_prop` has stopped moving.
+    async def _settled_geometries(
+        self, box_prop: str
+    ) -> tuple[Sequence[Mapping[str, Any]], float | None]:
+        """`prop_geometries`, read once `box_prop` has stopped moving, and how
+        long that took.
 
         The grasp pose is derived from this reading, and a cup sent to where a
         falling box was closes on air. Returns the last reading either way, so
         a box that never settles is picked against its most recent pose and
-        the attempt fails on its own terms rather than here."""
+        the attempt fails on its own terms rather than here. The settle time
+        is None when the box never settled inside the policy's timeout."""
         geometries = await self._prop_geometries()
-        previous = _box_pose_mm(geometries, box_prop)
-        if previous is None:
+        start = time.monotonic()
+        samples: list[Sample] = [(0.0, _box_pose_mm(geometries, box_prop))]
+        if samples[0][1] is None:
             # a box that is not in the world cannot settle. Waiting the full
             # timeout for one only delays the "no known geometry" the caller
             # is about to report.
-            return geometries
-        deadline = time.monotonic() + BOX_SETTLE_TIMEOUT_S
+            return geometries, None
+        deadline = start + SETTLE_POLICY.timeout_s
         while time.monotonic() < deadline:
-            await asyncio.sleep(BOX_SETTLE_POLL_S)
+            await asyncio.sleep(SETTLE_POLICY.poll_s)
             geometries = await self._prop_geometries()
-            current = _box_pose_mm(geometries, box_prop)
-            if box_has_settled(previous, current):
-                return geometries
-            previous = current
+            samples.append((time.monotonic() - start, _box_pose_mm(geometries, box_prop)))
+            if trailing_window_settled(samples, SETTLE_POLICY):
+                return geometries, settle_time_s(samples, SETTLE_POLICY)
         LOGGER.warning(
             "%r was still moving after %.1f s; picking against its last reading",
             box_prop,
-            BOX_SETTLE_TIMEOUT_S,
+            SETTLE_POLICY.timeout_s,
         )
-        return geometries
+        return geometries, None
+
+    async def _settle_after_release(
+        self, box_prop: str, released_at: float
+    ) -> tuple[Sequence[Mapping[str, Any]], float | None]:
+        """`prop_geometries`, polled from the moment `box_prop` was released
+        rather than from whenever the caller gets around to reading it.
+
+        The retreat leg that follows a release runs one to two seconds, and a
+        box does most of its settling during it. Reading only once the retreat
+        finishes would put the whole retreat's motion inside `settle_s` at 0,
+        which is why this starts sampling immediately and runs concurrently
+        with the retreat rather than after it."""
+        geometries = await self._prop_geometries()
+        samples: list[Sample] = [
+            (time.monotonic() - released_at, _box_pose_mm(geometries, box_prop))
+        ]
+        while True:
+            if trailing_window_settled(samples, SETTLE_POLICY):
+                return geometries, settle_time_s(samples, SETTLE_POLICY)
+            if time.monotonic() - released_at > SETTLE_POLICY.timeout_s:
+                LOGGER.warning(
+                    "%r was still moving after %.1f s; picking against its last reading",
+                    box_prop,
+                    SETTLE_POLICY.timeout_s,
+                )
+                return geometries, None
+            await asyncio.sleep(SETTLE_POLICY.poll_s)
+            geometries = await self._prop_geometries()
+            samples.append((time.monotonic() - released_at, _box_pose_mm(geometries, box_prop)))
+
+    async def _wait_for_the_carried_box_to_stop_swinging(
+        self, seq: int, box_prop: str
+    ) -> float | None:
+        """Samples `box_prop`'s own centre pose at the place approach, where
+        it hangs on the cups and swings (see `PLACE_APPROACH_CLEARANCE_MM`),
+        until `trailing_window_settled` says the swing has stopped, or
+        `SETTLE_POLICY.timeout_s` runs out. Mirrors `_settle_after_release`'s
+        own sampler, started at the carry's own arrival rather than at a
+        release."""
+        start = time.monotonic()
+        geometries = await self._prop_geometries()
+        samples: list[Sample] = [(0.0, _box_pose_mm(geometries, box_prop))]
+        while True:
+            if trailing_window_settled(samples, SETTLE_POLICY):
+                swing_s = settle_time_s(samples, SETTLE_POLICY)
+                LOGGER.info("palletizer seq %d: carried box still after %.2f s", seq, swing_s)
+                return swing_s
+            if time.monotonic() - start > SETTLE_POLICY.timeout_s:
+                LOGGER.warning(
+                    "%r was still swinging after %.1f s; descending anyway. Last two readings: %s",
+                    box_prop,
+                    SETTLE_POLICY.timeout_s,
+                    samples[-2:],
+                )
+                return None
+            await asyncio.sleep(SETTLE_POLICY.poll_s)
+            geometries = await self._prop_geometries()
+            samples.append((time.monotonic() - start, _box_pose_mm(geometries, box_prop)))
+
+    async def _poll_until_restaged(
+        self, box_prop: str, target_mm: tuple[float, float, float]
+    ) -> tuple[bool, Mapping[str, Any] | None]:
+        """Whether `box_prop` reads within RESTAGE_TOLERANCE_MM of
+        `target_mm` inside RESTAGE_TIMEOUT_S, polling at the settle policy's
+        own rate, and the last pose read either way."""
+        start = time.monotonic()
+        geometries = await self._prop_geometries()
+        pose_mm = _box_pose_mm(geometries, box_prop)
+        if pose_mm is not None and _landed_within(pose_mm, target_mm, RESTAGE_TOLERANCE_MM):
+            return True, pose_mm
+        deadline = start + RESTAGE_TIMEOUT_S
+        while time.monotonic() < deadline:
+            await asyncio.sleep(SETTLE_POLICY.poll_s)
+            geometries = await self._prop_geometries()
+            pose_mm = _box_pose_mm(geometries, box_prop)
+            if pose_mm is not None and _landed_within(pose_mm, target_mm, RESTAGE_TOLERANCE_MM):
+                return True, pose_mm
+        return False, pose_mm
 
     async def _restage_box(self, box_prop: str) -> None:
         """Re-poses ``box_prop`` onto the pick station's infeed pose, so a
         later box_props entry arrives where box_props[0] started rather than
-        wherever it was parked. A no-op when the infeed pose was never
-        captured (box_props[0] was missing from the world on seq 1's read),
-        so a bad first read fails the pick that reads it rather than
-        crashing every later one."""
-        if self._infeed_position_mm is None:
-            return
-        x, y, z = self._infeed_position_mm
-        await self._world.do_command(
-            {"command": "set_prop_pose", "name": box_prop, "position": [x, y, z]}
+        wherever it was parked. The caller (`_place_one_box`) only calls this
+        once `self._infeed_position_mm` is known to be set.
+
+        `set_prop_pose` returns before physics has moved the prop - the same
+        problem `_settled_geometries` exists for - so this reads the box's
+        own pose back rather than trusting the command took. On the GPU run
+        of 2026-09-25 the read straight after `set_prop_pose` still showed
+        the box parked for the whole settle window, seven packs out of ten,
+        and the pick that followed drove the cup down over nothing. A miss
+        is retried once with the same teleport; a second miss raises
+        `RestageError` rather than picking against a pose the box was never
+        at."""
+        assert self._infeed_position_mm is not None
+        target_mm = self._infeed_position_mm
+        x, y, z = target_mm
+        start = time.monotonic()
+        attempts = 0
+        last_pose_mm: Mapping[str, Any] | None = None
+        while attempts < RESTAGE_MAX_ATTEMPTS:
+            attempts += 1
+            await self._world.do_command(
+                {"command": "set_prop_pose", "name": box_prop, "position": [x, y, z]}
+            )
+            landed, last_pose_mm = await self._poll_until_restaged(box_prop, target_mm)
+            if landed:
+                LOGGER.info(
+                    "%r restaged to %s in %d teleport(s), %.0f ms",
+                    box_prop,
+                    target_mm,
+                    attempts,
+                    (time.monotonic() - start) * 1000.0,
+                )
+                return
+            if attempts < RESTAGE_MAX_ATTEMPTS:
+                LOGGER.warning(
+                    "%r sent to %s had not landed within %.0f mm after %.1f s (last read "
+                    "%s); sending the teleport again",
+                    box_prop,
+                    target_mm,
+                    RESTAGE_TOLERANCE_MM,
+                    RESTAGE_TIMEOUT_S,
+                    last_pose_mm,
+                )
+        raise RestageError(
+            f"{box_prop!r} did not land within {RESTAGE_TOLERANCE_MM:.0f} mm of {target_mm} "
+            f"after {attempts} attempts; last read {last_pose_mm}"
         )
 
     def _world_state_for(
@@ -778,6 +1160,7 @@ class IsaacPalletizer(Generic, EasyResource):  # type: ignore[misc]  # SDK: API 
         box_prop: str,
         keep_outs: Sequence[Geometry] = (),
         holding: Transform | None = None,
+        reading: RelayReading | None = None,
     ) -> WorldState:
         """The planner's obstacles for one leg of one box's pick.
 
@@ -787,7 +1170,11 @@ class IsaacPalletizer(Generic, EasyResource):  # type: ignore[misc]  # SDK: API 
         that treats it as solid cannot. Keeping the arm off it on the legs that
         are not the descent is the keep-out's job instead. `holding` is the
         box on the cup, geometry that travels with the gripper, on the legs
-        between the grab and the release."""
+        between the grab and the release. `reading` is this box's read of the
+        configured world state stores, only consulted in ``world_state_store``
+        mode: the frame system already carries the store's other fixtures as
+        colliders, but a store's placed boxes reach the planner only through
+        this relay."""
         transforms = [holding] if holding is not None else []
         if self._obstacle_source == _OBSTACLE_SOURCE_PROP_GEOMETRIES:
             obstacles = [
@@ -795,13 +1182,15 @@ class IsaacPalletizer(Generic, EasyResource):  # type: ignore[misc]  # SDK: API 
                 *keep_outs,
             ]
             return world_state(None, obstacles, support_obstacle(_FLOOR_Z_MM), transforms)
-        # world_state_store: the cell's own obstacles come from the frame
-        # system and the store the motion service already consults, so the
-        # keep-outs and the held box are the only things left to state.
-        # Neither carries props.
-        if not keep_outs and not transforms:
+        # world_state_store: the cell's own fixtures come from the frame
+        # system, and the placed boxes from the relayed reading, so the
+        # keep-outs, the relayed boxes and the held box are the only things
+        # left to state. Neither carries props.
+        relayed = list(reading.obstacles) if reading is not None else []
+        obstacles = [*relayed, *keep_outs]
+        if not obstacles and not transforms:
             return WorldState()
-        return world_state(None, list(keep_outs), None, transforms)
+        return world_state(None, obstacles, None, transforms)
 
     async def _pack_all_boxes(self) -> None:
         """Runs the pack, appending each box's record to `self._records` as it
@@ -836,11 +1225,13 @@ class IsaacPalletizer(Generic, EasyResource):  # type: ignore[misc]  # SDK: API 
 
             success = record.outcome == OUTCOME_PLACED
             await self._sequencer.report_placement(seq, success=success, error=record.reason or "")
-            if success:
-                continue
-            consecutive_failures += 1
-            if consecutive_failures >= MAX_ATTEMPTS_PER_SEQ:
-                await self._sequencer.skip_box(seq, reason=record.reason or "")
+            if not success:
+                consecutive_failures += 1
+                if consecutive_failures >= MAX_ATTEMPTS_PER_SEQ:
+                    await self._sequencer.skip_box(seq, reason=record.reason or "")
+            if self._stop_after_seq is not None and record.seq >= self._stop_after_seq:
+                self._stopped_after_seq = self._stop_after_seq
+                break
 
     async def _place_one_box(
         self, mover: Mover, next_box: NextBox
@@ -859,7 +1250,9 @@ class IsaacPalletizer(Generic, EasyResource):  # type: ignore[misc]  # SDK: API 
         assert place_end is not None
         target_pose_mm = _pose_to_dict(place_end)
 
-        def failed_record(reason: str) -> PalletizerRecord:
+        def failed_record(
+            reason: str, planner_obstacles: Mapping[str, int] | None = None
+        ) -> PalletizerRecord:
             return _outcome_record(
                 box_prop,
                 seq,
@@ -867,10 +1260,11 @@ class IsaacPalletizer(Generic, EasyResource):  # type: ignore[misc]  # SDK: API 
                 OUTCOME_FAILED,
                 time.monotonic() - start,
                 reason=reason,
+                planner_obstacles=planner_obstacles,
             )
 
-        def stopped_record() -> PalletizerRecord:
-            return failed_record("stopped before the next motion")
+        def stopped_record(planner_obstacles: Mapping[str, int] | None = None) -> PalletizerRecord:
+            return failed_record("stopped before the next motion", planner_obstacles)
 
         # a stop that lands after the previous box and before this one must not
         # put this box on the station. The restage is a teleport, not a motion,
@@ -880,9 +1274,29 @@ class IsaacPalletizer(Generic, EasyResource):  # type: ignore[misc]  # SDK: API 
         if self._cancel_requested:
             return stopped_record(), True
         if seq > 1:
-            await self._restage_box(box_prop)
+            if self._infeed_position_mm is None:
+                # seq 1's own read never captured an infeed pose to restage
+                # onto - a run started at seq > 1 without one first (a part
+                # restart moved the sequencer's cursor on without a fresh
+                # box_props[0] ever being read) has nothing to send this box
+                # to, and restaging nothing would pick it wherever it happens
+                # to be parked.
+                return (
+                    failed_record(
+                        "no infeed pose captured yet: a run must start at seq 1 after a "
+                        "part restart"
+                    ),
+                    False,
+                )
+            try:
+                await self._restage_box(box_prop)
+            except RestageError as error:
+                return failed_record(str(error)), False
 
-        geometries = await self._settled_geometries(box_prop)
+        geometries, _pick_settle_s = await self._settled_geometries(box_prop)
+        reading: RelayReading | None = None
+        if self._obstacle_source == _OBSTACLE_SOURCE_WORLD_STATE_STORE:
+            reading = await read_store_obstacles(self._stores)
         if seq == 1 and self._infeed_position_mm is None:
             infeed_pose_mm = _box_pose_mm(geometries, box_prop)
             if infeed_pose_mm is not None:
@@ -901,10 +1315,47 @@ class IsaacPalletizer(Generic, EasyResource):  # type: ignore[misc]  # SDK: API 
         # cup has to reach both, so a keep-out stands in their place on every
         # leg that is not the descent onto them.
         pick_zone = box_keepout(geometries, box_prop)
-        place_zone = support_keepout(
+        place_zone = support_keepout(geometries, self._place_support_prop, place_end.z)
+        # the same airspace raised by PLACE_APPROACH_CLEARANCE_MM, for the two
+        # legs the arm runs with nothing on the cups and the stack nearby. On
+        # the GPU run of 2026-10-01 both hits on the second layer began inside
+        # the next box's free approach to the pick standoff, the arm empty,
+        # 110 mm above the box it had just released, that box present as an
+        # obstacle and under the place keep-out, both reaching exactly to its
+        # top face: the planner had no margin and the cups swept the box. The
+        # legs that carry a box cannot use it. With the box on the cups its
+        # bottom rides PLACE_APPROACH_CLEARANCE_MM + 10 mm above the layer top
+        # (the sequencer's standoff is box height plus 10, the carry adds the
+        # approach clearance), so a keep-out raised by the clearance would
+        # leave the held box 10 mm clear and the planner refusing.
+        place_zone_empty = support_keepout(
             geometries,
             self._place_support_prop,
-            min(place_start.z, place_end.z) - PLACE_KEEPOUT_HEADROOM_MM,
+            place_end.z + PLACE_APPROACH_CLEARANCE_MM,
+            label="place_support_keepout_empty",
+        )
+        keepout_count = sum(1 for zone in (pick_zone, place_zone) if zone is not None)
+        prop_count = (
+            len(obstacles_from_prop_geometries(geometries, {box_prop}))
+            if self._obstacle_source == _OBSTACLE_SOURCE_PROP_GEOMETRIES
+            else 0
+        )
+        planner_obstacles: Mapping[str, int] = {
+            "relayed": reading.relayed if reading is not None else 0,
+            "skipped_not_in_world": reading.skipped_not_in_world if reading is not None else 0,
+            "skipped_no_geometry": reading.skipped_no_geometry if reading is not None else 0,
+            "keepouts": keepout_count,
+            "props": prop_count,
+        }
+        LOGGER.info(
+            "palletizer planner obstacles for seq %d: %d relayed from %s, %d skipped "
+            "(parent not world), %d keep-outs, %d props",
+            seq,
+            planner_obstacles["relayed"],
+            ", ".join(name for name, _store in self._stores),
+            planner_obstacles["skipped_not_in_world"],
+            planner_obstacles["keepouts"],
+            planner_obstacles["props"],
         )
 
         # the box on the cup, for the legs between the grab and the release.
@@ -930,14 +1381,41 @@ class IsaacPalletizer(Generic, EasyResource):  # type: ignore[misc]  # SDK: API 
             with one segment that turned the box over the top of the arm and
             into the forearm. Forbidding the turn is what carrying means."""
             state = self._world_state_for(
-                geometries, box_prop, [zone for zone in keep_outs if zone is not None], holding
+                geometries,
+                box_prop,
+                [zone for zone in keep_outs if zone is not None],
+                holding,
+                reading,
             )
             level = holding is not None
 
             async def move(pose: Pose, linear: bool) -> bool:
                 if self._cancel_requested:
                     return False
-                await mover.move_to(pose, state, linear=linear, level=level)
+                try:
+                    await mover.move_to(
+                        pose,
+                        state,
+                        linear=linear,
+                        level=level,
+                        plan_timeout_s=None if linear else FIRST_FREE_PLAN_TIMEOUT_S,
+                    )
+                except Exception as error:
+                    if linear or not is_planner_timeout(error):
+                        raise
+                    LOGGER.warning(
+                        "free move for seq %d to %s timed out in the planner (%s), "
+                        "planning once more with seed %d",
+                        seq,
+                        _pose_to_dict(pose),
+                        error,
+                        RETRY_PLANNER_SEED,
+                    )
+                    if self._cancel_requested:
+                        return False
+                    await mover.move_to(
+                        pose, state, linear=linear, level=level, planner_seed=RETRY_PLANNER_SEED
+                    )
                 return True
 
             return move
@@ -945,55 +1423,134 @@ class IsaacPalletizer(Generic, EasyResource):  # type: ignore[misc]  # SDK: API 
         # the pick zone is open only while descending onto and lifting off the
         # box, the place zone only while descending onto and retreating from
         # the pallet. Every other leg has both closed. The box rides the cup
-        # from the lift to the place descent.
-        cross_cell = mover_avoiding(pick_zone, place_zone)
+        # from the lift to the place descent. The place zone is the raised one
+        # on the two empty-armed legs near the stack, the approach to the pick
+        # standoff and the fallback retreat, and flush with the layer's top
+        # on every other leg.
+        cross_cell = mover_avoiding(pick_zone, place_zone_empty)
         over_the_pick = mover_avoiding(place_zone)
-        over_the_place = mover_avoiding(pick_zone)
+        over_the_place = mover_avoiding(pick_zone, place_zone_empty)
         lift_holding = mover_avoiding(place_zone, holding=held_box)
         cross_cell_holding = mover_avoiding(pick_zone, place_zone, holding=held_box)
         place_holding = mover_avoiding(pick_zone, holding=held_box)
 
-        if not await approach_and_descend(
-            cross_cell,
-            over_the_pick,
-            pick_grasp_standoff_pose(top_face_xyz_mm),
-            pick_grasp_pose(top_face_xyz_mm),
-        ):
-            return stopped_record(), True
+        async with _leg_timeline(seq, "approach to the pick standoff"):
+            approached = await cross_cell(pick_grasp_standoff_pose(top_face_xyz_mm), False)
+        if not approached:
+            return stopped_record(planner_obstacles), True
+
+        async with _leg_timeline(seq, "descent onto the box"):
+            descended = await move_linear_or_free(
+                over_the_pick, pick_grasp_pose(top_face_xyz_mm), "grasp descent"
+            )
+        if not descended:
+            return stopped_record(planner_obstacles), True
 
         if self._cancel_requested:
-            return stopped_record(), True
-        if not await self._gripper.grab():
+            return stopped_record(planner_obstacles), True
+        async with _leg_timeline(seq, "grab"):
+            grabbed = await self._gripper.grab()
+        if not grabbed:
             # with the poses: a cup that found nothing is either in the wrong
             # place or over a box that moved, and the two read identically
             # without them
             return failed_record(
                 "gripper reported no object grasped, cup sent to "
                 f"{_pose_to_dict(pick_grasp_pose(top_face_xyz_mm))} for a box whose top face "
-                f"read {top_face_xyz_mm}"
+                f"read {top_face_xyz_mm}",
+                planner_obstacles,
             ), False
 
-        if not await move_linear_or_free(
-            lift_holding, pick_grasp_standoff_pose(top_face_xyz_mm), "lift off the pick"
-        ):
-            return stopped_record(), True
-        if not await cross_cell_holding(place_start, False):
-            return stopped_record(), True
-        if not await self._descend_to_release(place_holding, place_release_pose(place_end)):
-            return stopped_record(), True
+        # the lift runs straight up to the height the carry runs at, the
+        # approach's, so the box hangs above the place keep-out before the
+        # sweep begins. On 2026-09-24 a carry from the standoff, box bottom
+        # 371 mm up, had to cross the keep-out's airspace, and from one base
+        # branch the planner found no way round it in five minutes. One
+        # straight leg rather than a lift to the standoff and a climb: the
+        # standoff is the pick's own pose and means nothing to the carry, and
+        # the extra stop cost 10 s a box on the 17:50 run
+        approach = place_approach_pose(place_start)
+        async with _leg_timeline(seq, "lift to carry height"):
+            lifted = await move_linear_or_free(
+                lift_holding, carry_height_pose(top_face_xyz_mm, approach.z), "lift to carry height"
+            )
+        if not lifted:
+            return stopped_record(planner_obstacles), True
+        # the carry ends above the sequencer's standoff and the box settles
+        # there; the straight leg down to place_start is what brings it over
+        # its neighbours, and by then it hangs still
+        async with _leg_timeline(seq, "carry to the place approach"):
+            carried = await cross_cell_holding(approach, False)
+        if not carried:
+            return stopped_record(planner_obstacles), True
+
+        # the box swings on the cups through the carry - PLACE_APPROACH_CLEARANCE_MM's
+        # own docstring measures it at 7.5 to 10 degrees - and a straight descent onto
+        # a same-layer neighbour started before that swing stops is what knocked a box
+        # 524 mm off the pallet on the GPU run of 2026-09-28.
+        swing_s = await self._wait_for_the_carried_box_to_stop_swinging(seq, box_prop)
+
+        async with _leg_timeline(seq, "settle over the slot"):
+            settled_over_the_slot = await move_linear_or_free(
+                place_holding, place_start, "settle over the slot"
+            )
+        if not settled_over_the_slot:
+            return stopped_record(planner_obstacles), True
+        async with _leg_timeline(seq, "place descent"):
+            descended_to_release = await self._descend_to_release(
+                place_holding, place_release_pose(place_end)
+            )
+        if not descended_to_release:
+            return stopped_record(planner_obstacles), True
 
         if self._cancel_requested:
-            return stopped_record(), True
-        await self._gripper.open()
-        await move_linear_or_free(over_the_place, place_start, "retreat off the place")
+            return stopped_record(planner_obstacles), True
+        async with _leg_timeline(seq, "release"):
+            await self._gripper.open()
+        released_at = time.monotonic()
+        sampler = asyncio.create_task(self._settle_after_release(box_prop, released_at))
+        try:
+            async with _leg_timeline(seq, "retreat off the place"):
+                # the box just went down where the pick keep-out used to be
+                # empty air - the retreat keeps out of it too, or the straight
+                # line off the slot clips the box it just placed. Built from a
+                # fresh read rather than the stale `geometries` above, since
+                # that reading predates the box ever landing there.
+                released_geometries = await self._prop_geometries()
+                placed_zone = placed_box_keepout(released_geometries, box_prop)
+                retreat_off_the_place = mover_avoiding(pick_zone, placed_zone)
+                try:
+                    await move_linear_or_free(
+                        retreat_off_the_place, place_start, "retreat off the place"
+                    )
+                except Exception as error:
+                    if is_execution_failure(error):
+                        raise
+                    LOGGER.warning(
+                        "retreat off the place with %r as an obstacle was refused (%s); "
+                        "retreating without it, which can clip that box",
+                        box_prop,
+                        error,
+                    )
+                    await move_linear_or_free(over_the_place, place_start, "retreat off the place")
+        except BaseException:
+            sampler.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await sampler
+            raise
 
-        # the box settles onto its slot after the release, so the pose
-        # reported back is read once it has stopped
-        settled_geometries = await self._settled_geometries(box_prop)
+        # the sampler has been polling since the release, through the retreat
+        # that follows it, so settle_s measures from the release rather than
+        # from whenever the retreat happens to finish
+        settled_geometries, settle_s = await sampler
         measured_pose = _measured_box_pose(settled_geometries, box_prop)
         measured_pose_mm = _pose_to_dict(measured_pose) if measured_pose is not None else None
-        if measured_pose is not None:
-            await self._sequencer.set_box_transform(seq, measured_pose)
+        # the store centres its own geometry on the pose it is given, so the
+        # transform published to it is the box's CENTRE, not the top face
+        # measured_pose_mm keeps for the record
+        centre_pose_mm = _box_pose_mm(settled_geometries, box_prop)
+        if centre_pose_mm is not None:
+            await self._sequencer.set_box_transform(seq, _pose_from_mm(centre_pose_mm))
 
         return (
             _outcome_record(
@@ -1003,6 +1560,9 @@ class IsaacPalletizer(Generic, EasyResource):  # type: ignore[misc]  # SDK: API 
                 OUTCOME_PLACED,
                 time.monotonic() - start,
                 measured_pose_mm=measured_pose_mm,
+                planner_obstacles=planner_obstacles,
+                settle_s=settle_s,
+                swing_s=swing_s,
             ),
             False,
         )

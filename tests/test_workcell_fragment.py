@@ -160,7 +160,7 @@ def _pack_sequencer_attributes() -> dict:
 
 def test_the_pack_sequencer_attributes_fill_a_full_2x2x2_pack_of_8():
     # packColumn's own formulas (viam-labs/pack-sequencer, 0.3.0), applied to
-    # the vendored pallet (500 x 350 mm) and box (200 x 150 x 100 mm): a
+    # the vendored pallet (500 x 350 mm) and nominal box (200 x 150 x 100 mm): a
     # change to either dimension that breaks the 2 x 2 x 2 pack of 8 should
     # fail here, on the fragment's own numbers, rather than on the GPU.
     pallet = next(c for c in _fragment()["components"] if c["name"] == "pallet")
@@ -213,6 +213,9 @@ def test_the_overlay_gripper_matches_the_machine_configs_epick_offset_and_delay(
     assert gripper["attributes"]["grab_delay_ms"] == 250
 
 
+# how far inside the sequencer's slot the sim box sits, per side, in x and y
+BOX_SIDE_CLEARANCE_MM = 3.0
+
 _BOX_PROP_NAMES = [f"infeed_box_{i}" for i in range(1, 9)]
 
 
@@ -228,10 +231,17 @@ def test_the_overlay_world_declares_exactly_the_eight_box_props():
     # world x. A 200 mm box laid along y instead would need 400 mm of a
     # 350 mm pallet for one row of two.
     attrs = _pack_sequencer_attributes()
-    expected_dims_mm = (attrs["box_width_mm"], attrs["box_length_mm"], attrs["box_height_mm"])
+    nominal_mm = (attrs["box_width_mm"], attrs["box_length_mm"], attrs["box_height_mm"])
     for box in props.values():
         box_dims_mm = tuple(box["size"] * 1000 * scale for scale in box["scale"])
-        assert box_dims_mm == pytest.approx(expected_dims_mm)
+        # BOX_SIDE_CLEARANCE_MM inside the slot on each side in x and y (the
+        # overlay's own note on infeed_box_1 says why): the sequencer's slots
+        # touch, and a nominal box swinging on the cups catches its neighbour.
+        # Height stays nominal, since the sequencer's layer poses are built
+        # from it. A box turned ninety degrees still fails here, on x and y.
+        assert nominal_mm[0] - box_dims_mm[0] == pytest.approx(2 * BOX_SIDE_CLEARANCE_MM)
+        assert nominal_mm[1] - box_dims_mm[1] == pytest.approx(2 * BOX_SIDE_CLEARANCE_MM)
+        assert box_dims_mm[2] == pytest.approx(nominal_mm[2])
 
 
 def test_the_infeed_box_sits_inside_the_pick_stations_declared_footprint():
@@ -413,3 +423,20 @@ def test_every_box_prop_carries_a_physical_density():
         assert 100.0 <= density <= 1000.0, (
             f"{prop['name']}: {prop['mass']} kg over {volume_m3:.4f} m3 is {density:.0f} kg/m3"
         )
+
+
+def test_every_box_prop_carries_the_named_palletizer_physics_set():
+    """The eight boxes and `PALLETIZER_BOX_PHYSICS` are one set of numbers.
+    The overlay is what the machine runs and the constant is what the code
+    and its docs name, and the two drifting apart is how the sorting cell's
+    material assignments once reached the GPU machine and never its
+    fragment."""
+    from isaac_module.physics import PALLETIZER_BOX_PHYSICS, PROP_PHYSICS_KEYS
+
+    overlay = json.loads(OVERLAY_PATH.read_text())
+    props = overlay["components"][0]["attributes"]["props"]
+    assert props
+
+    for prop in props:
+        physics_keys = {key: prop[key] for key in PROP_PHYSICS_KEYS if key in prop}
+        assert physics_keys == PALLETIZER_BOX_PHYSICS, prop["name"]

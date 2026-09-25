@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import random
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -9,6 +9,7 @@ from viam.logging import getLogger
 
 from ..assets import resolve_asset
 from ..materials import MATERIAL_SPEC_KEY, material_spec, prop_display_color
+from ..physics import apply_prop_physics, prop_physics
 from ..prim_paths import prim_name
 from ..prop_scatter import (
     DEFAULT_MIN_SEPARATION_M,
@@ -35,6 +36,15 @@ if TYPE_CHECKING:
     from ..sim_manager import SimManager
 
 LOGGER = getLogger(__name__)
+
+
+def _merged_prop_physics(spec: Mapping[str, Any], physics: Mapping[str, Any]) -> dict[str, float]:
+    """``physics`` validated against the prop's existing keys, so a change
+    that only breaks a cross-key bound (a rest offset above the contact
+    offset already on the prop) is refused before anything reaches the sim.
+    Returns only the keys ``physics`` names, as ``prop_physics`` types them."""
+    merged = prop_physics({**spec, **dict(physics)})
+    return {key: merged[key] for key in physics}
 
 
 def _require_not_visual(sim: SimManager, verb: str, names: Sequence[str]) -> None:
@@ -97,6 +107,17 @@ class WorldHandle:
         its velocities. Never rewrites the prop's spawn/default state: a
         later reset() still restores the configured pose (mock gate).
         Unknown name -> ValueError."""
+        raise NotImplementedError
+
+    def set_prop_physics(self, name: str, physics: Mapping[str, Any]) -> dict[str, float]:
+        """Apply ``physics`` (a subset of PROP_PHYSICS_KEYS) onto the
+        already-spawned prop ``name`` and return its effective physics
+        keys afterward. Unknown name or a visual prop -> ValueError."""
+        raise NotImplementedError
+
+    def prop_physics(self, name: str) -> dict[str, float]:
+        """The prop's current effective physics keys (the subset of
+        PROP_PHYSICS_KEYS its spawn spec carries). Unknown name -> ValueError."""
         raise NotImplementedError
 
     def randomize_props(
@@ -318,6 +339,16 @@ class MockWorldHandle(WorldHandle):
         if orientation_wxyz is not None:
             entry["orientation"] = _as_quat(orientation_wxyz)
 
+    def set_prop_physics(self, name: str, physics: Mapping[str, Any]) -> dict[str, float]:
+        _require_not_visual(self._sim, "set_prop_physics", [name])
+        entry = self._entry(name)
+        values = _merged_prop_physics(entry["spawn"], physics)
+        entry["spawn"] = {**entry["spawn"], **values}
+        return prop_physics(entry["spawn"])
+
+    def prop_physics(self, name: str) -> dict[str, float]:
+        return prop_physics(self._entry(name)["spawn"])
+
     def randomize_props(
         self,
         names: list[str],
@@ -537,6 +568,27 @@ class IsaacWorldHandle(WorldHandle):
         self._prop_spec(name)  # ValueError on unknown name
         spawned_prim_name = prim_name(name)
         self._sim.run(lambda: self._teleport(spawned_prim_name, position_m, orientation_wxyz))
+
+    def set_prop_physics(self, name: str, physics: Mapping[str, Any]) -> dict[str, float]:
+        _require_not_visual(self._sim, "set_prop_physics", [name])
+        spec = self._prop_spec(name)
+        values = _merged_prop_physics(spec, physics)
+        spawned_prim_name = prim_name(name)
+
+        def _apply() -> None:
+            apply_prop_physics(
+                self._sim._isaac,
+                self._sim.world,
+                f"/World/{spawned_prim_name}",
+                {"name": spawned_prim_name, **values},
+            )
+
+        self._sim.run(_apply)
+        spec.update(values)
+        return prop_physics(spec)
+
+    def prop_physics(self, name: str) -> dict[str, float]:
+        return prop_physics(self._prop_spec(name))
 
     def randomize_props(
         self,

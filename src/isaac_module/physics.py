@@ -2,7 +2,9 @@
 
 Per-prop physics keys on the world component's ``props`` entries:
 
-  mass (kg) - friction (static = dynamic) - restitution - contact_offset (m) - rest_offset (m)
+  mass (kg) - friction (static = dynamic) - restitution - contact_offset (m) -
+  rest_offset (m) - solver_position_iterations - solver_velocity_iterations
+  (each an integer in [1, PROP_SOLVER_ITERATIONS_MAX])
 
 map to a PhysicsMaterial (frictionCombineMode "max") plus rigid-body /
 collision attributes on the spawned prim. ``apply_prop_physics`` runs on the
@@ -23,11 +25,32 @@ from viam.logging import getLogger
 
 LOGGER = getLogger(__name__)
 
-PROP_PHYSICS_KEYS = ("mass", "friction", "restitution", "contact_offset", "rest_offset")
+PROP_PHYSICS_KEYS = (
+    "mass",
+    "friction",
+    "restitution",
+    "contact_offset",
+    "rest_offset",
+    "solver_position_iterations",
+    "solver_velocity_iterations",
+)
+# PhysX stores a rigid body's per-body solver iteration counts in a byte
+# (physxRigidBody:solverPositionIterationCount and its velocity twin).
+PROP_SOLVER_ITERATIONS_MAX = 255
 
 # Block/table material for the pick cell.
 PICK_CELL_BLOCK_PHYSICS: dict[str, float] = {
     "mass": 0.05,
+    "friction": 0.7,
+    "restitution": 0.0,
+    "contact_offset": 0.005,
+}
+# The palletizer's box, a 194 x 144 x 100 mm carton at 2 kg. Stacking eight
+# of them is a different contact problem from picking one block off a table,
+# so this set is named on its own and tuned on its own: every value here is
+# what the palletizer overlay ships, and a change to one is a change to both.
+PALLETIZER_BOX_PHYSICS: dict[str, float] = {
+    "mass": 2.0,
     "friction": 0.7,
     "restitution": 0.0,
     "contact_offset": 0.005,
@@ -48,13 +71,38 @@ PICK_CELL_RENDERING_DT = (
 ARM_SOLVER_POSITION_ITERATIONS = 64
 
 
+_SOLVER_ITERATION_KEYS = ("solver_position_iterations", "solver_velocity_iterations")
+
+
+def _prop_solver_iterations(key: str, value: Any) -> int:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"prop physics: {key!r} must be an integer (got {value!r})")
+    if isinstance(value, float) and not value.is_integer():
+        raise ValueError(f"prop physics: {key!r} must be an integer (got {value!r})")
+    count = int(value)
+    if not (1 <= count <= PROP_SOLVER_ITERATIONS_MAX):
+        raise ValueError(
+            f"prop physics: {key!r} must be in [1, {PROP_SOLVER_ITERATIONS_MAX}] (got {value!r})"
+        )
+    return count
+
+
 def prop_physics(prop: dict[str, Any]) -> dict[str, float]:
-    """The subset of PROP_PHYSICS_KEYS ``prop`` sets, as floats.
+    """The subset of PROP_PHYSICS_KEYS ``prop`` sets, as floats (the two
+    solver iteration keys as ints).
 
     Raises ValueError for a value outside its physical range (negative mass or
     offsets, friction < 0, restitution outside [0, 1], rest_offset above
-    contact_offset)."""
-    values = {key: float(prop[key]) for key in PROP_PHYSICS_KEYS if key in prop}
+    contact_offset, a solver iteration count outside
+    [1, PROP_SOLVER_ITERATIONS_MAX] or not integral)."""
+    values: dict[str, float] = {}
+    for key in PROP_PHYSICS_KEYS:
+        if key not in prop:
+            continue
+        if key in _SOLVER_ITERATION_KEYS:
+            values[key] = _prop_solver_iterations(key, prop[key])
+        else:
+            values[key] = float(prop[key])
 
     if "mass" in values and values["mass"] <= 0:
         raise ValueError(f"prop physics: 'mass' must be positive (got {values['mass']!r})")
@@ -175,3 +223,22 @@ def apply_prop_physics(isaac: Any, world: Any, prim_path: str, prop: dict[str, A
         usd_physics = getattr(isaac, "UsdPhysics", None)
         if prim is not None and usd_physics is not None:
             usd_physics.MassAPI.Apply(prim).CreateMassAttr(float(mass))
+
+    solver_position = values.get("solver_position_iterations")
+    solver_velocity = values.get("solver_velocity_iterations")
+    if solver_position is not None or solver_velocity is not None:
+        # Solver iteration counts live on the stage (physxRigidBody schema),
+        # not the physics view, so they survive the reset that follows a spawn.
+        prim = getattr(obj, "prim", None)
+        physx = getattr(isaac, "PhysxSchema", None)
+        if prim is not None and physx is not None:
+            api = physx.PhysxRigidBodyAPI.Apply(prim)
+            if solver_position is not None:
+                api.CreateSolverPositionIterationCountAttr().Set(int(solver_position))
+            if solver_velocity is not None:
+                api.CreateSolverVelocityIterationCountAttr().Set(int(solver_velocity))
+        else:
+            LOGGER.warning(
+                "prop %s: solver iteration counts are not applied (no prim or PhysxSchema)",
+                prop.get("name"),
+            )

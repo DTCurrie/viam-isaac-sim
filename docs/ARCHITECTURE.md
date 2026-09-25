@@ -57,7 +57,8 @@ into. Read it before you add a model or move a file.
 | `src/isaac_module/length_units.py` | 11 | The one millimeter-to-meter conversion. |
 | `src/isaac_module/encoding.py` | 203 | Image and point cloud encoding. |
 | `src/isaac_module/kinematics.py` | 416 | SVA and URDF chains, forward and inverse. |
-| `src/isaac_module/physics.py` | 168 | Solver iteration counts and prop physics defaults. |
+| `src/isaac_module/physics.py` | 244 | Prop physics keys, including the two solver iteration counts, and the named `PALLETIZER_BOX_PHYSICS` and `PICK_CELL_BLOCK_PHYSICS` sets. |
+| `src/isaac_module/stack_stability.py` | 351 | Stack stability as pure functions over pose samples: the settle policy, the stack tolerances and the verdict a placed pack is judged against. |
 | `src/isaac_module/errors.py` | 79 | The `SimError` hierarchy, each class carrying its gRPC status. |
 | `src/isaac_module/sdk_patches.py` | 58 | One monkeypatch that adds the `MoveThroughJointPositions` handler the Python SDK 0.80 does not serve. |
 | `src/isaac_module/cell_layout.py` | 157 | The sorting cell's geometry. |

@@ -27,13 +27,13 @@
         },
         "props": [
           {
-            "_comment": "Mass is 2.0 kg, not a round 5.0. The box is 0.2 x 0.15 x 0.1 m, so 0.003 cubic metres, and 5 kg of it is 1667 kg per cubic metre, denser than packed sand. 2 kg is 667, a heavily packed carton, and it leaves headroom under the UR5e's 5 kg rating for a 196 mm tool that hangs the box its full height below the flange. The GPU run of 2026-09-16 carried 5 kg and the wrist visibly swung, stalling j3 6 to 10 degrees short of every place waypoint. Measured, not derived. pick-station reports `corner at (200, -1200, 220)` in its own get_attributes summary, and its box_origin_offset_mm is (200, 900), so the infeed origin is (400, -300). Its frame-declared collider spans x 200..600 and y -1200..-100, which contains that point. z is the station top at 220 plus half a 100 mm box. An earlier calculation read the offset against the station's FRAME instead of its corner and got (600, 250), which is 350 mm past the near edge, so the box fell to the floor. The other seven boxes are parked clear of the cell at x -2000, an invented spot that only has to be out of the way, and the palletizer re-poses each onto wherever box_props[0] actually rests.",
+            "_comment": "Mass is 2.0 kg, not a round 5.0. The box is 0.2 x 0.15 x 0.1 m, so 0.003 cubic metres, and 5 kg of it is 1667 kg per cubic metre, denser than packed sand. 2 kg is 667, a heavily packed carton, and it leaves headroom under the UR5e's 5 kg rating for a 196 mm tool that hangs the box its full height below the flange. The GPU run of 2026-09-16 carried 5 kg and the wrist visibly swung, stalling j3 6 to 10 degrees short of every place waypoint. Measured, not derived. pick-station reports `corner at (200, -1200, 220)` in its own get_attributes summary, and its box_origin_offset_mm is (200, 900), so the infeed origin is (400, -300). Its frame-declared collider spans x 200..600 and y -1200..-100, which contains that point. z is the station top at 220 plus half a 100 mm box. An earlier calculation read the offset against the station's FRAME instead of its corner and got (600, 250), which is 350 mm past the near edge, so the box fell to the floor. The other seven boxes are parked clear of the cell at x -2000, an invented spot that only has to be out of the way, and the palletizer re-poses each onto wherever box_props[0] actually rests. Scale 3.88 x 2.88 x 2 draws the box 194 x 144 x 100 mm, 3 mm inside the sequencer's 200 x 150 slot on every side: the sequencer's slots touch, a box on the cups swings up to 10 degrees during a carry, and on 2026-09-24 a nominal-size box 3 caught its neighbour's top edge on two runs out of two. The density figures above are the nominal box's; at 194 x 144 they run 5 percent higher. The physics keys on every box are PALLETIZER_BOX_PHYSICS in physics.py, pinned by a test, so a tuning change lands in both places or in neither.",
             "name": "infeed_box_1",
             "type": "cube",
             "size": 0.05,
             "scale": [
-              4.0,
-              3.0,
+              3.88,
+              2.88,
               2.0
             ],
             "position": [
@@ -51,8 +51,8 @@
             "type": "cube",
             "size": 0.05,
             "scale": [
-              4.0,
-              3.0,
+              3.88,
+              2.88,
               2.0
             ],
             "position": [
@@ -70,8 +70,8 @@
             "type": "cube",
             "size": 0.05,
             "scale": [
-              4.0,
-              3.0,
+              3.88,
+              2.88,
               2.0
             ],
             "position": [
@@ -89,8 +89,8 @@
             "type": "cube",
             "size": 0.05,
             "scale": [
-              4.0,
-              3.0,
+              3.88,
+              2.88,
               2.0
             ],
             "position": [
@@ -108,8 +108,8 @@
             "type": "cube",
             "size": 0.05,
             "scale": [
-              4.0,
-              3.0,
+              3.88,
+              2.88,
               2.0
             ],
             "position": [
@@ -127,8 +127,8 @@
             "type": "cube",
             "size": 0.05,
             "scale": [
-              4.0,
-              3.0,
+              3.88,
+              2.88,
               2.0
             ],
             "position": [
@@ -146,8 +146,8 @@
             "type": "cube",
             "size": 0.05,
             "scale": [
-              4.0,
-              3.0,
+              3.88,
+              2.88,
               2.0
             ],
             "position": [
@@ -165,8 +165,8 @@
             "type": "cube",
             "size": 0.05,
             "scale": [
-              4.0,
-              3.0,
+              3.88,
+              2.88,
               2.0
             ],
             "position": [
@@ -222,7 +222,16 @@
           -90,
           0,
           0
-        ]
+        ],
+        "_comment": "drive_gains: 0.1 of joint armature on the two wrist joints, which the UR5e asset authors at zero. With a 2 kg box jointed onto the cups the wrist drives go soft in PhysX and the base swing outruns them; at 0.1 wrist 3 holds its 180 deg/s limit with the box on (measured 2026-09-24, docs/PARITY.md).",
+        "drive_gains": {
+          "wrist_2_joint": {
+            "armature": 0.1
+          },
+          "wrist_3_joint": {
+            "armature": 0.1
+          }
+        }
       }
     },
     {

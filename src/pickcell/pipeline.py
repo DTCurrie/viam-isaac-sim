@@ -115,12 +115,23 @@ class Mover(Protocol):
         ...
 
     async def move_to(
-        self, pose: Pose, world_state: WorldState, linear: bool = False, level: bool = False
+        self,
+        pose: Pose,
+        world_state: WorldState,
+        linear: bool = False,
+        level: bool = False,
+        *,
+        planner_seed: int | None = None,
+        plan_timeout_s: float | None = None,
     ) -> None:
         """Move the gripper's TCP frame to `pose` (mm, world frame). ``linear``
         asks for a straight-line approach (the grasp descent and the lift).
         ``level`` asks a free path to keep the tool's orientation on the way,
-        which is how a carried payload travels without being turned over."""
+        which is how a carried payload travels without being turned over.
+        ``planner_seed`` is the motion planner's random seed for this one move.
+        None leaves the planner's own default.
+        ``plan_timeout_s`` is the planning bound for this one move in seconds.
+        None keeps the mover's own bound for that kind of move."""
         ...
 
 

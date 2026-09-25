@@ -583,7 +583,14 @@ class MockMover:
         await self.move_to(pose, world_state, linear)
 
     async def move_to(
-        self, pose: Pose, world_state: WorldState, linear: bool = False, level: bool = False
+        self,
+        pose: Pose,
+        world_state: WorldState,
+        linear: bool = False,
+        level: bool = False,
+        *,
+        planner_seed: int | None = None,
+        plan_timeout_s: float | None = None,
     ) -> None:
         if self._call_count >= len(self._joint_sets_deg):
             raise RuntimeError("mock mover: no more canned joint sets for this pick sequence")

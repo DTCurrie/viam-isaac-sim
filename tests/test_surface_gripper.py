@@ -780,7 +780,19 @@ def test_only_the_shear_carrying_joint_locks_the_lateral_axes():
     spring_joint = stage.prims["/World/S/AttachmentPoint_1"]
     for axis in ("transX", "transY", "rotZ"):
         assert shear_joint.attrs[f"limit:{axis}:low"].value == 1.0
+    for axis in ("transX", "transY"):
         assert f"limit:{axis}:low" not in spring_joint.attrs
+    # rotation about the cup axis is limited on the spring cups rather than
+    # free: PhysX refuses a D6 with one swing limited and the other free under
+    # per-axis limits (`Double pyramid mode not supported`), and on
+    # 2026-09-24 that refusal ran every physics step of every hold while the
+    # plugin released and re-gripped the box mid-carry
+    assert spring_joint.attrs["limit:rotZ:low"].value == pytest.approx(
+        -compliance.lateral_limit_deg
+    )
+    assert spring_joint.attrs["limit:rotZ:high"].value == pytest.approx(
+        compliance.lateral_limit_deg
+    )
     for prim in (shear_joint, spring_joint):
         assert prim.attrs["limit:transZ:low"].value == pytest.approx(-compliance.dead_band_m)
         assert prim.attrs["physxLimit:transZ:stiffness"].value == compliance.stiffness_n_per_m
@@ -788,3 +800,33 @@ def test_only_the_shear_carrying_joint_locks_the_lateral_axes():
             assert prim.attrs[f"limit:{axis}:high"].value == pytest.approx(
                 compliance.lateral_limit_deg
             )
+
+
+def test_no_compliant_joint_leaves_one_swing_axis_limited_and_the_other_free():
+    """The PhysX D6 rule, checked on every cup of a rig rather than on one
+    joint: with the forward axis Z, rotY and rotZ are the two swing axes, and
+    a joint that limits one while leaving the other free is rejected by the
+    solver on every step. Locked or limited both pass."""
+    stage = _Stage()
+    compliance = CupCompliance()
+    for index in range(4):
+        author_attachment_joint(
+            _UsdPhysics,
+            _Sdf,
+            _Gf,
+            _RobotSchema(),
+            stage,
+            f"/World/S/AttachmentPoint_{index}",
+            "/World/arm/wrist_3_link",
+            "/World/S/Anchor",
+            (0.0, 0.0, 0.196),
+            (0.0, 0.0, 0.0),
+            forward_axis="Z",
+            compliance=compliance,
+            carries_shear=index == 0,
+            physx_schema=_PhysxSchema,
+        )
+    for index in range(4):
+        prim = stage.prims[f"/World/S/AttachmentPoint_{index}"]
+        swings_constrained = [f"limit:rot{axis}:low" in prim.attrs for axis in ("Y", "Z")]
+        assert swings_constrained == [True, True], f"cup {index}: {swings_constrained}"

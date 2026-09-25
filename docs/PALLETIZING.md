@@ -20,7 +20,9 @@ Every pose comes from the vendored fragment. A UR5e stands on a 150 mm `robot-pe
 world origin. The `pick-station` sits at (400, -650, 200) mm and the `pallet` at (200, 500, 200) mm,
 where a pallet's frame origin is its bounding-box centroid, so its deck top is half its
 `thickness_mm` above that. Boxes are 150 x 200 x 100 mm, from `pack-sequencer`'s own
-`box_length_mm`, `box_width_mm` and `box_height_mm`.
+`box_length_mm`, `box_width_mm` and `box_height_mm`. The sim's box props are drawn 3 mm inside
+that footprint on every side, 194 x 144 x 100 mm, because the sequencer's slots touch and a box
+swinging on the cups needs somewhere to go. The sequencer plans and draws the nominal box.
 
 The earlier version of this cell invented all of those numbers. Adopting the workcell's means
 there is nothing here to defend or to keep in sync.
@@ -91,6 +93,49 @@ vacuum over `release_delay_ms`, 180 ms by default.
 Boxes are cardboard and are not identified by colour, so this cell runs no colour detectors and the
 world's albedo textures are free to make cardboard look like cardboard.
 
+## Does the stack stand
+
+A stack held when every box is within 3 mm of its target at settle, the overlay's own slot inset
+past which a box has crossed into a neighbour's slot. It also held when every box is within 1 mm of
+its settled pose after a 30 second hold with the arm parked, the palletizer's own settle tolerance,
+since a box that moved more than that did not hold. And it held when every box is within 2 degrees
+of the target's orientation at both readings, the checklist's own release tilt tolerance. Each bound
+lives on `StackTolerances` in `src/isaac_module/stack_stability.py`. One box past any bound fails the
+whole stack, and the verdict names the box and the bound it crossed.
+
+A body counts as settled once every reading over a trailing 0.25 second window stays within 1 mm of
+the reading that opened the window, sampled every 50 ms with a 5 second timeout. This replaces
+watching for two consecutive reads to agree, since on 2026-09-16 a box read mid-fall agreed with
+itself for one poll and the cup closed on air. These four numbers are `SettlePolicy` in
+`stack_stability.py`.
+
+Every placed record carries `settle_s`, seconds from the release to the measured onset of
+stillness. The sampler starts at the release and runs through the retreat, so the box's own fall and
+settle are inside the window it measures. `settle_s` is absent from a record when the box never
+settled inside the policy's timeout. A placed record also carries `swing_s`: after the carry, the palletizer
+waits for the box on the cups to stop swinging, under the same policy, before it settles over the
+slot, and `swing_s` is how long that took. Every leg of a placement logs its start and its
+duration with the seq (`palletizer seq N leg <name>: start`, then `done in X s`), so a box that
+moved during another box's placement can be matched to the leg that moved it.
+
+The palletizer's boxes carry `PALLETIZER_BOX_PHYSICS`, the named physics set in `physics.py`, kept
+separate from the sorting cell's block physics because stacking eight boxes is a different contact
+problem from picking one block off a table. Two more prop physics keys, `solver_position_iterations`
+and `solver_velocity_iterations`, set PhysX's per-body solver iteration counts and are part of that
+set. The world's `set_prop_physics` and `prop_physics` DoCommand verbs change and read any of the
+physics keys on a running sim, which is how a physics knob gets tuned without a config edit and a
+part restart.
+
+The GPU checklist's `--suite stack` covers this in seven items: one layer placed, with per-box pose
+error as a table. The same layer 30 seconds later, with per-box drift. The second layer on the
+first, both measurements taken again. The settle time before a pose reads stable, measured rather
+than assumed. Every physics knob changed one at a time and what it bought, as a table covering
+contact offset, rest offset, friction, solver iteration counts and box mass. The colour-sorting
+cell's seed-20 loop re-run to confirm the physics changes did not regress it. And cost against the
+previous closing pack, `PACK_BASELINE_S` in the checklist. The `--knobs KEY=V1,V2` flag, repeatable,
+sweeps one physics key over a list of values for item 5 with every other key at its shipped value.
+Item 6 runs against the sorting cell's own deploy, not this one.
+
 ## The sequencer owns the pack
 
 `box-palletizer` (the `viam:isaac-sim-devin:palletizer` service) does not decide where a box goes.
@@ -122,6 +167,15 @@ the cup within `PLACE_STALL_TOLERANCE_MM` of its release pose has been stopped b
 neighbouring box, which is what it was descending towards, and the box is released where it is.
 The sequencer's first slot sits flush with two edges of the pallet, and a box that arrives a few
 millimetres wide catches the deck's edge before the cup reaches its target.
+
+A free move's first plan gets `FIRST_FREE_PLAN_TIMEOUT_S` (10 s), and a free move that runs the
+planner out of time is planned once more with `rseed` set to 1 and the mover's full 60 s. RDK
+seeds every plan with 0, so the same request from the same joints times out the same way again.
+Another seed is a fresh draw. On 2026-10-02, on viam-server 1.9.0, the first carry of a cold pack
+timed out under seed 0 in two packs running, each timeout failing the whole run until the retry
+existed. The slowest of 57 successful free plans in those packs took 0.27 s to plan. A second
+timeout still fails the run. A straight-line refusal keeps its free fallback, and an arm that
+stalls or runs out of time executing a plan is never re-planned.
 
 From the lift to the place descent the box is on the cup, and the planner is told so twice. Each
 of those legs carries a `Transform` parented to the gripper frame with the box's own dimensions,
@@ -156,7 +210,14 @@ Each leg opens the zone it is working in and keeps the other closed.
 | lift off the pick | open | closed |
 | cross to the place approach | closed | closed |
 | descent onto the place | closed | open |
-| retreat off the place | closed | open |
+| retreat off the place | closed | open, with the box just released closed on its own |
+
+The retreat is the one leg where the box the arm is leaving is neither on the cup nor yet in the
+world state store, and its straight line back to the approach pose is not always available. On
+2026-09-25 a refused straight retreat let the free fallback sweep a link through the first box of
+the second layer. So the retreat carries that box as its own keep-out, `placed_box_keepout`, read
+off the simulator at the release. Only if the planner refuses that does the retreat run without
+it, and it says so in a warning that names the box it might clip.
 
 ## palletizer attributes
 
@@ -169,7 +230,18 @@ Each leg opens the zone it is working in and keeps the other closed.
 | `sequencer` | required | name of the `viam:pack-sequencer:sequencer` service |
 | `box_props` | required, non-empty list of strings | prop names in pick order. `box_props[i]` fills the sequencer's seq `i + 1` |
 | `place_support_prop` | `frame_pallet` | the prop whose airspace the arm keeps out of except while placing onto it. A `frame.geometry` collider spawns as `frame_<component>`, and a prim name cannot hold a hyphen, so the `pallet` component's collider is `frame_pallet`. Named here rather than hardcoded, since which component carries the place support is the cell's business |
-| `obstacle_source` | `world_state_store` | where the motion service's obstacles come from. `world_state_store` leaves obstacle assembly to the frame system and the store the motion service already consults. The only other accepted value, `prop_geometries`, keeps this service's own hand-built `WorldState`, the same obstacle helper the colour-sorting cell's conductor already uses, so it stays available as a verified fallback if the store path does not hold up |
+| `world_state_stores` | optional, default the configured `sequencer` | names of `rdk:service:world_state_store` services whose world-frame transforms this palletizer relays into every plan |
+| `obstacle_source` | `world_state_store` | where a plan's obstacles come from. `world_state_store` relays the named stores' world-frame transforms (see below) plus the pick and place keep-outs. `prop_geometries` uses the simulator's own props plus the same keep-outs, the same obstacle helper the colour-sorting cell's conductor already uses, so it stays available as a verified fallback if the relay does not hold up |
+
+RDK's builtin motion service plans only against the request's own `WorldState` and the frame
+system. It never reads a `world_state_store` (`services/motion/builtin/builtin.go` on main,
+checked 2026-09-24). So a store's transforms reach the planner only if this palletizer puts them
+in the request, which is what the relay (`isaac_module.store_relay`) does: the sequencer's store
+publishes the placed boxes in the world frame, one per placed seq, and each becomes one obstacle
+geometry in the request. The scene store's fixtures are parented to their own frame tree
+(`pallet/group` and the like) rather than to `world`, and those fixtures already reach the planner
+as colliders through the fragment's `frame.geometry`, so the relay skips them and counts the skip
+rather than resolving them into obstacles a second time.
 
 ## One box on the pick station at a time
 
@@ -180,7 +252,11 @@ end would not fit.
 
 `box_props[0]`'s pose on the first `prop_geometries` read of a run is captured as the infeed pose,
 read from the sim rather than from a configured pick pose. Every later `box_props[i]` is re-posed
-onto that same pose, through the world's `set_prop_pose` verb, before its own pick. That re-pose is
+onto that same pose, through the world's `set_prop_pose` verb, before its own pick. The teleport is read back: the
+box has to be within 10 mm of the sent position within 2 s, the teleport is sent up to twice more
+if it is not, and an attempt whose box never lands fails with both poses in its reason rather than
+planning a pick to wherever the box was parked, which is what seven of ten packs did on
+2026-09-25. That re-pose is
 what a conveyor does: nothing else in this cell moves a box onto the pick station, so replacing the
 picked box with the next one in line is the closest single-prop model of a belt delivering it. The
 pallet stack itself is never re-posed. Every box placed on it is a rigid body that slides, tilts and
@@ -201,10 +277,14 @@ on the first failure.
 
 ## DoCommand
 
-- `{"command": "start"}` runs the whole pack. `{"ok": true, "state": "running"}`, or
-  `{"ok": false, "state": "running"}` unchanged when a run is already going.
+- `{"command": "start", "stop_after_seq"?: int >= 1}` runs the pack, or ends it cleanly after that
+  seq's record with the sequencer's cursor left where it is, so a second `start` continues the pack.
+  `{"ok": true, "state": "running"}`, or `{"ok": false, "state": "running"}` unchanged when a run is
+  already going.
 - `{"command": "stop"}` cancels between motions, never mid-motion. `{"ok": true}`.
-- `{"command": "status"}` reports the run state and its records.
+- `{"command": "status"}` reports the run state and its records, plus `stopped_after_seq` when a run
+  ended on its `stop_after_seq` bound. Each record carries `settle_s` when the box settled inside the
+  policy's timeout.
 
 Note that the workcell's own components, and the sequencer, take a different DoCommand shape,
 `{"<verb>": <argument>}` rather than `{"command": "<verb>"}`. That difference is load bearing: it is

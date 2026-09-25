@@ -1,5 +1,7 @@
 import asyncio
+import itertools
 import json
+import math
 import time
 
 import pytest
@@ -11,11 +13,14 @@ from viam.proto.component.arm import MoveOptions
 from viam.utils import dict_to_struct
 
 from isaac_module.models.arm import (
+    WAYPOINT_MAX_STEP_RAD,
     ArmMoveStalledError,
     ArmMoveTimeoutError,
     IsaacArm,
     JointTargetOutOfLimitsError,
+    densify_waypoints,
 )
+from isaac_module.sim_manager import SettleOutcome
 
 
 def _config(name: str, attrs: dict) -> ComponentConfig:
@@ -649,8 +654,15 @@ def test_a_run_of_stalled_waypoints_fails_rather_than_grinding_through_the_path(
             await arm.move_through_joint_positions(waypoints)
         message = str(excinfo.value)
         assert f"{_MAX_CONSECUTIVE_WAYPOINT_STALLS} consecutive" in message
-        # it gave up at the cap instead of walking the rest of the path
-        assert f"waypoint {_MAX_CONSECUTIVE_WAYPOINT_STALLS}/{len(waypoints)}" in message
+        # it gave up at the cap instead of walking the rest of the path; the
+        # count it reports is of the densified path it was driving
+        driven = len(
+            densify_waypoints(
+                [[math.radians(v) for v in wp.values] for wp in waypoints], WAYPOINT_MAX_STEP_RAD
+            )
+        )
+        assert driven > len(waypoints)
+        assert f"waypoint {_MAX_CONSECUTIVE_WAYPOINT_STALLS}/{driven}" in message
 
     asyncio.run(scenario())
 
@@ -702,3 +714,322 @@ def test_a_malformed_home_pose_is_refused_at_build(world, bad):
             ),
             {},
         )
+
+
+@pytest.mark.parametrize(
+    "drive_gains",
+    [
+        {"wrist_3_joint": {"kp": "high"}},
+        {"wrist_3_joint": {"stiffness": 1.0}},
+        {"wrist_3_joint": {}},
+        {},
+        [1.0, 2.0],
+    ],
+)
+def test_validate_config_rejects_malformed_drive_gains(world, drive_gains):
+    config = _config(
+        "arm-bad-gains", {"world": "isaac-world", "asset": "ur20", "drive_gains": drive_gains}
+    )
+    with pytest.raises(ValueError, match="drive_gains"):
+        IsaacArm.validate_config(config)
+
+
+def test_validate_config_accepts_per_joint_drive_gains(world):
+    config = _config(
+        "arm-good-gains",
+        {
+            "world": "isaac-world",
+            "asset": "ur20",
+            "drive_gains": {
+                "wrist_3_joint": {"kp": 225781.4, "kd": 90.4},
+                "wrist_2_joint": {"kd": 3.5},
+            },
+        },
+    )
+    IsaacArm.validate_config(config)
+
+
+def test_densify_waypoints_splits_a_gap_into_equal_steps_with_exact_endpoints():
+    start = [0.0, 0.1, -0.2]
+    end = [math.radians(30.0), 0.1, -0.2]
+
+    dense = densify_waypoints([start, end], math.radians(5.0))
+
+    assert len(dense) == 7
+    assert dense[0].positions == start
+    assert dense[-1].positions == end
+    # only the points between the two given waypoints are marked inserted
+    assert [point.inserted for point in dense] == [False] + [True] * 5 + [False]
+    steps = [dense[k + 1].positions[0] - dense[k].positions[0] for k in range(6)]
+    assert steps == pytest.approx([math.radians(5.0)] * 6)
+    # the joints that have nothing to do stay where they are
+    assert all(point.positions[1:] == [0.1, -0.2] for point in dense)
+
+
+def test_densify_waypoints_leaves_a_path_already_under_the_step_unchanged():
+    path = [[0.0, 0.0], [0.02, -0.03], [0.05, -0.05]]
+
+    dense = densify_waypoints(path, math.radians(5.0))
+    assert [point.positions for point in dense] == path
+    assert not any(point.inserted for point in dense)
+    assert [p.positions for p in densify_waypoints([[1.0, 2.0]], math.radians(5.0))] == [[1.0, 2.0]]
+
+
+def test_densify_waypoints_inserts_nothing_between_identical_points():
+    path = [[0.3, -0.4], [0.3, -0.4], [0.3, -0.4]]
+
+    dense = densify_waypoints(path, math.radians(5.0))
+    assert [point.positions for point in dense] == path
+    assert not any(point.inserted for point in dense)
+
+
+def test_densify_waypoints_sizes_the_split_by_the_joint_with_the_most_to_do():
+    # 12 degrees on the second joint against 1 degree on the first: 3 pieces
+    dense = densify_waypoints(
+        [[0.0, 0.0], [math.radians(1.0), math.radians(12.0)]], math.radians(5.0)
+    )
+
+    assert len(dense) == 4
+    assert [point.inserted for point in dense] == [False, True, True, False]
+    for a, b in itertools.pairwise(dense):
+        assert (
+            max(abs(y - x) for x, y in zip(a.positions, b.positions, strict=False))
+            <= math.radians(5.0) + 1e-12
+        )
+
+
+def test_move_through_joint_positions_drives_dense_targets_between_sparse_waypoints(world):
+    arm = _arm(world, "arm-through-dense")
+    handle = arm._h()
+    driven: list[list[float]] = []
+    set_joint_targets = handle.set_joint_targets
+
+    def record(positions, max_vel_rad_s=None):
+        driven.append(list(positions))
+        set_joint_targets(positions, max_vel_rad_s)
+
+    handle.set_joint_targets = record
+
+    async def scenario():
+        await arm.move_through_joint_positions(
+            [
+                JointPositions(values=[0, 0, 0, 0, 0, 0]),
+                JointPositions(values=[90, 0, 0, 0, 0, 0]),
+            ]
+        )
+
+    asyncio.run(scenario())
+
+    assert len(driven) >= 18
+    base = [target[0] for target in driven]
+    assert base == sorted(base)
+    for a, b in itertools.pairwise(driven):
+        assert max(abs(y - x) for x, y in zip(a, b, strict=False)) <= WAYPOINT_MAX_STEP_RAD + 1e-9
+    assert driven[-1] == pytest.approx([math.radians(90), 0, 0, 0, 0, 0])
+
+
+def test_move_through_joint_positions_passes_through_inserted_points_and_settles_on_planned_ones(
+    world,
+):
+    arm = _arm(world, "arm-through-spy")
+    handle = arm._h()
+    calls: list[str] = []
+    followed: list[list[list[float]]] = []
+    reads: list[int] = []
+    in_follow = False
+    # what the handle's own follow_path does between points is its business, so
+    # only the calls the model itself makes are recorded
+    for name in ("wait_until_within", "wait_for_settle", "set_joint_targets"):
+        original = getattr(handle, name)
+
+        def spy(*args, _name=name, _original=original, **kwargs):
+            if not in_follow:
+                calls.append(_name)
+            return _original(*args, **kwargs)
+
+        setattr(handle, name, spy)
+    follow_path = handle.follow_path
+
+    def spy_follow(points, *args, **kwargs):
+        nonlocal in_follow
+        calls.append("follow_path")
+        followed.append([list(point) for point in points])
+        in_follow = True
+        try:
+            return follow_path(points, *args, **kwargs)
+        finally:
+            in_follow = False
+
+    handle.follow_path = spy_follow
+    get_joint_positions = handle.get_joint_positions
+
+    def counted_get(*args, **kwargs):
+        reads.append(1)
+        return get_joint_positions(*args, **kwargs)
+
+    handle.get_joint_positions = counted_get
+
+    async def scenario():
+        await arm.move_through_joint_positions(
+            [
+                JointPositions(values=[0, 0, 0, 0, 0, 0]),
+                JointPositions(values=[90, 0, 0, 0, 0, 0]),
+            ]
+        )
+
+    asyncio.run(scenario())
+
+    dense = densify_waypoints([[0.0] * 6, [math.radians(90)] + [0.0] * 5], WAYPOINT_MAX_STEP_RAD)
+    inserted = [point.positions for point in dense if point.inserted]
+    assert len(inserted) >= 17
+    # the first planned waypoint, the one run of inserted points, the last planned waypoint
+    assert calls == [
+        "set_joint_targets",
+        "wait_for_settle",
+        "follow_path",
+        "set_joint_targets",
+        "wait_for_settle",
+    ]
+    assert followed == [inserted]
+    # the trajectory reads the joints once, and nothing here stalls so it never reads again
+    assert len(reads) == 1
+
+
+def test_move_through_joint_positions_makes_one_follow_path_call_per_run_of_inserted_points(world):
+    from isaac_module.models.arm import _WAYPOINT_DEADLINE_S, _WAYPOINT_TOLERANCE_RAD
+
+    arm = _arm(world, "arm-through-runs")
+    handle = arm._h()
+    calls: list[tuple[int, float | None, float, float]] = []
+    follow_path = handle.follow_path
+
+    def spy_follow(points, max_vel_rad_s, tolerance_rad, point_timeout_s):
+        calls.append((len(points), max_vel_rad_s, tolerance_rad, point_timeout_s))
+        return follow_path(points, max_vel_rad_s, tolerance_rad, point_timeout_s)
+
+    handle.follow_path = spy_follow
+
+    async def scenario():
+        await arm.move_through_joint_positions(
+            [
+                JointPositions(values=[0, 0, 0, 0, 0, 0]),
+                JointPositions(values=[30, 0, 0, 0, 0, 0]),
+                JointPositions(values=[30, 40, 0, 0, 0, 0]),
+            ],
+            MoveOptions(max_vel_degs_per_sec=90.0),
+        )
+
+    asyncio.run(scenario())
+
+    # 30 and 40 degrees at 5 degrees a step insert 5 and 7 points
+    assert calls == [
+        (5, math.radians(90.0), _WAYPOINT_TOLERANCE_RAD, _WAYPOINT_DEADLINE_S),
+        (7, math.radians(90.0), _WAYPOINT_TOLERANCE_RAD, _WAYPOINT_DEADLINE_S),
+    ]
+
+
+def _arm_with_scripted_follow(world, name: str, script):
+    """An arm whose planned waypoints settle at once and whose follow_path is
+    ``script``, so a test decides how a run of inserted points ends. Returns
+    the arm, the points each follow_path call was handed, and the handle."""
+    arm = _arm(world, name)
+    handle = arm._h()
+    handed: list[list[list[float]]] = []
+
+    def scripted(points, max_vel_rad_s, tolerance_rad, point_timeout_s):
+        handed.append([list(point) for point in points])
+        return script(len(handed), points)
+
+    handle.follow_path = scripted
+    handle.set_joint_targets = lambda positions, max_vel_rad_s=None: None
+    handle.wait_for_settle = lambda timeout_s, tolerance_rad=None: SettleOutcome.REACHED
+    return arm, handed, handle
+
+
+# 149 degrees at 5 degrees a step is 30 pieces, so 29 points are inserted
+# between the two waypoints
+_LONG_RUN_WAYPOINTS = [
+    JointPositions(values=[0, 0, 0, 0, 0, 0]),
+    JointPositions(values=[149, 0, 0, 0, 0, 0]),
+]
+_LONG_RUN_INSERTED = 29
+
+
+@pytest.mark.parametrize(
+    ("failure", "passed_first"),
+    [(SettleOutcome.STALLED, 1), (SettleOutcome.TIMED_OUT, 0)],
+)
+def test_a_follow_that_returns_early_resumes_from_the_next_point_and_resets_the_count(
+    world, failure, passed_first
+):
+    # more early returns than the consecutive-stall cap allows, none of them
+    # consecutive: a stall after reached points starts the count again, and a
+    # timeout clears it
+    from isaac_module.models.arm import _MAX_CONSECUTIVE_WAYPOINT_STALLS
+
+    early_returns = _MAX_CONSECUTIVE_WAYPOINT_STALLS + 2
+
+    def script(call_number, points):
+        if call_number <= early_returns:
+            return failure, passed_first
+        return SettleOutcome.REACHED, len(points)
+
+    arm, handed, _handle = _arm_with_scripted_follow(world, f"arm-resume-{failure.value}", script)
+
+    asyncio.run(arm.move_through_joint_positions(_LONG_RUN_WAYPOINTS))
+
+    assert len(handed) == early_returns + 1
+    assert len(handed[0]) == _LONG_RUN_INSERTED
+    # each resumed call starts at the point after the one that failed
+    for before, after in itertools.pairwise(handed[: early_returns + 1]):
+        assert after == before[passed_first + 1 :]
+
+
+def test_a_run_of_follows_stalled_at_their_first_point_fails_at_the_dense_index(world):
+    from isaac_module.models.arm import _MAX_CONSECUTIVE_WAYPOINT_STALLS
+
+    def script(call_number, points):
+        return SettleOutcome.STALLED, 0
+
+    arm, handed, handle = _arm_with_scripted_follow(world, "arm-follow-stall-run", script)
+    stops: list[int] = []
+    handle.stop = lambda: stops.append(1)
+
+    async def scenario():
+        with pytest.raises(ArmMoveStalledError) as excinfo:
+            await arm.move_through_joint_positions(_LONG_RUN_WAYPOINTS)
+        return str(excinfo.value)
+
+    message = asyncio.run(scenario())
+
+    # dense point 0 is the first planned waypoint and settles, so the run is
+    # dense points 1 to 29 and the fifth stall falls on dense point 5, which
+    # the message counts from one as waypoint 6 of 31
+    assert len(handed) == _MAX_CONSECUTIVE_WAYPOINT_STALLS
+    assert [len(points) for points in handed] == [
+        _LONG_RUN_INSERTED - k for k in range(_MAX_CONSECUTIVE_WAYPOINT_STALLS)
+    ]
+    assert f"waypoint {_MAX_CONSECUTIVE_WAYPOINT_STALLS + 1}/{_LONG_RUN_INSERTED + 2}" in message
+    assert f"{_MAX_CONSECUTIVE_WAYPOINT_STALLS} consecutive" in message
+    assert stops == [1]
+
+
+def test_move_through_joint_positions_rejects_a_wrong_length_waypoint_before_driving(world):
+    arm = _arm(world, "arm-through-length")
+    handle = arm._h()
+    driven: list[list[float]] = []
+    handle.set_joint_targets = lambda positions, max_vel_rad_s=None: driven.append(positions)
+
+    async def scenario():
+        with pytest.raises(ValueError, match=r"6.*5"):
+            await arm.move_through_joint_positions(
+                [
+                    JointPositions(values=[0, 0, 0, 0, 0, 0]),
+                    JointPositions(values=[10, 0, 0, 0, 0]),
+                    JointPositions(values=[20, 0, 0, 0, 0, 0]),
+                ]
+            )
+
+    asyncio.run(scenario())
+
+    assert driven == []

@@ -4,6 +4,7 @@ import pytest
 
 from isaac_module.physics import (
     FRICTION_COMBINE_MODE,
+    PALLETIZER_BOX_PHYSICS,
     PICK_CELL_BLOCK_PHYSICS,
     apply_prop_physics,
     prop_physics,
@@ -63,6 +64,46 @@ def test_prop_physics_rejects_rest_offset_above_contact_offset():
         prop_physics({"rest_offset": 0.01, "contact_offset": 0.005})
 
 
+def test_prop_physics_accepts_integral_solver_iterations():
+    result = prop_physics({"solver_position_iterations": 4, "solver_velocity_iterations": 4.0})
+    assert result == {"solver_position_iterations": 4, "solver_velocity_iterations": 4}
+    assert isinstance(result["solver_position_iterations"], int)
+    assert isinstance(result["solver_velocity_iterations"], int)
+
+
+def test_prop_physics_rejects_solver_iterations_out_of_range():
+    with pytest.raises(ValueError, match="solver_position_iterations"):
+        prop_physics({"solver_position_iterations": 0})
+    with pytest.raises(ValueError, match="solver_velocity_iterations"):
+        prop_physics({"solver_velocity_iterations": 256})
+    with pytest.raises(ValueError, match="solver_position_iterations"):
+        prop_physics({"solver_position_iterations": -1})
+
+
+def test_prop_physics_rejects_non_integral_solver_iterations():
+    with pytest.raises(ValueError, match="solver_position_iterations"):
+        prop_physics({"solver_position_iterations": 2.5})
+
+
+def test_prop_physics_rejects_bool_solver_iterations():
+    with pytest.raises(ValueError, match="solver_position_iterations"):
+        prop_physics({"solver_position_iterations": True})
+
+
+def test_prop_physics_pick_cell_block_physics_pinned_literal():
+    assert PICK_CELL_BLOCK_PHYSICS == {
+        "mass": 0.05,
+        "friction": 0.7,
+        "restitution": 0.0,
+        "contact_offset": 0.005,
+    }
+
+
+def test_prop_physics_palletizer_box_physics_is_a_distinct_valid_set():
+    assert prop_physics({"name": "box", **PALLETIZER_BOX_PHYSICS}) == PALLETIZER_BOX_PHYSICS
+    assert PALLETIZER_BOX_PHYSICS["mass"] != PICK_CELL_BLOCK_PHYSICS["mass"]
+
+
 # ---------------------------------------------------------------------------
 # apply_prop_physics
 # ---------------------------------------------------------------------------
@@ -104,9 +145,42 @@ class _FakePhysxSchemaAPI:
         return api
 
 
+class _FakePhysxRigidBodyAPI:
+    def __init__(self, prim: Any):
+        self.prim = prim
+        self.position_iterations: int | None = None
+        self.velocity_iterations: int | None = None
+
+    def CreateSolverPositionIterationCountAttr(self):  # matches pxr API naming
+        return _FakeAttr(self, "position_iterations")
+
+    def CreateSolverVelocityIterationCountAttr(self):  # matches pxr API naming
+        return _FakeAttr(self, "velocity_iterations")
+
+
+class _FakeAttr:
+    def __init__(self, api: "_FakePhysxRigidBodyAPI", field: str):
+        self._api = api
+        self._field = field
+
+    def Set(self, value):  # matches pxr API naming
+        setattr(self._api, self._field, value)
+
+
+class _FakePhysxRigidBodySchemaAPI:
+    def __init__(self):
+        self.applied: list[_FakePhysxRigidBodyAPI] = []
+
+    def Apply(self, prim):  # matches pxr API naming
+        api = _FakePhysxRigidBodyAPI(prim)
+        self.applied.append(api)
+        return api
+
+
 class _FakePhysxSchema:
     def __init__(self):
         self.PhysxMaterialAPI = _FakePhysxSchemaAPI()
+        self.PhysxRigidBodyAPI = _FakePhysxRigidBodySchemaAPI()
 
 
 class _FakeMassAPI:
@@ -236,3 +310,31 @@ def test_apply_prop_physics_authors_the_mass_on_the_stage_too():
 
     assert obj.mass == 78.0
     assert obj.prim.authored_mass == 78.0
+
+
+def test_apply_prop_physics_authors_solver_iterations_on_the_stage():
+    isaac = _FakeIsaac()
+    obj = _FakeSceneObject()
+    world = _FakeWorld({"block": obj})
+    prop = {
+        "name": "block",
+        "solver_position_iterations": 8,
+        "solver_velocity_iterations": 2,
+    }
+
+    apply_prop_physics(isaac, world, "/World/block", prop)
+
+    applied = isaac.physx_schema.PhysxRigidBodyAPI.applied
+    assert len(applied) == 1
+    assert applied[0].position_iterations == 8
+    assert applied[0].velocity_iterations == 2
+
+
+def test_apply_prop_physics_warns_without_raising_when_no_physx_schema():
+    isaac = _FakeIsaac()
+    isaac.PhysxSchema = None
+    obj = _FakeSceneObject()
+    world = _FakeWorld({"block": obj})
+    prop = {"name": "block", "solver_position_iterations": 8}
+
+    apply_prop_physics(isaac, world, "/World/block", prop)

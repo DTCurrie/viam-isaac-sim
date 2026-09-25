@@ -2,6 +2,7 @@
 
 import asyncio
 import hashlib
+import itertools
 import json
 import math
 import os
@@ -9,7 +10,7 @@ import tempfile
 import threading
 import urllib.request
 from collections.abc import Mapping, Sequence
-from typing import Any, ClassVar
+from typing import Any, ClassVar, NamedTuple
 
 from grpclib import Status
 from typing_extensions import Self
@@ -40,6 +41,10 @@ from .sim_component_validation import validate_sim_component
 _TOLERANCE_RAD = SETTLE_TOL_RAD
 _WAYPOINT_TOLERANCE_RAD = math.radians(2.0)
 _WAYPOINT_DEADLINE_S = 10.0
+# The largest joint-space gap between two consecutive targets driven along a
+# plan. Under one shared speed cap a joint strays at most a quarter of the gap
+# off the planner's line, so 5 degrees bounds it near 1.25.
+WAYPOINT_MAX_STEP_RAD = math.radians(5.0)
 # How many waypoints in a row may stall before a trajectory is abandoned. One
 # stall is a dense path's normal residual; a run of them is a blocked arm.
 _MAX_CONSECUTIVE_WAYPOINT_STALLS = 5
@@ -51,6 +56,49 @@ _JOINT_LIMIT_TOLERANCE_DEG = 0.01
 # thresholds of the target (docs/PARITY.md, Arm move_to_position row)
 _POSITION_SKIP_TOL_M = 1e-3
 _ANGULAR_SKIP_TOL_RAD = math.radians(0.06)
+
+
+class DensePoint(NamedTuple):
+    """One target on a densified path: its joint positions in radians, and
+    whether densify_waypoints inserted it (True) or it is one of the
+    waypoints it was given (False)."""
+
+    positions: list[float]
+    inserted: bool
+
+
+def densify_waypoints(
+    waypoints: Sequence[Sequence[float]], max_step_rad: float
+) -> list[DensePoint]:
+    """The waypoints with straight joint-space interpolation inserted so that
+    no two consecutive points differ by more than ``max_step_rad`` on any
+    joint. The first waypoint is kept and every original waypoint is kept, in
+    order (``inserted`` False); between each consecutive pair,
+    ``ceil(largest joint gap / max_step_rad) - 1`` evenly spaced points are
+    added (``inserted`` True). Identical consecutive waypoints add nothing.
+    Values are radians.
+
+    A free plan arrives as a few waypoints up to 177 degrees apart on one
+    joint (a two-waypoint plan on 2026-10-02 swung the base from -0.97 to -4.05
+    rad in one step). Between two such waypoints each drive runs to its own
+    target under one shared cap, so the joint with the least to do finishes
+    first and the tool leaves the straight joint-space line the planner
+    collision-checked; on 2026-10-01 and 2026-10-02 the empty arm swept a box
+    it had just placed by 43 to 111 mm that way. Driving the interpolated
+    points keeps the arm on that line."""
+    if not waypoints:
+        return []
+    dense = [DensePoint(list(waypoints[0]), False)]
+    for prev, nxt in itertools.pairwise(waypoints):
+        gap = max((abs(b - a) for a, b in zip(prev, nxt, strict=False)), default=0.0)
+        pieces = math.ceil(gap / max_step_rad)
+        for k in range(1, pieces):
+            fraction = k / pieces
+            dense.append(
+                DensePoint([a + (b - a) * fraction for a, b in zip(prev, nxt, strict=False)], True)
+            )
+        dense.append(DensePoint(list(nxt), False))
+    return dense
 
 
 class JointTargetOutOfLimitsError(ViamGRPCError, ValueError):
@@ -166,6 +214,32 @@ def _validate_arm_attrs(name: str, attrs: Mapping[str, Any]) -> None:
                 f'{name}: "max_vel_degs_per_sec" must be a positive number, '
                 f"got {max_vel_degs_per_sec!r}"
             )
+    drive_gains = attrs.get("drive_gains")
+    if drive_gains is not None:
+        if not isinstance(drive_gains, Mapping) or not drive_gains:
+            raise ValueError(
+                f'{name}: "drive_gains" must be {{"<joint>": {{"kp": number, "kd": number}}}}, '
+                f"got {drive_gains!r}"
+            )
+        for joint, spec in drive_gains.items():
+            if not isinstance(spec, Mapping) or not any(
+                key in spec for key in ("kp", "kd", "armature")
+            ):
+                raise ValueError(
+                    f'{name}: "drive_gains" joint {joint!r} needs "kp", "kd" and/or "armature", '
+                    f"got {spec!r}"
+                )
+            for key, value in spec.items():
+                if key not in ("kp", "kd", "armature"):
+                    raise ValueError(
+                        f'{name}: "drive_gains" joint {joint!r} has unknown key {key!r}; '
+                        'only "kp", "kd" and "armature"'
+                    )
+                if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
+                    raise ValueError(
+                        f'{name}: "drive_gains" {joint!r} {key} must be a non-negative number, '
+                        f"got {value!r}"
+                    )
 
 
 class IsaacArm(Arm, EasyResource):  # type: ignore[misc]  # SDK: API is Final on the component, redeclared by EasyResource
@@ -247,6 +321,12 @@ class IsaacArm(Arm, EasyResource):  # type: ignore[misc]  # SDK: API is Final on
                                      that carries no MoveOptions cap of its own
                                      (e.g. a real UR's speed_degs_per_sec).
                                      Unset = the drive's own limit.
+        drive_gains (object)       - per-joint position gain and damping overrides,
+                                     {"wrist_3_joint": {"kp": 225781, "kd": 90}},
+                                     applied on build and kept across resets.
+                                     Unset = the asset's own tuning, which is for
+                                     the arm carrying itself. The world's
+                                     set_drive_gains command changes them live.
         kinematics_url (string)    - where to fetch the kinematics file served by
                                      GetKinematics (.json = SVA, .urdf = URDF;
                                      file:// URLs work). Known assets with official
@@ -525,6 +605,59 @@ class IsaacArm(Arm, EasyResource):  # type: ignore[misc]  # SDK: API is Final on
             return math.radians(options.max_vel_degs_per_sec)
         return self._default_max_vel_rad_s
 
+    async def _continue_past_unreached_waypoint(
+        self,
+        handle: ArmHandle,
+        outcome: SettleOutcome,
+        *,
+        index: int,
+        total: int,
+        targets: Sequence[float],
+        tolerance: float,
+        deadline_s: float,
+        consecutive_stalls: int,
+        last: bool,
+    ) -> int:
+        """Decide what a waypoint that was not reached means for the
+        trajectory. Returns the new count of consecutive stalls when the
+        trajectory carries on to the next waypoint, and otherwise holds the arm
+        and raises ArmMoveStalledError or ArmMoveTimeoutError. ``index`` is the
+        waypoint's zero-based position among ``total`` densified waypoints."""
+        current = await asyncio.to_thread(handle.get_joint_positions)
+        detail = _stuck_joint_detail(current, targets, tolerance)
+        stalled = outcome is SettleOutcome.STALLED
+        consecutive_stalls = consecutive_stalls + 1 if stalled else 0
+        # A constrained path arrives as dozens of waypoints a couple of
+        # millimetres apart. The arm reaches each one, goes still, and
+        # sits on a residual a little outside the loose waypoint
+        # tolerance, which is indistinguishable from a blocked arm at
+        # that one waypoint. Only a run of them tells the two apart, so
+        # an isolated stall flows on to the next waypoint and a run of
+        # them fails. Measured on a 46-waypoint 100 mm lift, where
+        # single waypoints stalled 2.5 degrees outside a 2 degree
+        # tolerance and the path was clear.
+        if not last and consecutive_stalls < _MAX_CONSECUTIVE_WAYPOINT_STALLS:
+            self.logger.warning(
+                "%s: waypoint %d/%d not reached, continuing (%s)",
+                self.name,
+                index + 1,
+                total,
+                detail,
+            )
+            return consecutive_stalls
+
+        # hold here rather than keep pushing at the unreachable target
+        await asyncio.to_thread(handle.stop)
+        if stalled:
+            raise ArmMoveStalledError(
+                f"arm {self.name} stalled at waypoint {index + 1}/{total} "
+                f"({consecutive_stalls} consecutive, stuck joints: {detail})"
+            )
+        raise ArmMoveTimeoutError(
+            f"arm {self.name} did not reach final waypoint within "
+            f"{deadline_s:.1f}s (stuck joints: {detail})"
+        )
+
     async def move_through_joint_positions(
         self,
         positions: Sequence[JointPositions],
@@ -539,21 +672,83 @@ class IsaacArm(Arm, EasyResource):  # type: ignore[misc]  # SDK: API is Final on
         arm flows through them and a short deadline that warns and continues
         on timeout (an obstacle blocking the path raises, since it won't
         clear itself); the final waypoint settles tight against the move
-        deadline."""
+        deadline. Each run of consecutive points densify_waypoints inserted
+        between two planner waypoints is driven by one handle.follow_path call,
+        which counts a point as passed the first physics step every joint is
+        within the loose tolerance, with no settle window, and moves on to the
+        next point on that step. The planner's own waypoints keep the window
+        and the final waypoint settles tight. Every waypoint's length is
+        checked against one read of the joints before any target is set.
+
+        The waypoints a plan hands over are densified first: a free plan is a
+        few waypoints up to 177 degrees apart, and driving straight between
+        two of those lets each joint finish on its own and sweep off the
+        collision-checked line (see densify_waypoints). Scaling per-joint drive
+        velocity caps instead, tried on 2026-10-02, stalled every move (joints
+        crawling under 1 degree per second against the settle detector), so the
+        fix is denser targets on the proven path, not slower drives."""
         handle = self._h()
-        waypoints = list(positions)
+        planned = [[math.radians(v) for v in wp.values] for wp in positions]
+        waypoints = densify_waypoints(planned, WAYPOINT_MAX_STEP_RAD)
+        self.logger.info(
+            "arm %s: %d planned waypoints, %d after densifying at %.1f deg",
+            self.name,
+            len(planned),
+            len(waypoints),
+            math.degrees(WAYPOINT_MAX_STEP_RAD),
+        )
         max_vel_rad_s = self._max_vel_rad_s(options)
         move_deadline_s = self._deadline_s(timeout)
         consecutive_stalls = 0
         try:
-            for i, wp in enumerate(waypoints):
-                targets = [math.radians(v) for v in wp.values]
-                current = await asyncio.to_thread(handle.get_joint_positions)
-                if len(current) != len(targets):
+            dof = len(await asyncio.to_thread(handle.get_joint_positions))
+            for point in waypoints:
+                if len(point.positions) != dof:
                     raise JointTargetOutOfLimitsError(
-                        f"arm {self.name}: expected {len(current)} joint values, got {len(targets)}"
+                        f"arm {self.name}: expected {dof} joint values, got {len(point.positions)}"
                     )
-                targets = await self._clamped_joint_targets(targets)
+            i = 0
+            while i < len(waypoints):
+                if waypoints[i].inserted:
+                    run_end = i + 1
+                    while run_end < len(waypoints) and waypoints[run_end].inserted:
+                        run_end += 1
+                    run = [
+                        await self._clamped_joint_targets(point.positions)
+                        for point in waypoints[i:run_end]
+                    ]
+                    next_in_run = 0
+                    while next_in_run < len(run):
+                        outcome, passed = await asyncio.to_thread(
+                            handle.follow_path,
+                            run[next_in_run:],
+                            max_vel_rad_s,
+                            _WAYPOINT_TOLERANCE_RAD,
+                            _WAYPOINT_DEADLINE_S,
+                        )
+                        if outcome is SettleOutcome.REACHED:
+                            consecutive_stalls = 0
+                            break
+                        # the points before the one that failed were reached
+                        if passed > 0:
+                            consecutive_stalls = 0
+                        unreached = next_in_run + passed
+                        consecutive_stalls = await self._continue_past_unreached_waypoint(
+                            handle,
+                            outcome,
+                            index=i + unreached,
+                            total=len(waypoints),
+                            targets=run[unreached],
+                            tolerance=_WAYPOINT_TOLERANCE_RAD,
+                            deadline_s=_WAYPOINT_DEADLINE_S,
+                            consecutive_stalls=consecutive_stalls,
+                            last=False,
+                        )
+                        next_in_run = unreached + 1
+                    i = run_end
+                    continue
+
+                targets = await self._clamped_joint_targets(waypoints[i].positions)
                 await asyncio.to_thread(handle.set_joint_targets, targets, max_vel_rad_s)
 
                 last = i == len(waypoints) - 1
@@ -563,42 +758,19 @@ class IsaacArm(Arm, EasyResource):  # type: ignore[misc]  # SDK: API is Final on
                 outcome = await asyncio.to_thread(handle.wait_for_settle, deadline_s, tolerance)
                 if outcome is SettleOutcome.REACHED:
                     consecutive_stalls = 0
-                    continue
-
-                current = await asyncio.to_thread(handle.get_joint_positions)
-                detail = _stuck_joint_detail(current, targets, tolerance)
-                stalled = outcome is SettleOutcome.STALLED
-                consecutive_stalls = consecutive_stalls + 1 if stalled else 0
-                # A constrained path arrives as dozens of waypoints a couple of
-                # millimetres apart. The arm reaches each one, goes still, and
-                # sits on a residual a little outside the loose waypoint
-                # tolerance, which is indistinguishable from a blocked arm at
-                # that one waypoint. Only a run of them tells the two apart, so
-                # an isolated stall flows on to the next waypoint and a run of
-                # them fails. Measured on a 46-waypoint 100 mm lift, where
-                # single waypoints stalled 2.5 degrees outside a 2 degree
-                # tolerance and the path was clear.
-                if not last and consecutive_stalls < _MAX_CONSECUTIVE_WAYPOINT_STALLS:
-                    self.logger.warning(
-                        "%s: waypoint %d/%d not reached, continuing (%s)",
-                        self.name,
-                        i + 1,
-                        len(waypoints),
-                        detail,
+                else:
+                    consecutive_stalls = await self._continue_past_unreached_waypoint(
+                        handle,
+                        outcome,
+                        index=i,
+                        total=len(waypoints),
+                        targets=targets,
+                        tolerance=tolerance,
+                        deadline_s=deadline_s,
+                        consecutive_stalls=consecutive_stalls,
+                        last=last,
                     )
-                    continue
-
-                # hold here rather than keep pushing at the unreachable target
-                await asyncio.to_thread(handle.stop)
-                if stalled:
-                    raise ArmMoveStalledError(
-                        f"arm {self.name} stalled at waypoint {i + 1}/{len(waypoints)} "
-                        f"({consecutive_stalls} consecutive, stuck joints: {detail})"
-                    )
-                raise ArmMoveTimeoutError(
-                    f"arm {self.name} did not reach final waypoint within "
-                    f"{deadline_s:.1f}s (stuck joints: {detail})"
-                )
+                i += 1
         except asyncio.CancelledError:
             # a dropped RPC holds position instead of continuing toward
             # whatever waypoint was in flight

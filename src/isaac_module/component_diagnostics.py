@@ -11,6 +11,7 @@ matching DoCommand verb.
 from __future__ import annotations
 
 import math
+from collections.abc import Mapping
 from typing import Any, Protocol
 
 from .length_units import MM_PER_M, to_millimeters
@@ -45,6 +46,14 @@ def drive_gains(attrs: dict[str, Any], handle: ArmHandle) -> dict[str, Any]:
     """The articulation's per-DOF position gain and damping. Read only: this
     module authors neither, so what comes back is the asset's own tuning."""
     return handle.drive_gains()
+
+
+def set_drive_gains(
+    attrs: dict[str, Any], handle: ArmHandle, gains: Mapping[str, Mapping[str, float]]
+) -> dict[str, Any]:
+    """Override the named joints' position gain and damping, live, and report
+    the table back. The asset's tuning is for the arm carrying itself."""
+    return handle.set_drive_gains(gains)
 
 
 def dof_names(

@@ -1,16 +1,18 @@
-"""GPU acceptance checklist for the palletizing cell. Four suites, each
+"""GPU acceptance checklist for the palletizing cell. Five suites, each
 testing one stage this cell was built up in: first-box (vacuum gripper,
 one box picked and placed by the box-palletizer service), workcell (the
 vendored `viam:workcell-components` workcell adopted under the same
 mechanism), epick (the Robotiq EPick adopted as the cell's gripper, driven
-directly rather than through box-palletizer), and pack (the full
-eight-box pack, planned by `viam:pack-sequencer:sequencer` and executed
-by `box-palletizer`). Pass `--suite first-box` (default), `--suite
-workcell`, `--suite epick` or `--suite pack`.
+directly rather than through box-palletizer), pack (the full eight-box
+pack, planned by `viam:pack-sequencer:sequencer` and executed by
+`box-palletizer`), and stack (whether the eight-box, two-layer pack this
+cell builds actually stands, both freshly placed and after a hold). Pass
+`--suite first-box` (default), `--suite workcell`, `--suite epick`,
+`--suite pack` or `--suite stack`.
 
 Connects to a running Viam machine (the module running on the Isaac GPU box):
 `arm-1`, `gripper-1`, `builtin` motion, the `box-palletizer` service, and
-(the pack suite only) the `pack-sequencer` service. Item 3 is the
+(the pack and stack suites only) the `pack-sequencer` service. Item 3 is the
 first-box suite's own done-when, so it drives the actual pick and place
 through `box-palletizer`'s DoCommand rather than re-driving the arm and
 gripper itself. Items 1, 2 and 4 drive the arm and gripper directly to test
@@ -106,10 +108,12 @@ import argparse
 import asyncio
 import contextlib
 import math
+import statistics
 import sys
 import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, cast
 
@@ -137,8 +141,9 @@ from isaac_module.models.palletizer import (
     place_release_pose,
     touched_down,
 )
+from isaac_module.physics import PALLETIZER_BOX_PHYSICS, PROP_PHYSICS_KEYS
 from isaac_module.prim_paths import prim_name
-from isaac_module.sequencer_client import SequencerClient
+from isaac_module.sequencer_client import PackOrder, SequencerClient
 from isaac_module.sort_plan import OUTCOME_PLACED
 from isaac_module.spatial import (
     Quat,
@@ -149,6 +154,19 @@ from isaac_module.spatial import (
     quat_mul,
     quat_rotate,
     quat_to_ov,
+)
+from isaac_module.stack_stability import (
+    DEFAULT_SETTLE_POLICY,
+    DEFAULT_STACK_TOLERANCES,
+    BoxPlacement,
+    PoseMM,
+    Sample,
+    SettlePolicy,
+    StackVerdict,
+    format_stack_table,
+    hold_excursion_mm,
+    pose_distance_mm,
+    stack_verdict,
 )
 from isaac_module.surface_gripper import (
     COAXIAL_LOAD_WINDOW_S,
@@ -193,9 +211,10 @@ WORKCELL_ITEMS: tuple[str, ...] = (
 PACK_ITEMS: tuple[str, ...] = (
     "1. eight boxes placed, the sequencer's target and the measured pose per box, as a table",
     "2. the order placed matches `get_pack_order`",
-    "3. obstacles come from the world state store rather than this service's own hand-built "
-    "WorldState, shown by running it both ways and reporting whether plans stay collision-free "
-    "under the store",
+    "3. obstacles reach the planner from the world state stores, shown by every record after "
+    "the first carrying `planner_obstacles.relayed` of at least 1 under "
+    "`obstacle_source=world_state_store` (the placed boxes) and every record carrying `props` "
+    "of at least 1 under `prop_geometries`, with no plan aborting either way",
     "4. `set_box_transform` moves the box in the viewer to where physics put it, with the "
     "largest plan-versus-actual difference recorded across the eight",
     "5. a box the arm fails to place is `skip_box`ed and the run continues",
@@ -224,6 +243,35 @@ EPICK_ITEMS: tuple[str, ...] = (
     "error against the 25 mm drop",
     "7. cost against the workcell suite's recorded run: cold and warm ready and the 10 s step rate",
 )
+
+# the stack suite's checklist items: whether the eight-box, two-layer pack this cell builds
+# actually stands, both freshly placed and after a hold with the arm parked. Drives the whole
+# pack through `box-palletizer`'s own `start`/`status` surface, the same reasoning the pack
+# suite uses, and judges the readings against `isaac_module.stack_stability`'s own tolerances
+# rather than inventing a second set here.
+STACK_ITEMS: tuple[str, ...] = (
+    "1. the first layer placed, the sequencer's target and the measured top face per box at "
+    "settle, as a table, every box within the placement tolerance",
+    "2. the same layer after a 30 s hold with the arm parked, per-box drift and excursion, "
+    "every box within the drift and tilt tolerances",
+    "3. the second layer on the first, both measurements again for all eight boxes, the "
+    "second layer judged on its own against the same bounds",
+    "4. the settle time before a pose reads stable, measured per box from the release, as a "
+    "table with the policy that judged it",
+    "5. every physics knob changed one at a time and what it bought: contact offset, rest "
+    "offset, friction, solver iteration counts, box mass, as a table, run only when --knobs "
+    "names them",
+    "6. the colour-sorting cell's seed-20 loop re-run on that cell's own deploy, to show these "
+    "changes did not regress it",
+    "7. cost against the previous closing pack: pack seconds against the baseline, plus cold "
+    "or warm ready and the 10 s step rate",
+)
+
+# items 5, 6 and 7, named rather than indexed: each is read from more than one function, far
+# from any adjacent "-- item N --" banner that would otherwise make the offset obvious
+STACK_ITEM_KNOB_SWEEP = STACK_ITEMS[4]
+STACK_ITEM_SORT_REGRESSION = STACK_ITEMS[5]
+STACK_ITEM_COST = STACK_ITEMS[6]
 
 # item 1's tolerance between a fragment component's declared world-frame position and its
 # own `get_pose` reply: same translation budget as REACH_TOLERANCE_MM, a prim-pose/viam-pose
@@ -308,6 +356,14 @@ PARK_XYZ_MM = (-300.0, 200.0, 700.0)
 
 # a prop the service's run moved by more than this is put back afterwards
 RESTORE_TOLERANCE_MM = 1.0
+
+# the pack suite's pre-run reset teleports every box to its overlay spawn
+# position and reads it back. A box settled within this is where the service
+# expects it; one beyond it landed on something else. Above the ~1 mm a
+# teleport onto the station settled by on 2026-09-22 (read back at
+# 270.000 mm), an order of magnitude under the 100 mm box height that a box
+# resting on top of another one reads.
+PACK_RESET_TOLERANCE_MM = 10.0
 
 # item 5, same shape as gpu_checklist_photoreal.py's cost item
 DEFAULT_STEP_RATE_WINDOW_S = 10.0
@@ -421,6 +477,30 @@ PLACE_SETTLE_S = 2.0
 # suite's own item 1 orientation_delta_deg reads any other pose disagreement
 RELEASE_TILT_TOLERANCE_DEG = 2.0
 
+# items 2 and 3's hold: the done-when's own duration for a stack to prove it holds with the
+# arm parked, and how often a reading is taken over it
+STACK_HOLD_S = 30.0
+STACK_HOLD_SAMPLE_S = 1.0
+
+# the disturbance monitor's own poll, run between a pack's status polls: how often
+# prop_geometries is read while a pack runs, watching every already-placed box for the
+# moment a later box's placement knocks it out of its settled pose. Five reads a second is
+# well under one sim-thread verb per physics step at 120 Hz.
+MONITOR_POLL_S = 0.2
+
+# item 5's restore value for a physics knob PALLETIZER_BOX_PHYSICS never sets: PhysX's own
+# rigid-body defaults, since a box swept on that knob and never restored to the overlay's own
+# value (it has none) should come back to what an unconfigured prop already carries
+STACK_KNOB_BASELINES: dict[str, float] = {
+    "rest_offset": 0.0,
+    "solver_position_iterations": 4,
+    "solver_velocity_iterations": 1,
+}
+
+# item 7's baseline: the closing pack of 2026-09-25, 8 of 8 boxes placed, 0.11 mm worst
+# plan-versus-actual delta
+PACK_BASELINE_S = 145.0
+
 
 # pure helpers, unit-tested without a robot in tests/test_gpu_checklist_palletizer.py
 
@@ -533,6 +613,39 @@ def records_all_placed(records: Any) -> bool:
     if not entries:
         return False
     return all(dict(entry).get("outcome") == OUTCOME_PLACED for entry in entries)
+
+
+def relay_counts_ok(
+    records: Sequence[Mapping[str, Any]], obstacle_source_label: str
+) -> tuple[bool, str]:
+    """Whether the relay actually put obstacles in front of the planner,
+    read from each record's `planner_obstacles` (`isaac_module.store_relay`'s
+    counts, published back onto the outcome record).
+
+    Under `world_state_store`, every record whose `seq` is 2 or later must
+    show at least one relayed obstacle: the sequencer's own store has
+    nothing to relay for seq 1, the first box placed, since no box has been
+    placed yet. Under `prop_geometries`, every record must show at least one
+    prop obstacle. A record with no `planner_obstacles` at all fails outright,
+    naming the module as the reason rather than a bad count."""
+    entries = list(records or [])
+    missing = [entry for entry in entries if entry.get("planner_obstacles") is None]
+    if missing:
+        return False, (
+            "no planner_obstacles in the records: the module on the machine predates the relay"
+        )
+
+    if obstacle_source_label == "world_state_store":
+        key = "relayed"
+        checked = [entry for entry in entries if int(entry["seq"]) >= 2]
+    else:
+        key = "props"
+        checked = list(entries)
+
+    counts = [(int(entry["seq"]), int(entry["planner_obstacles"][key])) for entry in checked]
+    ok = all(count >= 1 for _, count in counts)
+    detail = f"{key} per seq: " + ", ".join(f"{seq}={count}" for seq, count in sorted(counts))
+    return ok, detail
 
 
 def placed_seqs_in_order(records: Sequence[Mapping[str, Any]]) -> list[int]:
@@ -794,6 +907,324 @@ def expected_rest_z_mm(support_top_z_mm: float, box_height_mm: float) -> float:
     """The z, in mm, a box of `box_height_mm` should rest at once it stops
     on a support whose top face is at `support_top_z_mm`."""
     return support_top_z_mm + box_height_mm / 2.0
+
+
+def overlay_pack_boxes(overlay: Mapping[str, Any]) -> list[tuple[str, tuple[float, float, float]]]:
+    """Every box in the overlay's palletizer `box_props`, in pick order, with
+    the position in mm the overlay's world component spawns it at. The
+    overlay is the one place both lists live, so a reset that reads it
+    cannot drift from what a boot does. Raises when a listed box has no
+    prop, since a reset that silently skipped one would leave it wherever
+    the last run put it."""
+    palletizer = next(
+        (
+            service
+            for service in overlay.get("services", [])
+            if str(service.get("model", "")).endswith(":palletizer")
+        ),
+        None,
+    )
+    if palletizer is None:
+        raise ValueError("the overlay declares no palletizer service")
+    attributes = palletizer.get("attributes", {})
+    world_name = str(attributes.get("world", "isaac-world"))
+    world = next(
+        (c for c in overlay.get("components", []) if c.get("name") == world_name),
+        None,
+    )
+    if world is None:
+        raise ValueError(f"the overlay declares no {world_name!r} component")
+    positions_m = {
+        str(prop["name"]): prop["position"] for prop in world.get("attributes", {}).get("props", [])
+    }
+    boxes: list[tuple[str, tuple[float, float, float]]] = []
+    for name in attributes.get("box_props", []):
+        if name not in positions_m:
+            raise ValueError(
+                f"box_props names {name!r} but the overlay's {world_name} spawns no such prop"
+            )
+        x_m, y_m, z_m = positions_m[name]
+        boxes.append(
+            (str(name), (float(x_m) * MM_PER_M, float(y_m) * MM_PER_M, float(z_m) * MM_PER_M))
+        )
+    return boxes
+
+
+def parse_knob_spec(text: str) -> tuple[str, tuple[float, ...]]:
+    """Parses one `--knobs KEY=V1,V2` spec into `(key, values)`. `key` must
+    be one of `PROP_PHYSICS_KEYS` and every comma-separated value must parse
+    as a float. Raises ValueError otherwise, which argparse turns into a
+    usage error rather than a silent bad sweep."""
+    key, sep, raw_values = text.partition("=")
+    if not sep:
+        raise ValueError(f"--knobs value {text!r} is not KEY=V1,V2 shaped")
+    if key not in PROP_PHYSICS_KEYS:
+        raise ValueError(f"--knobs key {key!r} is not one of {PROP_PHYSICS_KEYS}")
+    parts = [part for part in raw_values.split(",") if part != ""]
+    if not parts:
+        raise ValueError(f"--knobs value {text!r} names no values")
+    try:
+        values = tuple(float(part) for part in parts)
+    except ValueError as error:
+        raise ValueError(f"--knobs value {text!r} has a non-numeric value: {error}") from error
+    return key, values
+
+
+def layer_of_seq(pack_order: PackOrder) -> dict[int, int]:
+    """Every placement's seq mapped to its own 0-based layer, from the
+    sequencer's own pack order."""
+    return {placement.seq: placement.layer for placement in pack_order.placements}
+
+
+def last_seq_of_layer(pack_order: PackOrder, layer: int) -> int:
+    """The highest seq belonging to `layer`, the seq to bound a run at so it
+    stops once that layer is fully placed. Raises when the layer has no
+    placements at all."""
+    seqs = [placement.seq for placement in pack_order.placements if placement.layer == layer]
+    if not seqs:
+        raise ValueError(f"last_seq_of_layer: no placements in layer {layer!r}")
+    return max(seqs)
+
+
+def top_face_pose_mm(geometry: Mapping[str, Any]) -> dict[str, float]:
+    """A `prop_geometries` entry's top-face pose, in the sequencer's own
+    convention: the body's centre z raised by half its own height, x, y and
+    orientation carried through unchanged."""
+    pose = geometry["pose_in_world_mm"]
+    _dim_x, _dim_y, dim_z = geometry["box_dims_mm"]
+    return {
+        "x": float(pose["x"]),
+        "y": float(pose["y"]),
+        "z": float(pose["z"]) + float(dim_z) / 2.0,
+        "o_x": float(pose.get("o_x", 0.0)),
+        "o_y": float(pose.get("o_y", 0.0)),
+        "o_z": float(pose.get("o_z", 0.0)),
+        "theta": float(pose.get("theta", 0.0)),
+    }
+
+
+def box_target_pose_mm(target_pose_mm: Mapping[str, float]) -> dict[str, float]:
+    """A record's `target_pose_mm` (the sequencer's TOOL pose, pointing down
+    onto the box's top face: `o_z: -1`) as the box's own expected pose
+    (pointing up through that same face: `o_z: 1`).
+
+    Position and `theta` carry through unchanged; only the orientation
+    vector's sign flips. A verdict comparing a measured box pose against
+    the tool pose directly reads every placed box as 180 degrees tilted,
+    since the two point opposite ways by construction, not by error."""
+    return {
+        "x": float(target_pose_mm["x"]),
+        "y": float(target_pose_mm["y"]),
+        "z": float(target_pose_mm["z"]),
+        "o_x": -float(target_pose_mm.get("o_x", 0.0)),
+        "o_y": -float(target_pose_mm.get("o_y", 0.0)),
+        "o_z": -float(target_pose_mm.get("o_z", 0.0)),
+        "theta": float(target_pose_mm.get("theta", 0.0)),
+    }
+
+
+def placements_from_records(
+    records: Sequence[Mapping[str, Any]],
+    layer_by_seq: Mapping[int, int],
+    after_hold_by_name: Mapping[str, Mapping[str, float] | None] | None = None,
+) -> list[BoxPlacement]:
+    """Every record as a `stack_stability.BoxPlacement`, in the sequencer's
+    own top-face convention: the layer comes from `layer_by_seq`, and
+    `after_hold_mm` from `after_hold_by_name` when a hold was read.
+    `target_mm` is the record's `target_pose_mm` flipped to the box's own
+    orientation by `box_target_pose_mm`, since the record's own value is the
+    tool's pose, not the box's. A record with no `measured_pose_mm` becomes
+    `at_settle_mm=None`, a box that never settled rather than one this
+    checklist forgot to ask about."""
+    after_hold = after_hold_by_name or {}
+    placements: list[BoxPlacement] = []
+    for record in records:
+        seq = int(record["seq"])
+        name = str(record["box_prop"])
+        placements.append(
+            BoxPlacement(
+                name=name,
+                seq=seq,
+                layer=layer_by_seq[seq],
+                target_mm=box_target_pose_mm(record["target_pose_mm"]),
+                at_settle_mm=record.get("measured_pose_mm"),
+                after_hold_mm=after_hold.get(name),
+                settle_s=record.get("settle_s"),
+            )
+        )
+    return placements
+
+
+def settle_table_rows(records: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """One row per record, sorted by seq: the box and its measured settle
+    time, or None when the release's own poll never saw it settle."""
+    return [
+        {
+            "seq": int(record["seq"]),
+            "box_prop": record.get("box_prop"),
+            "settle_s": record.get("settle_s"),
+        }
+        for record in sorted(records, key=lambda entry: int(entry["seq"]))
+    ]
+
+
+def format_settle_table(
+    rows: Sequence[Mapping[str, Any]], policy: SettlePolicy = DEFAULT_SETTLE_POLICY
+) -> str:
+    """Item 4's table: one row per box, its settle time or a dash when it
+    never settled, headed by the policy that judged it."""
+    header = (
+        f"policy: tolerance {policy.tolerance_mm} mm, window {policy.window_s} s\n"
+        f"{'seq':>3}  {'box':<20}  {'settle_s':>9}"
+    )
+    lines = [header]
+    for row in rows:
+        settle_s = row["settle_s"]
+        settle_str = f"{settle_s:.2f}" if settle_s is not None else "-"
+        lines.append(f"{row['seq']:>3}  {row['box_prop']!s:<20}  {settle_str:>9}")
+    return "\n".join(lines)
+
+
+def _settle_stats(records: Sequence[Mapping[str, Any]]) -> tuple[float | None, float | None, int]:
+    """The worst (max) and median `settle_s` across `records`, and how many
+    recorded none at all (a release whose pose never read stable)."""
+    values = [record.get("settle_s") for record in records]
+    measured = [float(value) for value in values if value is not None]
+    none_count = len(values) - len(measured)
+    worst = max(measured) if measured else None
+    median = statistics.median(measured) if measured else None
+    return worst, median, none_count
+
+
+def knob_table_row(
+    knob: str,
+    value: float,
+    stack_result: StackVerdict,
+    median_settle_s: float | None,
+    pack_s: float,
+    quantity: int,
+    placed: int,
+) -> dict[str, Any]:
+    """One physics-knob variant's row for item 5's table: the knob and the
+    value it was set to, whether the pack held at that value AND placed
+    every box the pack asked for, the worst error and drift it produced,
+    the median settle time across the pack, how long the pack itself took,
+    and how many of `quantity` boxes actually got `placed`. A run that
+    placed fewer boxes than `quantity` never reads `held` true, whatever
+    the verdict says about the boxes that did land."""
+    return {
+        "knob": knob,
+        "value": value,
+        "held": stack_result.held and placed == quantity,
+        "worst_error_mm": stack_result.worst_error_mm,
+        "worst_drift_mm": stack_result.worst_drift_mm,
+        "median_settle_s": median_settle_s,
+        "pack_s": pack_s,
+        "placed": placed,
+        "quantity": quantity,
+    }
+
+
+def format_knob_table(rows: Sequence[Mapping[str, Any]]) -> str:
+    """Item 5's table: one row per physics-knob variant tried."""
+    header = (
+        f"{'knob':<28}  {'value':>10}  {'held':>5}  {'placed':>7}  {'worst_error_mm':>14}  "
+        f"{'worst_drift_mm':>14}  {'median_settle_s':>15}  {'pack_s':>8}"
+    )
+    lines = [header]
+    for row in rows:
+        drift_mm = row["worst_drift_mm"]
+        drift_str = "-" if drift_mm is None else f"{drift_mm:.2f}"
+        median_settle_s = row["median_settle_s"]
+        settle_str = "-" if median_settle_s is None else f"{median_settle_s:.2f}"
+        placed_str = f"{row['placed']}/{row['quantity']}"
+        lines.append(
+            f"{row['knob']:<28}  {row['value']:>10.4g}  "
+            f"{'yes' if row['held'] else 'no':>5}  {placed_str:>7}  "
+            f"{row['worst_error_mm']:>14.2f}  {drift_str:>14}  {settle_str:>15}  "
+            f"{row['pack_s']:>8.1f}"
+        )
+    return "\n".join(lines)
+
+
+@dataclass(frozen=True)
+class Disturbance:
+    """One placed box's first move past the drift tolerance since it
+    settled, and the seq being placed when it happened.
+
+    `during_seq` is `None` when the pack had already left `running` at the
+    reading that first crossed the tolerance, since no seq's placement is
+    left to blame it on. `at_utc`, `moved_mm` and `during_seq` are pinned
+    to that first crossing; only `max_mm` keeps growing on a later reading
+    that strays further."""
+
+    name: str
+    seq: int
+    during_seq: int | None
+    at_utc: str
+    moved_mm: float
+    max_mm: float
+
+
+def disturbance_update(
+    known: Mapping[str, tuple[int, PoseMM]],
+    reading_top_faces: Mapping[str, PoseMM],
+    now_utc: str,
+    during_seq: int | None,
+    tolerance_mm: float,
+    found: dict[str, Disturbance],
+) -> None:
+    """Folds one monitor reading into `found`: for every box in `known`
+    that also appears in `reading_top_faces`, measures how far it has
+    moved from its own settled pose, records a new `Disturbance` the first
+    time that distance crosses `tolerance_mm`, and raises an existing
+    one's `max_mm` when a later reading strays further still.
+
+    `known` maps a box's name to its own placement seq alongside its
+    settled top-face pose, since nothing else passed here carries the
+    seq `Disturbance.seq` (the box's own) needs. A box in `known` but
+    missing from `reading_top_faces` is left alone rather than treated as
+    disturbed: the monitor polls faster than a box is placed, so a box
+    not present in this particular reading says nothing either way."""
+    for name, (seq, settled_mm) in known.items():
+        reading_mm = reading_top_faces.get(name)
+        if reading_mm is None:
+            continue
+        moved_mm = pose_distance_mm(settled_mm, reading_mm)
+        if moved_mm <= tolerance_mm:
+            continue
+        existing = found.get(name)
+        if existing is None:
+            found[name] = Disturbance(
+                name=name,
+                seq=seq,
+                during_seq=during_seq,
+                at_utc=now_utc,
+                moved_mm=moved_mm,
+                max_mm=moved_mm,
+            )
+        elif moved_mm > existing.max_mm:
+            found[name] = replace(existing, max_mm=moved_mm)
+
+
+def format_disturbance_table(found: Mapping[str, Disturbance]) -> str:
+    """One row per disturbed box, in the order it first happened, or a
+    single line when no box ever left its settled pose."""
+    disturbances = sorted(found.values(), key=lambda disturbance: disturbance.at_utc)
+    if not disturbances:
+        return "no box left its settled pose during the pack"
+    header = (
+        f"{'box':<20}  {'seq':>3}  {'during seq':>10}  {'at (UTC)':<32}  "
+        f"{'moved mm':>9}  {'max mm':>9}"
+    )
+    lines = [header]
+    for disturbance in disturbances:
+        during_seq_str = "-" if disturbance.during_seq is None else str(disturbance.during_seq)
+        lines.append(
+            f"{disturbance.name:<20}  {disturbance.seq:>3}  {during_seq_str:>10}  "
+            f"{disturbance.at_utc:<32}  {disturbance.moved_mm:>9.2f}  {disturbance.max_mm:>9.2f}"
+        )
+    return "\n".join(lines)
 
 
 def resting_check(
@@ -2227,27 +2658,98 @@ async def _check_render_only_has_no_collider(
     return line, ok
 
 
-async def _run_full_pack(palletizer: Any) -> dict[str, Any]:
-    """Starts `box-palletizer`'s own run and polls `status` until it leaves
-    `running`, bounded by `PACK_STATUS_TIMEOUT_S`. Every pack suite item
-    reads the same run's final status rather than driving the arm itself,
-    since the sequencer owns every target pose here."""
+def _learn_settled_poses(status: Mapping[str, Any], known: dict[str, tuple[int, PoseMM]]) -> None:
+    """Adds every newly-placed record's own seq and settled top-face pose to
+    `known`, the first time that box's name appears: a box the run has not
+    placed yet has no settled pose for the monitor to compare against."""
+    for record in status.get("records", []) or []:
+        name = str(record.get("box_prop"))
+        if name in known:
+            continue
+        measured_mm = record.get("measured_pose_mm")
+        if measured_mm is None:
+            continue
+        known[name] = (int(record["seq"]), measured_mm)
+
+
+async def _check_for_disturbances(
+    world: WorldApi,
+    known: Mapping[str, tuple[int, PoseMM]],
+    status: Mapping[str, Any],
+    found: dict[str, Disturbance],
+    first_seq: int,
+) -> None:
+    """One disturbance-monitor tick: reads `prop_geometries`, converts every
+    reading to its top face, and folds it into `found` via
+    `disturbance_update`. `during_seq` is the seq being placed, read off the
+    same `status` the last poll returned: one past the newest record, or
+    `first_seq` before the run has made one. A run that resumes at seq 5
+    counts from 5, not from its own first record, which is how the table of
+    2026-10-01 read seq 6 and 7 as "2" and "3"."""
+    records = list(status.get("records", []) or [])
+    if status.get("state") != "running":
+        during_seq = None
+    elif records:
+        during_seq = int(records[-1]["seq"]) + 1
+    else:
+        during_seq = first_seq
+    geometries = (await world.do_command({"command": "prop_geometries"}))["geometries"]
+    reading_top_faces = {
+        str(geometry.get("name", "")): top_face_pose_mm(geometry) for geometry in geometries
+    }
+    disturbance_update(
+        known,
+        reading_top_faces,
+        datetime.now(timezone.utc).isoformat(),
+        during_seq,
+        DEFAULT_STACK_TOLERANCES.drift_mm,
+        found,
+    )
+
+
+async def _run_full_pack(
+    world: WorldApi,
+    palletizer: Any,
+    start_command: Mapping[str, Any] | None = None,
+    first_seq: int = 1,
+) -> tuple[dict[str, Any], dict[str, Disturbance]]:
+    """Starts `box-palletizer`'s own run with `start_command` (plain `start`
+    when omitted, the pack suite's own shape) and polls `status` until it
+    leaves `running`, bounded by `PACK_STATUS_TIMEOUT_S`. Every pack and
+    stack suite item reads the same run's final status rather than driving
+    the arm itself, since the sequencer owns every target pose here.
+
+    Between status polls, reads `prop_geometries` every `MONITOR_POLL_S`
+    and folds each reading into a disturbance monitor: every box already
+    placed is watched for the first moment it leaves its own settled pose
+    by more than the drift tolerance, and which seq was being placed then.
+    Returns the final status as before, plus every disturbance the monitor
+    found."""
     import json
 
-    start_result = await palletizer.do_command({"command": "start"})
+    start_result = await palletizer.do_command(dict(start_command or {"command": "start"}))
     print(f"  start: {json.dumps(dict(start_result), default=str, sort_keys=True)}")
 
     started_at = time.monotonic()
+    known: dict[str, tuple[int, PoseMM]] = {}
+    found: dict[str, Disturbance] = {}
     status = await palletizer.do_command({"command": "status"})
+    _learn_settled_poses(status, known)
+    monitor_elapsed_s = 0.0
     while status.get("state") == "running":
         if time.monotonic() - started_at > PACK_STATUS_TIMEOUT_S:
             raise TimeoutError(
                 f"box-palletizer timed out after {PACK_STATUS_TIMEOUT_S:.0f}s still running (hung)"
             )
-        await asyncio.sleep(STATUS_POLL_S)
-        status = await palletizer.do_command({"command": "status"})
+        await asyncio.sleep(MONITOR_POLL_S)
+        monitor_elapsed_s += MONITOR_POLL_S
+        await _check_for_disturbances(world, known, status, found, first_seq)
+        if monitor_elapsed_s >= STATUS_POLL_S:
+            monitor_elapsed_s = 0.0
+            status = await palletizer.do_command({"command": "status"})
+            _learn_settled_poses(status, known)
     print(f"  status: {json.dumps(dict(status), default=str, sort_keys=True)}")
-    return cast("dict[str, Any]", status)
+    return cast("dict[str, Any]", status), found
 
 
 def _check_placement_table(
@@ -2282,18 +2784,21 @@ def _check_obstacle_source(
     records: Sequence[Mapping[str, Any]], obstacle_source_label: str
 ) -> tuple[str, bool]:
     """Item 3's automatable half: every box placed without an aborted plan,
-    under whichever `obstacle_source` the overlay is currently deployed
-    with. `obstacle_source_label` only tags this reading, since the config
-    itself is a deploy-time attribute this script cannot flip - run the
-    script once per value and compare, the same as `--run-label`."""
-    ok = records_all_placed(records)
+    and the relay actually reached the planner, under whichever
+    `obstacle_source` the overlay is currently deployed with.
+    `obstacle_source_label` only tags this reading, since the config itself
+    is a deploy-time attribute this script cannot flip - run the script once
+    per value and compare, the same as `--run-label`."""
+    placed_ok = records_all_placed(records)
+    relay_ok, relay_detail = relay_counts_ok(records, obstacle_source_label)
+    ok = placed_ok and relay_ok
     line = verdict(
         PACK_ITEMS[2],
         ok,
-        f"obstacle_source={obstacle_source_label}: every box placed with no plan aborting={ok}; "
-        "human: confirm in the Kit viewport that no plan clipped through a fence, the scan "
-        "tunnel or the pallet stack, then rerun with the overlay's obstacle_source set to the "
-        "other value and compare",
+        f"obstacle_source={obstacle_source_label}: every box placed with no plan aborting="
+        f"{placed_ok}; {relay_detail}; human: confirm in the Kit viewport that no plan clipped "
+        "through a fence, the scan tunnel or the pallet stack, then rerun with the overlay's "
+        "obstacle_source set to the other value and compare",
     )
     print(line)
     return line, ok
@@ -2358,42 +2863,151 @@ async def _check_cost_against_workcell(world: WorldApi, run_label: str) -> tuple
 
 async def _run_pack(
     world: WorldApi,
+    gripper: Any,
+    motion: Any,
     palletizer: Any,
     sequencer: SequencerClient,
     run_label: str,
     obstacle_source_label: str,
+    overlay_path: Path,
 ) -> list[tuple[str, bool]]:
+    import json
+
     results: list[tuple[str, bool]] = []
 
     pack_order = await sequencer.pack_order()
     expected_seqs = sorted(placement.seq for placement in pack_order.placements)
+    boxes = overlay_pack_boxes(json.loads(overlay_path.read_text()))
+
+    # the cell as the previous run left it is not this run's starting point:
+    # the sequencer keeps its cursor across runs, so without a reset a second
+    # run answers `complete` at once with no records, and the boxes the last
+    # run packed are still stacked on the pallet for the restage to pull from.
+    print("\n-- reset: every box to its spawn position, cursor to seq 1 --")
+    reset_ok, reset_detail = await _reset_pack_cell(
+        world, gripper, motion, sequencer, boxes, expected_seqs
+    )
+    print(f"  reset {'ok' if reset_ok else 'INCOMPLETE'}: {reset_detail}")
+
+    # printed before the run, since a print after a run that hangs never comes
+    print("\n-- the sequencer's targets, in pick order --")
+    for placement in sorted(pack_order.placements, key=lambda p: p.seq):
+        target = placement.pose_in_world
+        print(
+            f"  seq {placement.seq}: layer {placement.layer} row {placement.row} "
+            f"col {placement.col} -> ({target.x:.1f}, {target.y:.1f}, {target.z:.1f}) mm"
+        )
 
     print("\n-- full pack run --")
-    status = await _run_full_pack(palletizer)
+    try:
+        status, _disturbances = await _run_full_pack(world, palletizer)
+    # the run itself failing is this run's own reading, and every item below
+    # still has something to say about the records it did make
+    except Exception as error:  # noqa: BLE001
+        print(f"  the pack run raised {type(error).__name__}: {error}")
+        status = {"state": f"raised {type(error).__name__}", "records": []}
     records = list(status.get("records", []))
 
     print("\n-- placement table --")
-    results.append(_check_placement_table(records, pack_order.quantity))
+    results.append(
+        await _guarded(
+            PACK_ITEMS[0], lambda: _now(_check_placement_table(records, pack_order.quantity))
+        )
+    )
 
     print("\n-- placement order vs get_pack_order --")
-    results.append(_check_pack_order(records, expected_seqs))
+    results.append(
+        await _guarded(PACK_ITEMS[1], lambda: _now(_check_pack_order(records, expected_seqs)))
+    )
 
     print("\n-- obstacle source --")
-    results.append(_check_obstacle_source(records, obstacle_source_label))
+    results.append(
+        await _guarded(
+            PACK_ITEMS[2], lambda: _now(_check_obstacle_source(records, obstacle_source_label))
+        )
+    )
 
     print("\n-- measured vs target delta --")
-    results.append(_check_measured_delta(records))
+    results.append(await _guarded(PACK_ITEMS[3], lambda: _now(_check_measured_delta(records))))
 
     print("\n-- skip on repeated failure --")
-    results.append(await _check_skip_handling(sequencer, str(status.get("state", ""))))
+    results.append(
+        await _guarded(
+            PACK_ITEMS[4],
+            lambda: _check_skip_handling(sequencer, str(status.get("state", ""))),
+        )
+    )
 
     print("\n-- cost vs the workcell suite --")
-    results.append(await _check_cost_against_workcell(world, run_label))
+    results.append(
+        await _guarded(PACK_ITEMS[5], lambda: _check_cost_against_workcell(world, run_label))
+    )
 
     print("\n== summary ==")
     for line, _ in results:
         print(line)
     return results
+
+
+async def _now(result: tuple[str, bool]) -> tuple[str, bool]:
+    """Wraps an already-computed verdict so a synchronous item runs inside
+    `_guarded` the way the awaited ones do."""
+    return result
+
+
+async def _reset_pack_cell(
+    world: WorldApi,
+    gripper: Any,
+    motion: Any,
+    sequencer: SequencerClient,
+    boxes: Sequence[tuple[str, tuple[float, float, float]]],
+    seqs: Sequence[int],
+) -> tuple[bool, str]:
+    """Puts the cell back to the state a fresh boot gives it, then reads back
+    whether it got there: cup empty, arm parked, every box at the position
+    the overlay spawns it at, the sequencer's cursor on seq 1 with every
+    measured transform cleared.
+
+    The read-back is not ceremony: `set_prop_pose` returns before physics has
+    moved the prop, and a box that landed on another one instead of its
+    spawn spot is what the service picks up next. Returns (ok, detail), where
+    a box off its spawn by more than PACK_RESET_TOLERANCE_MM makes ok False
+    and detail names it. The sequencer is reset either way, so the run that
+    follows starts at seq 1 and its records say what the cell did."""
+    await gripper.open()
+    try:
+        await _park_arm(world, gripper, motion)
+    except Exception as exc:  # noqa: BLE001 - a park that fails leaves the run to say what it cost
+        print(f"  arm could not be parked before the run: {exc!r}")
+
+    for name, position_mm in boxes:
+        await world.do_command(
+            {
+                "command": "set_prop_pose",
+                "name": name,
+                "position": list(position_mm),
+                "orientation_rpy_deg": [0.0, 0.0, 0.0],
+            }
+        )
+    await asyncio.sleep(RESET_SETTLE_S)
+    geometries = (await world.do_command({"command": "prop_geometries"}))["geometries"]
+    off_spawn: list[str] = []
+    for name, position_mm in boxes:
+        settled_mm = prop_pose_mm(geometries, name)
+        sent_mm = {"x": position_mm[0], "y": position_mm[1], "z": position_mm[2]}
+        delta_mm = math.inf if settled_mm is None else pose_delta_mm(sent_mm, settled_mm)
+        print(f"  {name} -> {list(position_mm)}: settled at {settled_mm}, off by {delta_mm:.1f} mm")
+        if delta_mm > PACK_RESET_TOLERANCE_MM:
+            off_spawn.append(name)
+
+    await sequencer.reset_cursor()
+    for seq in seqs:
+        await sequencer.clear_box_transform(seq)
+    print(f"  sequencer cursor reset, {len(seqs)} box transforms cleared")
+
+    if off_spawn:
+        return False, f"not at their spawn position: {off_spawn}"
+    return True, f"{len(boxes)} boxes at their spawn positions"
 
 
 async def _guarded(item: str, check: Callable[[], Awaitable[tuple[str, bool]]]) -> tuple[str, bool]:
@@ -2413,6 +3027,455 @@ async def _guarded(item: str, check: Callable[[], Awaitable[tuple[str, bool]]]) 
         line = verdict(item, False, f"raised {type(error).__name__}: {error}")
         print(line)
         return line, False
+
+
+async def _run_bounded_pack(
+    world: WorldApi, palletizer: Any, stop_after_seq: int | None, first_seq: int = 1
+) -> tuple[float, list[dict[str, Any]], str, dict[str, Disturbance]]:
+    """Runs one `box-palletizer` pack, bounded at `stop_after_seq` when
+    given, unbounded otherwise. Returns the wall time the run itself took
+    (no hold is slept here), the records it made, a one-line note of how
+    the run ended (`state` plus `reason` when the status carries one, or
+    the exception's type and name for a raise), and every disturbance the
+    run's own monitor found, catching a raise the same way `_run_pack`
+    does so the rest of the suite still has something to say about a run
+    that died partway. A caller with no records for a layer it needs to
+    judge prints this note rather than a bare `stack_verdict`
+    `ValueError`."""
+    start_command: dict[str, Any] = {"command": "start"}
+    if stop_after_seq is not None:
+        start_command["stop_after_seq"] = stop_after_seq
+    started_at = time.monotonic()
+    found: dict[str, Disturbance] = {}
+    try:
+        status, found = await _run_full_pack(world, palletizer, start_command, first_seq)
+        run_note = str(status.get("state"))
+        reason = status.get("reason")
+        if reason is not None:
+            run_note += f": {reason}"
+    except Exception as error:  # noqa: BLE001 - the records already made still have something to say
+        print(f"  the pack run raised {type(error).__name__}: {error}")
+        status = {"records": []}
+        run_note = f"{type(error).__name__}: {error}"
+    pack_s = time.monotonic() - started_at
+    return pack_s, list(status.get("records", [])), run_note, found
+
+
+async def _sample_hold(world: WorldApi, names: Sequence[str]) -> dict[str, list[Sample]]:
+    """Samples every name in `names` every `STACK_HOLD_SAMPLE_S` for
+    `STACK_HOLD_S`, one `prop_geometries` read per tick rather than one per
+    box, and returns each box's own `Sample` sequence for
+    `stack_stability.hold_excursion_mm` and a verdict's `after_hold_mm`. A
+    name absent from a reading samples None, the same way a vanished prop
+    fails `hold_excursion_mm` and a held verdict."""
+    hold_started_at = time.monotonic()
+    samples_by_name: dict[str, list[Sample]] = {name: [] for name in names}
+    elapsed_s = 0.0
+    while elapsed_s <= STACK_HOLD_S:
+        geometries = (await world.do_command({"command": "prop_geometries"}))["geometries"]
+        by_name = {str(geometry.get("name", "")): geometry for geometry in geometries}
+        for name in names:
+            geometry = by_name.get(name)
+            samples_by_name[name].append(
+                (elapsed_s, top_face_pose_mm(geometry) if geometry is not None else None)
+            )
+        await asyncio.sleep(STACK_HOLD_SAMPLE_S)
+        elapsed_s = time.monotonic() - hold_started_at
+    return samples_by_name
+
+
+def _no_placement_detail(judge_layer: int | None, run_note: str) -> str:
+    """Item 1, 2 and 3's detail when the layer being judged (or the whole
+    set, for `judge_layer=None`) has no placed record at all: the run that
+    should have made one, rather than a `stack_verdict` `ValueError` naming
+    an empty selection."""
+    layer_desc = "any layer" if judge_layer is None else f"layer {judge_layer}"
+    return f"no placed record for {layer_desc} (run: {run_note})"
+
+
+def _check_stack_settle(
+    item: str,
+    records: Sequence[Mapping[str, Any]],
+    layer_map: Mapping[int, int],
+    judge_layer: int,
+    run_note: str,
+) -> tuple[str, bool]:
+    """Items 1: one layer's placements judged at settle alone (no hold read
+    yet), printed as `stack_stability`'s own table. A layer with no placed
+    record fails without calling `stack_verdict` or printing a table,
+    naming the run behind `run_note` rather than the run's own error."""
+    placements = placements_from_records(records, layer_map)
+    if not any(placement.layer == judge_layer for placement in placements):
+        line = verdict(item, False, _no_placement_detail(judge_layer, run_note))
+        print(line)
+        return line, False
+    result = stack_verdict(placements, hold=False, layer=judge_layer)
+    print(format_stack_table(result))
+    line = verdict(
+        item,
+        result.held,
+        f"held={result.held} worst_error_mm={result.worst_error_mm:.2f} "
+        f"worst_tilt_deg={result.worst_tilt_deg:.1f}"
+        + (f"; failures: {'; '.join(result.failures)}" if result.failures else ""),
+    )
+    print(line)
+    return line, result.held
+
+
+def _check_stack_hold(
+    item: str,
+    records: Sequence[Mapping[str, Any]],
+    layer_map: Mapping[int, int],
+    samples_by_name: Mapping[str, Sequence[Sample]],
+    judge_layer: int | None,
+    run_note: str,
+) -> tuple[str, bool]:
+    """Items 2 and 3: every record passed in, read again after a hold, as
+    one table plus each box's own `hold_excursion_mm` beside it. The item's
+    own verdict judges `judge_layer` alone (0 for item 2's single layer,
+    1 for item 3's second layer on the first, None for "any layer"), so a
+    first layer that already drifted does not fail the second layer's own
+    reading. A judged layer with no placed record fails without calling
+    `stack_verdict` or printing a table, naming the run behind `run_note`
+    rather than the run's own error."""
+    after_hold_by_name = {name: samples[-1][1] for name, samples in samples_by_name.items()}
+    placements = placements_from_records(records, layer_map, after_hold_by_name)
+    judged_placements = [p for p in placements if judge_layer is None or p.layer == judge_layer]
+    if not judged_placements:
+        line = verdict(item, False, _no_placement_detail(judge_layer, run_note))
+        print(line)
+        return line, False
+    table_verdict = stack_verdict(placements, hold=True, layer=None)
+    print(format_stack_table(table_verdict))
+    for name, samples in samples_by_name.items():
+        print(f"  {name}: hold excursion {hold_excursion_mm(samples):.2f} mm")
+    judged = stack_verdict(placements, hold=True, layer=judge_layer)
+    line = verdict(
+        item,
+        judged.held,
+        f"held={judged.held} worst_error_mm={judged.worst_error_mm:.2f} "
+        f"worst_drift_mm={judged.worst_drift_mm:.2f} worst_tilt_deg={judged.worst_tilt_deg:.1f}"
+        + (f"; failures: {'; '.join(judged.failures)}" if judged.failures else ""),
+    )
+    print(line)
+    return line, judged.held
+
+
+def _check_stack_settle_times(item: str, records: Sequence[Mapping[str, Any]]) -> tuple[str, bool]:
+    """Item 4: the settle table for every record, ok once every box actually
+    settled (a None here is a box whose release never read stable)."""
+    rows = settle_table_rows(records)
+    print(format_settle_table(rows))
+    worst, median, none_count = _settle_stats(records)
+    ok = none_count == 0
+    worst_str = f"{worst:.2f}" if worst is not None else "-"
+    median_str = f"{median:.2f}" if median is not None else "-"
+    line = verdict(
+        item,
+        ok,
+        f"worst {worst_str} s, median {median_str} s, {none_count} of {len(rows)} never settled",
+    )
+    print(line)
+    return line, ok
+
+
+def _check_stack_baseline_row(
+    verdict_all: StackVerdict,
+    median_settle_s: float | None,
+    pack_seconds: float,
+    quantity: int,
+    placed: int,
+) -> tuple[str, bool]:
+    """Item 5 with no `--knobs`: this run's own all-eight result at the
+    shipped physics set, printed as the sweep table's own baseline row."""
+    row = knob_table_row(
+        "baseline", 0.0, verdict_all, median_settle_s, pack_seconds, quantity, placed
+    )
+    print(format_knob_table([row]))
+    line = verdict(
+        STACK_ITEM_KNOB_SWEEP,
+        True,
+        "no --knobs given: printed this run's own all-eight result at the shipped physics set",
+    )
+    print(line)
+    return line, True
+
+
+async def _run_stack_knob_sweep(
+    world: WorldApi,
+    gripper: Any,
+    motion: Any,
+    palletizer: Any,
+    sequencer: SequencerClient,
+    boxes: Sequence[tuple[str, tuple[float, float, float]]],
+    seqs: Sequence[int],
+    layer_map: Mapping[int, int],
+    knobs: Mapping[str, tuple[float, ...]],
+    quantity: int,
+) -> tuple[str, bool]:
+    """Item 5 with `--knobs`: every named knob swept one value at a time,
+    the rest of the cell left at the overlay's own physics, each variant's
+    own full pack, hold and verdict recorded as one row. A variant that
+    raises is recorded rather than ending the sweep, the same reasoning
+    `_guarded` uses for a whole item."""
+    names = [name for name, _position_mm in boxes]
+    rows: list[dict[str, Any]] = []
+    not_held: list[str] = []
+    errors: list[str] = []
+    total_variants = sum(len(values) for values in knobs.values())
+    for key, values in knobs.items():
+        restore_value = PALLETIZER_BOX_PHYSICS.get(key, STACK_KNOB_BASELINES.get(key))
+        for value in values:
+            for name in names:
+                await world.do_command(
+                    {"command": "set_prop_physics", "name": name, "physics": {key: value}}
+                )
+            try:
+                await _reset_pack_cell(world, gripper, motion, sequencer, boxes, seqs)
+                pack_s, records, run_note, _disturbances = await _run_bounded_pack(
+                    world, palletizer, None
+                )
+                await _park_arm(world, gripper, motion)
+                samples = await _sample_hold(world, names)
+                after_hold_by_name = {name: s[-1][1] for name, s in samples.items()}
+                placements = placements_from_records(records, layer_map, after_hold_by_name)
+                if not placements:
+                    errors.append(f"{key}={value}: did not complete: {run_note}")
+                else:
+                    stack_result = stack_verdict(placements, hold=True, layer=None)
+                    _worst, median_settle_s, _none_count = _settle_stats(records)
+                    placed = len(placed_seqs_in_order(records))
+                    rows.append(
+                        knob_table_row(
+                            key, value, stack_result, median_settle_s, pack_s, quantity, placed
+                        )
+                    )
+                    if not stack_result.held:
+                        not_held.append(f"{key}={value}: {'; '.join(stack_result.failures)}")
+            except Exception as error:  # noqa: BLE001 - one variant failing is still worth the rest
+                errors.append(f"{key}={value}: raised {type(error).__name__}: {error}")
+            finally:
+                if restore_value is not None:
+                    for name in names:
+                        await world.do_command(
+                            {
+                                "command": "set_prop_physics",
+                                "name": name,
+                                "physics": {key: restore_value},
+                            }
+                        )
+    print(format_knob_table(rows))
+    ok = not errors
+    detail = f"{len(rows)} of {total_variants} variant(s) completed"
+    detail += "; all held" if not not_held else f"; did not hold: {'; '.join(not_held)}"
+    if errors:
+        detail += f"; failed to complete: {'; '.join(errors)}"
+    return verdict(STACK_ITEM_KNOB_SWEEP, ok, detail), ok
+
+
+def _check_stack_sort_regression() -> tuple[str, bool]:
+    """Item 6: informational. This machine runs the palletizer overlay, not
+    the colour-sorting cell's, so the regression itself is not re-run here;
+    printed instead is the exact command and seed to run it with against
+    that cell's own deploy."""
+    detail = (
+        "human: this machine runs the palletizer config, not the colour-sorting cell's, so "
+        "run `python examples/gpu_checklist_photoreal.py --suite table` against the "
+        "colour-sorting cell's own deploy, with `block-sorter`'s `start` given `seed: 20`, "
+        "and confirm this run's physics changes did not regress it"
+    )
+    line = verdict(STACK_ITEM_SORT_REGRESSION, True, detail)
+    print(line)
+    return line, True
+
+
+async def _check_stack_cost(
+    world: WorldApi, run_label: str, pack_seconds: float
+) -> tuple[str, bool]:
+    """Item 7: pack seconds for this suite's own two runs (holds excluded)
+    against `PACK_BASELINE_S`, plus cost read the same way
+    `_check_cost_against_workcell` prints it."""
+    import json
+
+    ready = await sample_ready_time(world)
+    print(f"  [{run_label}] ready: {json.dumps(ready, default=str, sort_keys=True)}")
+    step_rate = await run_step_rate_measurement(world, window_s=DEFAULT_STEP_RATE_WINDOW_S)
+    print(f"  [{run_label}] step_rate: {json.dumps(step_rate, default=str, sort_keys=True)}")
+    sim_time_ratio = step_rate.get("baseline", {}).get("sim_time_ratio")
+    ratio = pack_seconds / PACK_BASELINE_S
+    line = verdict(
+        STACK_ITEM_COST,
+        True,
+        f"pack_s={pack_seconds:.1f} vs baseline {PACK_BASELINE_S:.1f} (ratio {ratio:.2f}); "
+        f"run_label={run_label} ready_time_s={ready['ready_time_s']} "
+        f"sim_time_ratio={sim_time_ratio}",
+    )
+    print(line)
+    return line, True
+
+
+async def _run_stack(
+    world: WorldApi,
+    gripper: Any,
+    motion: Any,
+    palletizer: Any,
+    sequencer: SequencerClient,
+    run_label: str,
+    overlay_path: Path,
+    knobs: Mapping[str, tuple[float, ...]],
+) -> list[tuple[str, bool]]:
+    import json
+
+    results: list[tuple[str, bool]] = []
+
+    pack_order = await sequencer.pack_order()
+    seqs = sorted(placement.seq for placement in pack_order.placements)
+    boxes = overlay_pack_boxes(json.loads(overlay_path.read_text()))
+    box_name_by_seq = {index + 1: name for index, (name, _position_mm) in enumerate(boxes)}
+    layer_map = layer_of_seq(pack_order)
+    layer0_cutoff = last_seq_of_layer(pack_order, 0)
+    layer0_names = [box_name_by_seq[seq] for seq in seqs if layer_map[seq] == 0]
+    all_names = [box_name_by_seq[seq] for seq in seqs]
+
+    print("\n-- reset: every box to its spawn position, cursor to seq 1 --")
+    reset_ok, reset_detail = await _reset_pack_cell(world, gripper, motion, sequencer, boxes, seqs)
+    print(f"  reset {'ok' if reset_ok else 'INCOMPLETE'}: {reset_detail}")
+
+    print("\n-- first layer pack run --")
+    pack_s_layer0, records_layer0, run_note_layer0, disturbances_layer0 = await _run_bounded_pack(
+        world, palletizer, layer0_cutoff
+    )
+    print("\n-- disturbances during the pack --")
+    print(format_disturbance_table(disturbances_layer0))
+
+    print("\n-- item 1: first layer at settle --")
+    results.append(
+        await _guarded(
+            STACK_ITEMS[0],
+            lambda: _now(
+                _check_stack_settle(STACK_ITEMS[0], records_layer0, layer_map, 0, run_note_layer0)
+            ),
+        )
+    )
+
+    has_layer0_record = any(layer_map.get(int(record["seq"])) == 0 for record in records_layer0)
+    if has_layer0_record:
+        await _park_arm(world, gripper, motion)
+        print(f"\n-- hold: {STACK_HOLD_S:.0f} s with the arm parked --")
+        samples_layer0 = await _sample_hold(world, layer0_names)
+    else:
+        print(
+            f"\n-- hold skipped: no layer-0 record from the first run (run: {run_note_layer0}) --"
+        )
+        samples_layer0 = {}
+
+    print("\n-- item 2: first layer after the hold --")
+    results.append(
+        await _guarded(
+            STACK_ITEMS[1],
+            lambda: _now(
+                _check_stack_hold(
+                    STACK_ITEMS[1], records_layer0, layer_map, samples_layer0, 0, run_note_layer0
+                )
+            ),
+        )
+    )
+
+    print("\n-- second layer pack run --")
+    pack_s_layer1, records_layer1, run_note_layer1, disturbances_layer1 = await _run_bounded_pack(
+        world, palletizer, None, layer0_cutoff + 1
+    )
+    print("\n-- disturbances during the pack --")
+    print(format_disturbance_table(disturbances_layer1))
+    all_records = records_layer0 + records_layer1
+
+    await _park_arm(world, gripper, motion)
+    print(f"\n-- second hold: {STACK_HOLD_S:.0f} s with the arm parked --")
+    samples_all = await _sample_hold(world, all_names)
+
+    print("\n-- item 3: second layer on the first --")
+    results.append(
+        await _guarded(
+            STACK_ITEMS[2],
+            lambda: _now(
+                _check_stack_hold(
+                    STACK_ITEMS[2], all_records, layer_map, samples_all, 1, run_note_layer1
+                )
+            ),
+        )
+    )
+
+    print("\n-- item 4: settle times --")
+    results.append(
+        await _guarded(
+            STACK_ITEMS[3], lambda: _now(_check_stack_settle_times(STACK_ITEMS[3], all_records))
+        )
+    )
+
+    pack_seconds = pack_s_layer0 + pack_s_layer1
+    print("\n-- item 5: physics knob sweep --")
+    if knobs:
+        results.append(
+            await _guarded(
+                STACK_ITEM_KNOB_SWEEP,
+                lambda: _run_stack_knob_sweep(
+                    world,
+                    gripper,
+                    motion,
+                    palletizer,
+                    sequencer,
+                    boxes,
+                    seqs,
+                    layer_map,
+                    knobs,
+                    pack_order.quantity,
+                ),
+            )
+        )
+    else:
+        after_hold_by_name = {name: samples[-1][1] for name, samples in samples_all.items()}
+        placements_all = placements_from_records(all_records, layer_map, after_hold_by_name)
+        if not placements_all:
+            # a pack that placed nothing has no baseline row to print, and
+            # the run's own error is the reading item 5 carries instead
+            line = verdict(
+                STACK_ITEM_KNOB_SWEEP, False, _no_placement_detail(None, run_note_layer1)
+            )
+            print(line)
+            results.append((line, False))
+        else:
+            verdict_all = stack_verdict(placements_all, hold=True, layer=None)
+            median_settle_s = _settle_stats(all_records)[1]
+            placed_all = len(placed_seqs_in_order(all_records))
+            results.append(
+                await _guarded(
+                    STACK_ITEM_KNOB_SWEEP,
+                    lambda: _now(
+                        _check_stack_baseline_row(
+                            verdict_all,
+                            median_settle_s,
+                            pack_seconds,
+                            pack_order.quantity,
+                            placed_all,
+                        )
+                    ),
+                )
+            )
+
+    print("\n-- item 6: colour-sorting regression --")
+    results.append(
+        await _guarded(STACK_ITEM_SORT_REGRESSION, lambda: _now(_check_stack_sort_regression()))
+    )
+
+    print("\n-- item 7: cost vs the previous closing pack --")
+    results.append(
+        await _guarded(STACK_ITEM_COST, lambda: _check_stack_cost(world, run_label, pack_seconds))
+    )
+
+    print("\n== summary ==")
+    for line, _ in results:
+        print(line)
+    return results
 
 
 async def _run_workcell(
@@ -3769,10 +4832,14 @@ class Args:
     run_label: str
     obstacle_source_label: str
     fragment: str
+    overlay: str
     grab_delay_ms: float
     retry_interval_s: float
     coaxial_limit_n: float
     items: frozenset[int] | None
+    # empty under every suite but stack, and under stack itself when no
+    # --knobs was given: item 5 prints its own baseline row instead of a sweep
+    knobs: dict[str, tuple[float, ...]]
 
 
 def _parse_items(value: str) -> frozenset[int]:
@@ -3832,7 +4899,7 @@ def _parse_args(argv: Sequence[str] | None) -> Args:
     parser.add_argument(
         "--suite",
         type=str,
-        choices=("first-box", "workcell", "epick", "pack"),
+        choices=("first-box", "workcell", "epick", "pack", "stack"),
         default="first-box",
         help="which suite's checklist items to run (default: first-box)",
     )
@@ -3882,11 +4949,28 @@ def _parse_args(argv: Sequence[str] | None) -> Args:
         "component frames",
     )
     parser.add_argument(
+        "--overlay",
+        default=str(Path(__file__).resolve().parent / "configs" / "sim-palletizer-cell.json"),
+        help="path to the sim overlay JSON, for the pack suite's pre-run reset: every box in "
+        "box-palletizer's box_props goes back to the position the overlay spawns it at",
+    )
+    parser.add_argument(
         "--items",
         type=_parse_items,
         default=None,
         help="comma-separated item numbers to run, the epick suite only (default: every item "
         "in the suite). An item not listed is skipped with no verdict line",
+    )
+    parser.add_argument(
+        "--knobs",
+        action="append",
+        type=parse_knob_spec,
+        default=None,
+        metavar="KEY=V1,V2",
+        help="the stack suite item 5 only: a physics knob (one of PROP_PHYSICS_KEYS) and the "
+        "values to sweep it over, one variable at a time against the overlay's own baseline "
+        "for every other knob. Repeatable, one per knob. Omitted, item 5 prints this run's own "
+        "all-eight result at the shipped physics set instead of a sweep",
     )
     ns = parser.parse_args(argv)
     # The first-box, workcell and epick suites drive the box directly and need
@@ -3929,10 +5013,12 @@ def _parse_args(argv: Sequence[str] | None) -> Args:
         run_label=ns.run_label,
         obstacle_source_label=ns.obstacle_source_label,
         fragment=ns.fragment,
+        overlay=ns.overlay,
         grab_delay_ms=ns.grab_delay_ms,
         retry_interval_s=ns.retry_interval_s,
         coaxial_limit_n=ns.coaxial_limit_n,
         items=ns.items,
+        knobs=dict(ns.knobs) if ns.knobs else {},
     )
 
 
@@ -3990,10 +5076,25 @@ async def _run_real(args: Args) -> None:
         if args.suite == "pack":
             await _run_pack(
                 world,
+                gripper,
+                motion,
                 palletizer,
                 sequencer,
                 args.run_label,
                 args.obstacle_source_label,
+                Path(args.overlay),
+            )
+            return
+        if args.suite == "stack":
+            await _run_stack(
+                world,
+                gripper,
+                motion,
+                palletizer,
+                sequencer,
+                args.run_label,
+                Path(args.overlay),
+                args.knobs,
             )
             return
         # the place target the flags name is not used by the first-box or

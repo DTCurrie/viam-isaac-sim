@@ -337,15 +337,20 @@ Each entry in `props` is an object:
 | `restitution` | unitless, in `[0, 1]` |
 | `contact_offset` | m, >= 0 |
 | `rest_offset` | m, >= 0, <= `contact_offset` when both are set |
+| `solver_position_iterations` | integer, `[1, 255]`, PhysX's per-body position solver iteration count |
+| `solver_velocity_iterations` | integer, `[1, 255]`, PhysX's per-body velocity solver iteration count |
 
 At most one of `orientation_rpy_deg` and `orientation_wxyz` may be set.
 Without `box_dims`, an unknown-size `"usd"` prop's `get_geometries` /
 `prop_geometries` box is all zero and it is skipped as an obstacle, see "Props
-and obstacles" in [`docs/BLOCK_SORTING.md`](docs/BLOCK_SORTING.md). The five physics
+and obstacles" in [`docs/BLOCK_SORTING.md`](docs/BLOCK_SORTING.md). The seven physics
 keys apply only when set. Otherwise Isaac's authored defaults are left alone.
 The shipped block-sorting cell sets `mass: 0.05, friction: 0.7, restitution: 0,
 contact_offset: 0.005` on the block and `friction: 0.7, restitution: 0` on the
-(fixed, so massless) place pad.
+(fixed, so massless) place pad. The palletizer overlay's boxes carry
+`PALLETIZER_BOX_PHYSICS` (`physics.py`), the named physics set for that cell.
+Both solver iteration counts are authored on the stage, so they are kept
+across a world reset.
 
 A `"visual"` prop is a referenced USD given a pose and a scale, with no
 collider and no rigid body. It never appears in `prop_geometries`,
@@ -392,9 +397,10 @@ copy in the module. The converted USD used on the GPU VM lives under
   paths)
 * `type` must be `"cube"`, `"usd"` or `"visual"`
 * `usd_path` is required when `type` is `"usd"` or `"visual"`
-* a `"visual"` prop rejects `size`, `color`, `fixed`, `box_dims`, `mass`,
-  `friction`, `restitution`, `contact_offset` and `rest_offset`, since it has
-  no collider and no rigid body
+* a `"visual"` prop rejects `size`, `color`, `fixed`, `box_dims` and every
+  physics key (`mass`, `friction`, `restitution`, `contact_offset`,
+  `rest_offset`, `solver_position_iterations`, `solver_velocity_iterations`),
+  since it has no collider and no rigid body
 * `scale` and `fit` are exclusive
 * `fit` must be `"true"` or `{"collider": "<name>"}` naming a `"cube"` prop in
   the same `props` list
@@ -428,6 +434,13 @@ The world also supports `DoCommand`:
   attribute...}}`, which spawns a prop at runtime
 * `{"command": "set_prop_pose", "name": "...", "position": [x,y,z] mm,
   "orientation_rpy_deg"?: [r,p,y] degrees}`, which moves an existing prop
+* `{"command": "set_prop_physics", "name": "...", "physics": {...any subset
+  of the physics keys...}}` -> `{"ok", "name", "physics"}`, the prop's
+  effective physics keys after the change. Applies live on the running sim,
+  validated against the prop's existing keys first, so a `rest_offset` above
+  its `contact_offset` is refused
+* `{"command": "prop_physics", "name": "..."}` -> `{"name", "physics"}`, the
+  prop's current physics keys. Read only
 * `{"command": "randomize_props", "names": [...], "region": [[x0,y0,z],
   [x1,y1,z]] mm, "seed": int, "min_separation"?: mm (default 150),
   "size_range_mm"?: [lo, hi] (applies to every named prop) or
@@ -461,6 +474,18 @@ The world also supports `DoCommand`:
   and damping, in PhysX order. Read only: nothing in this module authors
   them, so what comes back is the asset's own tuning, and a wrist that sags
   or swings under a payload is asking whether it is high enough for the cell
+* `{"command": "set_drive_gains", "name": "<arm component>", "gains":
+  {"<joint>": {"kp": number, "kd": number, "armature": number}}}` -> the same
+  table plus `armature`, after the change. Overrides the named joints' drive
+  live and keeps them across a world reset; the arm's `drive_gains` attribute
+  is the same thing from config. Stiffness and damping barely matter here,
+  since the UR assets' drives saturate at their force caps at any visible
+  error; armature is the knob that matters under a payload (see the
+  `drive_gains` attribute)
+* `{"command": "prim_attrs", "name": "<arm component>", "prim_path": "..."}`
+  -> `{"prim_path", "type", "schemas", "attrs", "children"}`, every authored
+  attribute of that prim and its children's names, for reading what a joint's
+  drive, limits and physics really are on the stage. Diagnostic and read only
 * `{"command": "prim_pose", "name": "<arm or base component>",
   "prim_path"?: "..."}` -> `{"prim_path", "position_mm", "quaternion_wxyz",
   "orientation_vector"}`, the world pose of a prim under the named component.
@@ -532,6 +557,7 @@ block of `size` 0.05 sits with its center at `z_top + 0.025`.
 | `end_effector_prim` | `<arm prim>/wrist_3_link` for UR assets, else unset | prim path whose pose is reported by `GetEndPosition`, converted to Viam's orientation-vector convention |
 | `move_timeout_sec` | `30` | deadline for a move to converge |
 | `max_vel_degs_per_sec` | _unset (drive's own limit)_ | default velocity cap for a move that carries no `MoveOptions` cap of its own, e.g. a real UR's `speed_degs_per_sec` |
+| `drive_gains` | _unset (the asset's own tuning)_ | per-joint drive overrides, any of `kp`, `kd` and `armature`, e.g. `{"wrist_2_joint": {"armature": 0.1}, "wrist_3_joint": {"armature": 0.1}}`, applied on build and kept across resets. The asset's tuning is for the arm carrying itself: with a 2 kg box jointed onto the cups the wrist drives go soft and a base swing outruns them, and 0.1 of armature on the two wrist joints is what keeps wrist 3 at its speed limit (measured 2026-09-24). The world's `set_drive_gains` command changes them live |
 | `kinematics_url` | _unset_ | SVA `.json` or `.urdf` (http(s):// or file://) for assets `GetKinematics` doesn't fetch automatically |
 
 **`GetEndPosition` reports the end effector's pose in the arm base frame.**

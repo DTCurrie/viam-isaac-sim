@@ -2,6 +2,7 @@ import importlib.util
 import math
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -625,6 +626,55 @@ def test_a_run_that_recorded_a_failed_pick_is_not_a_placement():
     # a run that ended before recording anything never placed a box either
     assert checklist.records_all_placed([]) is False
     assert checklist.records_all_placed(None) is False
+
+
+def _relayed_record(seq, relayed=0, props=0):
+    return {"seq": seq, "planner_obstacles": {"relayed": relayed, "props": props}}
+
+
+def test_relay_counts_ok_true_when_every_seq_after_the_first_relayed_under_the_store():
+    records = [
+        _relayed_record(1, relayed=0),
+        _relayed_record(2, relayed=1),
+        _relayed_record(3, relayed=2),
+    ]
+    ok, detail = checklist.relay_counts_ok(records, "world_state_store")
+    assert ok is True
+    assert "relayed per seq: 2=1, 3=2" == detail
+
+
+def test_relay_counts_ok_true_when_every_record_carries_props_under_prop_geometries():
+    records = [_relayed_record(1, props=1), _relayed_record(2, props=3)]
+    ok, detail = checklist.relay_counts_ok(records, "prop_geometries")
+    assert ok is True
+    assert "props per seq: 1=1, 2=3" == detail
+
+
+def test_relay_counts_ok_false_when_a_record_carries_no_planner_obstacles():
+    """A module on the machine that predates the relay never sets the field
+    at all, which reads as a hard failure rather than a zero count."""
+    records = [{"seq": 1}, _relayed_record(2, relayed=1)]
+    ok, detail = checklist.relay_counts_ok(records, "world_state_store")
+    assert ok is False
+    assert "predates the relay" in detail
+
+
+def test_relay_counts_ok_false_when_a_later_seq_relayed_nothing_under_the_store():
+    records = [
+        _relayed_record(1, relayed=0),
+        _relayed_record(2, relayed=1),
+        _relayed_record(3, relayed=0),
+    ]
+    ok, detail = checklist.relay_counts_ok(records, "world_state_store")
+    assert ok is False
+    assert "3=0" in detail
+
+
+def test_relay_counts_ok_false_when_a_record_relayed_no_props_under_prop_geometries():
+    records = [_relayed_record(1, props=1), _relayed_record(2, props=0)]
+    ok, detail = checklist.relay_counts_ok(records, "prop_geometries")
+    assert ok is False
+    assert "2=0" in detail
 
 
 def _record(
@@ -1780,3 +1830,720 @@ def test_wrist_fold_deg_is_zero_on_a_monotone_descent():
 def test_wrist_fold_deg_reads_a_78_degree_reversal():
     samples = [[0.0, 0.0, 0.0, joint, 0.0, 0.0] for joint in (90.0, 95.0, 87.2, 95.0)]
     assert checklist.wrist_fold_deg(samples) == pytest.approx(7.8, abs=1e-9)
+
+
+# --- the pack suite's pre-run reset -----------------------------------------
+
+_OVERLAY_PATH = _EXAMPLES_DIR / "configs" / "sim-palletizer-cell.json"
+_SEQUENCER_FIXTURE = Path(__file__).parent / "fixtures" / "pack-sequencer-responses.json"
+
+
+def test_overlay_pack_boxes_reads_every_box_prop_in_pick_order_in_mm():
+    import json
+
+    boxes = checklist.overlay_pack_boxes(json.loads(_OVERLAY_PATH.read_text()))
+
+    assert [name for name, _ in boxes] == [f"infeed_box_{i}" for i in range(1, 9)]
+    # box 1 at the infeed origin the overlay derives, the other seven parked at x -2000
+    assert boxes[0][1] == pytest.approx((400.0, -300.0, 270.0))
+    assert all(position[0] == pytest.approx(-2000.0) for _, position in boxes[1:])
+
+
+def test_overlay_pack_boxes_raises_when_a_listed_box_has_no_prop():
+    overlay = {
+        "components": [
+            {
+                "name": "isaac-world",
+                "attributes": {"props": [{"name": "infeed_box_1", "position": [0.4, -0.3, 0.27]}]},
+            }
+        ],
+        "services": [
+            {
+                "model": "viam:isaac-sim-devin:palletizer",
+                "attributes": {
+                    "world": "isaac-world",
+                    "box_props": ["infeed_box_1", "infeed_box_2"],
+                },
+            }
+        ],
+    }
+    with pytest.raises(ValueError, match="infeed_box_2"):
+        checklist.overlay_pack_boxes(overlay)
+
+
+def test_parse_args_pack_overlay_defaults_to_the_sim_overlay():
+    args = checklist._parse_args(
+        ["--address", "10.0.0.1", "--run-label", "cold", "--suite", "pack"]
+    )
+    assert Path(args.overlay) == _OVERLAY_PATH
+
+
+class _PackWorld:
+    """Records every command on a shared log. `prop_geometries` answers with
+    each box where the last `set_prop_pose` sent it, except the names in
+    `stuck`, which stay where they started, the way a box that landed on
+    another one does."""
+
+    def __init__(self, log, start_mm, stuck=()):
+        self.log = log
+        self._positions = {name: list(position) for name, position in start_mm.items()}
+        self._stuck = set(stuck)
+
+    async def do_command(self, command):
+        self.log.append(("world", dict(command)))
+        if command["command"] == "set_prop_pose" and command["name"] not in self._stuck:
+            self._positions[command["name"]] = list(command["position"])
+        if command["command"] == "prop_geometries":
+            return {
+                "geometries": [
+                    {
+                        "name": name,
+                        "pose_in_world_mm": {"x": p[0], "y": p[1], "z": p[2]},
+                        "fixed": False,
+                    }
+                    for name, p in self._positions.items()
+                ]
+            }
+        return {}
+
+
+class _PackSequencerResource:
+    """The sequencer's DoCommand surface answered from the recorded fixture."""
+
+    def __init__(self, log):
+        import json
+
+        self.log = log
+        self._fixture = json.loads(_SEQUENCER_FIXTURE.read_text())
+
+    async def do_command(self, command):
+        self.log.append(("sequencer", dict(command)))
+        ((name, _argument),) = command.items()
+        if name in self._fixture:
+            return self._fixture[name]
+        return {"acknowledged": True}
+
+
+class _PackPalletizer:
+    """`start`, then a `status` that is already `complete` with no records:
+    the shape a second run without a reset used to produce."""
+
+    def __init__(self, log):
+        self.log = log
+
+    async def do_command(self, command):
+        self.log.append(("palletizer", dict(command)))
+        if command["command"] == "start":
+            return {"ok": True, "state": "running"}
+        return {"state": "complete", "records": []}
+
+
+class _OpenableGripper:
+    def __init__(self):
+        self.opened = 0
+
+    async def open(self):
+        self.opened += 1
+
+
+_TWO_BOXES = [("infeed_box_1", (400.0, -300.0, 270.0)), ("infeed_box_2", (-2000.0, -900.0, 50.0))]
+_TWO_BOXES_PACKED = {"infeed_box_1": (48.0, 401.0, 300.0), "infeed_box_2": (250.0, 400.0, 300.0)}
+
+
+@pytest.fixture
+def _no_arm_park(monkeypatch):
+    parked = []
+
+    async def fake_park(world, gripper, motion):
+        parked.append(True)
+
+    monkeypatch.setattr(checklist, "_park_arm", fake_park)
+    monkeypatch.setattr(checklist, "RESET_SETTLE_S", 0.0)
+    return parked
+
+
+async def test_reset_pack_cell_puts_every_box_back_and_resets_the_sequencer(_no_arm_park):
+    from isaac_module.sequencer_client import SequencerClient, verb
+
+    log = []
+    world = _PackWorld(log, _TWO_BOXES_PACKED)
+    resource = _PackSequencerResource(log)
+    gripper = _OpenableGripper()
+
+    ok, detail = await checklist._reset_pack_cell(
+        world, gripper, None, SequencerClient(resource), _TWO_BOXES, [1, 2]
+    )
+
+    assert ok, detail
+    assert gripper.opened == 1
+    assert _no_arm_park == [True]
+    world_commands = [command for source, command in log if source == "world"]
+    assert [c["command"] for c in world_commands] == [
+        "set_prop_pose",
+        "set_prop_pose",
+        "prop_geometries",
+    ]
+    assert world_commands[0]["name"] == "infeed_box_1"
+    assert world_commands[0]["position"] == [400.0, -300.0, 270.0]
+    assert world_commands[0]["orientation_rpy_deg"] == [0.0, 0.0, 0.0]
+    assert [command for source, command in log if source == "sequencer"] == [
+        verb("reset_cursor"),
+        verb("clear_box_transform", {"seq": 1}),
+        verb("clear_box_transform", {"seq": 2}),
+    ]
+
+
+async def test_reset_pack_cell_names_a_box_that_did_not_land_and_still_resets_the_cursor(
+    _no_arm_park,
+):
+    from isaac_module.sequencer_client import SequencerClient, verb
+
+    log = []
+    world = _PackWorld(log, _TWO_BOXES_PACKED, stuck={"infeed_box_2"})
+    resource = _PackSequencerResource(log)
+
+    ok, detail = await checklist._reset_pack_cell(
+        world, _OpenableGripper(), None, SequencerClient(resource), _TWO_BOXES, [1, 2]
+    )
+
+    assert not ok
+    assert "infeed_box_2" in detail
+    assert "infeed_box_1" not in detail
+    assert ("sequencer", verb("reset_cursor")) in log
+
+
+async def test_run_pack_resets_before_start_and_every_item_still_answers(
+    _no_arm_park, monkeypatch, capsys
+):
+    """A run whose service answers `complete` with no records, the way the
+    second run of a day did before the reset existed: the reset comes before
+    `start`, and all six items still print a verdict rather than the first
+    failure ending the run."""
+    from isaac_module.sequencer_client import SequencerClient
+
+    async def fake_cost(world, run_label):
+        line = checklist.verdict(checklist.PACK_ITEMS[5], True, f"run_label={run_label}")
+        return line, True
+
+    monkeypatch.setattr(checklist, "_check_cost_against_workcell", fake_cost)
+
+    log = []
+    start_mm = {f"infeed_box_{i}": (0.0, 0.0, 0.0) for i in range(1, 9)}
+    world = _PackWorld(log, start_mm)
+    results = await checklist._run_pack(
+        world,
+        _OpenableGripper(),
+        None,
+        _PackPalletizer(log),
+        SequencerClient(_PackSequencerResource(log)),
+        "cold",
+        "world_state_store",
+        _OVERLAY_PATH,
+    )
+
+    assert len(results) == len(checklist.PACK_ITEMS)
+    assert [ok for _, ok in results[:4]] == [False, False, False, False]
+    assert results[5][1] is True
+
+    start_at = log.index(("palletizer", {"command": "start"}))
+    first_teleport = next(
+        i
+        for i, (source, c) in enumerate(log)
+        if source == "world" and c["command"] == "set_prop_pose"
+    )
+    cursor_reset = log.index(("sequencer", {"reset_cursor": True}))
+    assert first_teleport < start_at
+    assert cursor_reset < start_at
+    assert sum(1 for s, c in log if s == "world" and c["command"] == "set_prop_pose") == 8
+
+    out = capsys.readouterr().out
+    assert out.index("the sequencer's targets") < out.index("full pack run")
+    assert "seq 1: layer 0 row 0 col 0" in out
+
+
+# -- the stack suite's pure helpers --
+
+
+def test_stack_items_are_seven_entries_numbered_in_order():
+    assert len(checklist.STACK_ITEMS) == 7
+    for index, item in enumerate(checklist.STACK_ITEMS, start=1):
+        assert item.startswith(f"{index}.")
+
+
+def test_parse_knob_spec_parses_the_key_and_every_value():
+    key, values = checklist.parse_knob_spec("rest_offset=0.0,0.001,0.002")
+    assert key == "rest_offset"
+    assert values == (0.0, 0.001, 0.002)
+
+
+def test_parse_knob_spec_rejects_a_key_outside_prop_physics_keys():
+    with pytest.raises(ValueError, match="not one of"):
+        checklist.parse_knob_spec("warp_speed=1.0")
+
+
+def test_parse_knob_spec_rejects_a_non_numeric_value():
+    with pytest.raises(ValueError, match="non-numeric"):
+        checklist.parse_knob_spec("friction=0.5,fast")
+
+
+def test_parse_knob_spec_rejects_empty_values():
+    with pytest.raises(ValueError, match="names no values"):
+        checklist.parse_knob_spec("friction=")
+
+
+def test_layer_of_seq_maps_every_placement_to_its_own_layer():
+    pack_order = SimpleNamespace(
+        placements=[
+            SimpleNamespace(seq=1, layer=0),
+            SimpleNamespace(seq=2, layer=0),
+            SimpleNamespace(seq=3, layer=1),
+            SimpleNamespace(seq=4, layer=1),
+        ]
+    )
+    assert checklist.layer_of_seq(pack_order) == {1: 0, 2: 0, 3: 1, 4: 1}
+
+
+def test_last_seq_of_layer_is_the_highest_seq_in_that_layer():
+    pack_order = SimpleNamespace(
+        placements=[
+            SimpleNamespace(seq=1, layer=0),
+            SimpleNamespace(seq=2, layer=0),
+            SimpleNamespace(seq=3, layer=1),
+            SimpleNamespace(seq=4, layer=1),
+        ]
+    )
+    assert checklist.last_seq_of_layer(pack_order, 0) == 2
+    assert checklist.last_seq_of_layer(pack_order, 1) == 4
+
+
+def test_last_seq_of_layer_raises_for_a_layer_with_no_placements():
+    pack_order = SimpleNamespace(placements=[SimpleNamespace(seq=1, layer=0)])
+    with pytest.raises(ValueError, match="layer"):
+        checklist.last_seq_of_layer(pack_order, 5)
+
+
+def test_top_face_pose_mm_raises_the_centre_by_half_the_box_height():
+    geometry = {
+        "name": "infeed_box_1",
+        "pose_in_world_mm": {
+            "x": 10.0,
+            "y": 20.0,
+            "z": 30.0,
+            "o_x": 0.0,
+            "o_y": 0.0,
+            "o_z": 1.0,
+            "theta": 45.0,
+        },
+        "box_dims_mm": [194.0, 144.0, 100.0],
+    }
+    pose = checklist.top_face_pose_mm(geometry)
+    assert pose["x"] == pytest.approx(10.0)
+    assert pose["y"] == pytest.approx(20.0)
+    # a top face 50 mm above its centre: half of the 100 mm box height
+    assert pose["z"] == pytest.approx(80.0)
+    assert pose["o_z"] == pytest.approx(1.0)
+    assert pose["theta"] == pytest.approx(45.0)
+
+
+def test_box_target_pose_mm_flips_a_downward_tool_pose_to_an_upward_box_pose():
+    tool_pose = {
+        "x": 10.0,
+        "y": 20.0,
+        "z": 100.0,
+        "o_x": 0.0,
+        "o_y": 0.0,
+        "o_z": -1.0,
+        "theta": 45.0,
+    }
+    box_pose = checklist.box_target_pose_mm(tool_pose)
+    assert box_pose["x"] == pytest.approx(10.0)
+    assert box_pose["y"] == pytest.approx(20.0)
+    assert box_pose["z"] == pytest.approx(100.0)
+    assert box_pose["theta"] == pytest.approx(45.0)
+    assert box_pose["o_x"] == pytest.approx(0.0)
+    assert box_pose["o_y"] == pytest.approx(0.0)
+    assert box_pose["o_z"] == pytest.approx(1.0)
+
+
+def test_placements_from_records_flips_target_to_box_orientation_for_the_verdict():
+    # target_pose_mm is the sequencer's TOOL pose (o_z: -1); a box landed exactly where
+    # the tool sent it reads its own pose pointing the opposite way (o_z: 1). A verdict
+    # comparing them directly, with no flip, would read 180 degrees of tilt.
+    layer_map = {1: 0}
+    tool_pose = {"x": 0.0, "y": 0.0, "z": 100.0, "o_x": 0.0, "o_y": 0.0, "o_z": -1.0, "theta": 0.0}
+    box_pose = dict(tool_pose, o_z=1.0)
+    records = [
+        {
+            "seq": 1,
+            "box_prop": "box_1",
+            "target_pose_mm": tool_pose,
+            "measured_pose_mm": box_pose,
+        }
+    ]
+    placements = checklist.placements_from_records(records, layer_map)
+    result = checklist.stack_verdict(placements, hold=False, layer=0)
+    assert result.worst_tilt_deg == pytest.approx(0.0)
+    assert result.held is True
+
+
+def test_placements_from_records_none_measured_pose_becomes_none_at_settle():
+    layer_map = {1: 0}
+    records = [
+        {
+            "seq": 1,
+            "box_prop": "box_1",
+            "target_pose_mm": {"x": 0.0, "y": 0.0, "z": 100.0},
+            # no measured_pose_mm key at all: the box never registered a settled pose
+        }
+    ]
+    placements = checklist.placements_from_records(records, layer_map)
+    assert placements[0].at_settle_mm is None
+    assert placements[0].after_hold_mm is None
+    assert placements[0].settle_s is None
+
+
+def test_placements_from_records_reads_after_hold_by_name():
+    layer_map = {1: 0}
+    after_hold_pose = {"x": 1.0, "y": 2.0, "z": 3.0}
+    records = [
+        {
+            "seq": 1,
+            "box_prop": "box_1",
+            "target_pose_mm": {"x": 0.0, "y": 0.0, "z": 100.0},
+            "measured_pose_mm": {"x": 0.1, "y": 0.0, "z": 100.0},
+            "settle_s": 1.25,
+        }
+    ]
+    placements = checklist.placements_from_records(records, layer_map, {"box_1": after_hold_pose})
+    assert placements[0].after_hold_mm == after_hold_pose
+    assert placements[0].settle_s == pytest.approx(1.25)
+
+
+def test_placements_from_records_carries_layer_so_a_layer_is_judged_alone():
+    # box_1 (layer 0) is way off target; box_2 (layer 1) is dead on. A layer-1
+    # verdict that leaked box_1's error in would read held=False here, which
+    # is exactly what a broken layer assignment would produce.
+    layer_map = {1: 0, 2: 1}
+    # target_pose_mm is the sequencer's TOOL pose, pointing down onto the box (o_z: -1);
+    # a box that lands where the tool sent it reads its own pose pointing up (o_z: 1).
+    tool_pose = {"x": 0.0, "y": 0.0, "z": 100.0, "o_x": 0.0, "o_y": 0.0, "o_z": -1.0, "theta": 0.0}
+    box_pose = dict(tool_pose, o_z=1.0)
+    off_target_pose = dict(box_pose, x=500.0)
+    records = [
+        {
+            "seq": 1,
+            "box_prop": "box_1",
+            "target_pose_mm": tool_pose,
+            "measured_pose_mm": off_target_pose,
+        },
+        {
+            "seq": 2,
+            "box_prop": "box_2",
+            "target_pose_mm": tool_pose,
+            "measured_pose_mm": box_pose,
+        },
+    ]
+    placements = checklist.placements_from_records(records, layer_map)
+    assert [placement.layer for placement in placements] == [0, 1]
+
+    layer_zero_verdict = checklist.stack_verdict(placements, hold=False, layer=0)
+    assert layer_zero_verdict.held is False
+
+    layer_one_verdict = checklist.stack_verdict(placements, hold=False, layer=1)
+    assert layer_one_verdict.held is True
+
+
+def test_settle_table_rows_sorted_by_seq_with_settle_s_or_none():
+    records = [
+        {"seq": 2, "box_prop": "box_2", "settle_s": None},
+        {"seq": 1, "box_prop": "box_1", "settle_s": 0.85},
+    ]
+    rows = checklist.settle_table_rows(records)
+    assert rows == [
+        {"seq": 1, "box_prop": "box_1", "settle_s": 0.85},
+        {"seq": 2, "box_prop": "box_2", "settle_s": None},
+    ]
+
+
+def test_format_settle_table_prints_one_row_per_input_with_a_dash_for_none():
+    rows = [
+        {"seq": 1, "box_prop": "box_1", "settle_s": 0.85},
+        {"seq": 2, "box_prop": "box_2", "settle_s": None},
+    ]
+    table = checklist.format_settle_table(rows)
+    lines = table.splitlines()
+    # the policy line, the column header line, then one line per input row
+    assert len(lines) == 2 + len(rows)
+    assert f"tolerance {checklist.DEFAULT_SETTLE_POLICY.tolerance_mm}" in lines[0]
+    assert "box_1" in lines[2] and "0.85" in lines[2]
+    assert "box_2" in lines[3] and lines[3].rstrip().endswith("-")
+
+
+def test_check_stack_settle_with_no_records_fails_without_stack_verdict():
+    line, ok = checklist._check_stack_settle("item", [], {}, 0, "raised ValueError: boom")
+    assert ok is False
+    assert "no placed record for layer 0" in line
+    assert "raised ValueError: boom" in line
+
+
+def test_check_stack_hold_with_no_records_fails_for_any_layer():
+    line, ok = checklist._check_stack_hold("item", [], {}, {}, None, "raised ValueError: boom")
+    assert ok is False
+    assert "no placed record for any layer" in line
+    assert "raised ValueError: boom" in line
+
+
+def _fake_stack_verdict(
+    held: bool = True,
+    worst_error_mm: float = 1.0,
+    worst_drift_mm: float | None = 0.5,
+    worst_tilt_deg: float = 0.2,
+    failures: tuple[str, ...] = (),
+) -> "checklist.StackVerdict":
+    return checklist.StackVerdict(
+        held=held,
+        boxes=(),
+        worst_error_mm=worst_error_mm,
+        worst_drift_mm=worst_drift_mm,
+        worst_tilt_deg=worst_tilt_deg,
+        failures=failures,
+    )
+
+
+def test_knob_table_row_carries_the_variant_and_its_verdict():
+    result = _fake_stack_verdict(held=True, worst_error_mm=1.23, worst_drift_mm=0.45)
+    row = checklist.knob_table_row("rest_offset", 0.001, result, 0.9, 42.0, 8, 8)
+    assert row == {
+        "knob": "rest_offset",
+        "value": 0.001,
+        "held": True,
+        "worst_error_mm": 1.23,
+        "worst_drift_mm": 0.45,
+        "median_settle_s": 0.9,
+        "pack_s": 42.0,
+        "placed": 8,
+        "quantity": 8,
+    }
+
+
+def test_knob_table_row_held_is_false_for_four_of_eight_placed_even_when_the_verdict_held():
+    result = _fake_stack_verdict(held=True)
+    row = checklist.knob_table_row("rest_offset", 0.001, result, 0.9, 42.0, 8, 4)
+    assert row["held"] is False
+    assert row["placed"] == 4
+    assert row["quantity"] == 8
+
+
+def test_format_knob_table_prints_one_row_per_input():
+    rows = [
+        checklist.knob_table_row(
+            "rest_offset", 0.001, _fake_stack_verdict(held=True), 0.9, 42.0, 8, 8
+        ),
+        checklist.knob_table_row(
+            "friction", 0.4, _fake_stack_verdict(held=False), None, 50.0, 8, 8
+        ),
+    ]
+    table = checklist.format_knob_table(rows)
+    lines = table.splitlines()
+    assert len(lines) == 1 + len(rows)
+    assert "rest_offset" in lines[1] and "yes" in lines[1]
+    assert "friction" in lines[2] and "no" in lines[2] and "-" in lines[2]
+
+
+def test_format_knob_table_shows_the_placed_fraction_for_a_short_run():
+    row = checklist.knob_table_row(
+        "rest_offset", 0.001, _fake_stack_verdict(held=True), 0.9, 42.0, 8, 4
+    )
+    table = checklist.format_knob_table([row])
+    assert "4/8" in table
+    assert "no" in table.splitlines()[1]
+
+
+def test_parse_args_accepts_stack_with_two_knobs():
+    args = checklist._parse_args(
+        [
+            "--address",
+            "10.0.0.1",
+            "--run-label",
+            "cold",
+            "--suite",
+            "stack",
+            "--knobs",
+            "rest_offset=0.0,0.001",
+            "--knobs",
+            "friction=0.5,0.7",
+        ]
+    )
+    assert args.suite == "stack"
+    assert args.box_prop is None
+    assert args.knobs == {"rest_offset": (0.0, 0.001), "friction": (0.5, 0.7)}
+
+
+def test_parse_args_stack_defaults_to_no_knobs():
+    args = checklist._parse_args(
+        ["--address", "10.0.0.1", "--run-label", "cold", "--suite", "stack"]
+    )
+    assert args.knobs == {}
+
+
+def test_parse_args_rejects_a_bad_knob_spec():
+    with pytest.raises(SystemExit):
+        checklist._parse_args(
+            [
+                "--address",
+                "10.0.0.1",
+                "--run-label",
+                "cold",
+                "--suite",
+                "stack",
+                "--knobs",
+                "warp_speed=1.0",
+            ]
+        )
+
+
+# -- the disturbance monitor --
+
+
+def _top_face(x: float, y: float, z: float) -> dict[str, float]:
+    return {"x": x, "y": y, "z": z, "o_x": 0.0, "o_y": 0.0, "o_z": 1.0, "theta": 0.0}
+
+
+def test_disturbance_update_records_the_first_crossing_with_the_right_during_seq_and_at_utc():
+    known = {"box_a": (1, _top_face(0.0, 0.0, 0.0))}
+    found: dict[str, checklist.Disturbance] = {}
+
+    checklist.disturbance_update(
+        known,
+        {"box_a": _top_face(6.0, 0.0, 0.0)},
+        "2026-09-28T00:00:01+00:00",
+        3,
+        0.03,
+        found,
+    )
+
+    disturbance = found["box_a"]
+    assert disturbance.name == "box_a"
+    assert disturbance.seq == 1
+    assert disturbance.during_seq == 3
+    assert disturbance.at_utc == "2026-09-28T00:00:01+00:00"
+    assert disturbance.moved_mm == pytest.approx(6.0)
+    assert disturbance.max_mm == pytest.approx(6.0)
+
+
+def test_disturbance_update_raises_max_mm_on_a_later_reading_without_moving_at_utc_or_during_seq():
+    known = {"box_a": (1, _top_face(0.0, 0.0, 0.0))}
+    found: dict[str, checklist.Disturbance] = {}
+    checklist.disturbance_update(
+        known, {"box_a": _top_face(6.0, 0.0, 0.0)}, "2026-09-28T00:00:01+00:00", 3, 0.03, found
+    )
+
+    checklist.disturbance_update(
+        known, {"box_a": _top_face(524.0, 0.0, 0.0)}, "2026-09-28T00:00:31+00:00", 8, 0.03, found
+    )
+
+    disturbance = found["box_a"]
+    assert disturbance.at_utc == "2026-09-28T00:00:01+00:00"
+    assert disturbance.during_seq == 3
+    assert disturbance.moved_mm == pytest.approx(6.0)
+    assert disturbance.max_mm == pytest.approx(524.0)
+
+
+def test_disturbance_update_does_not_lower_max_mm_when_a_later_reading_is_smaller():
+    known = {"box_a": (1, _top_face(0.0, 0.0, 0.0))}
+    found: dict[str, checklist.Disturbance] = {}
+    checklist.disturbance_update(
+        known, {"box_a": _top_face(524.0, 0.0, 0.0)}, "2026-09-28T00:00:01+00:00", 3, 0.03, found
+    )
+
+    checklist.disturbance_update(
+        known, {"box_a": _top_face(6.0, 0.0, 0.0)}, "2026-09-28T00:00:31+00:00", 8, 0.03, found
+    )
+
+    assert found["box_a"].max_mm == pytest.approx(524.0)
+
+
+def test_disturbance_update_never_records_a_box_under_the_tolerance():
+    known = {"box_a": (1, _top_face(0.0, 0.0, 0.0))}
+    found: dict[str, checklist.Disturbance] = {}
+
+    checklist.disturbance_update(
+        known, {"box_a": _top_face(0.02, 0.0, 0.0)}, "2026-09-28T00:00:01+00:00", 3, 0.03, found
+    )
+
+    assert found == {}
+
+
+def test_disturbance_update_ignores_a_box_absent_from_the_reading():
+    known = {"box_a": (1, _top_face(0.0, 0.0, 0.0))}
+    found: dict[str, checklist.Disturbance] = {}
+
+    checklist.disturbance_update(known, {}, "2026-09-28T00:00:01+00:00", 3, 0.03, found)
+
+    assert found == {}
+
+
+def test_format_disturbance_table_prints_one_row_per_disturbance_in_time_order():
+    found = {
+        "near_row_2": checklist.Disturbance(
+            name="near_row_2",
+            seq=5,
+            during_seq=7,
+            at_utc="2026-09-28T00:00:31+00:00",
+            moved_mm=6.0,
+            max_mm=6.0,
+        ),
+        "near_row_1": checklist.Disturbance(
+            name="near_row_1",
+            seq=4,
+            during_seq=6,
+            at_utc="2026-09-28T00:00:11+00:00",
+            moved_mm=524.0,
+            max_mm=524.0,
+        ),
+    }
+
+    table = checklist.format_disturbance_table(found)
+
+    lines = table.splitlines()
+    assert len(lines) == 3
+    assert "near_row_1" in lines[1]
+    assert "near_row_2" in lines[2]
+
+
+def test_format_disturbance_table_prints_the_no_disturbance_line_for_none():
+    assert checklist.format_disturbance_table({}) == "no box left its settled pose during the pack"
+
+
+class _GeometryWorld:
+    """A `WorldApi` fake answering `prop_geometries` with one standing box."""
+
+    async def do_command(self, command):
+        return {
+            "geometries": [
+                {
+                    "name": "box_a",
+                    "box_dims_mm": [200.0, 150.0, 100.0],
+                    "pose_in_world_mm": _top_face(0.0, 0.0, -50.0),
+                }
+            ]
+        }
+
+
+def _tick(status, first_seq):
+    import asyncio
+
+    known = {"box_a": (1, _top_face(20.0, 0.0, 0.0))}
+    found: dict[str, checklist.Disturbance] = {}
+    asyncio.run(
+        checklist._check_for_disturbances(_GeometryWorld(), known, status, found, first_seq)
+    )
+    return found["box_a"].during_seq
+
+
+def test_the_monitor_names_the_absolute_seq_being_placed():
+    """A run resumed at seq 5 counts from 5, not from its own first record:
+    the table of 2026-10-01 read seq 6 and 7 as 2 and 3."""
+    assert _tick({"state": "running", "records": []}, 5) == 5
+    assert _tick({"state": "running", "records": [{"seq": 5.0}]}, 5) == 6
+    assert _tick({"state": "complete", "records": [{"seq": 8.0}]}, 5) is None
